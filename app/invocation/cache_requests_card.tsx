@@ -243,8 +243,8 @@ export default class CacheRequestsCardComponent extends React.Component<CacheReq
     const value = Number(event.target.value) as cache.GetCacheScoreCardRequest.OrderBy;
     // When changing the sort order, set direction according to a more useful
     // default, to save an extra click. Asc is more useful for start time; Desc
-    // is more useful for duration.
-    const desc = value === cache.GetCacheScoreCardRequest.OrderBy.ORDER_BY_DURATION;
+    // is more useful for duration and size.
+    const desc = value !== cache.GetCacheScoreCardRequest.OrderBy.ORDER_BY_START_TIME;
     router.setQuery({
       ...Object.fromEntries(this.props.search.entries()),
       sort: String(value),
@@ -339,7 +339,7 @@ export default class CacheRequestsCardComponent extends React.Component<CacheReq
                 {groupActionId === null && result.actionMnemonic}
               </TextLink>
             ) : (
-              result.actionId
+              <>{result.name ? result.name : result.actionId}</>
             )}
           </div>
         )}
@@ -375,9 +375,18 @@ export default class CacheRequestsCardComponent extends React.Component<CacheReq
             <b>Target</b> <span>{result.targetId}</span>
           </>
         )}
-        {result.actionMnemonic && (
+        {(result.actionMnemonic || result.actionId) && (
           <>
-            <b>Action</b> <span>{result.actionMnemonic}</span>
+            <b>Action</b> <span>{result.actionMnemonic || result.actionId}</span>
+          </>
+        )}
+        {result.name && (
+          <>
+            <b>File</b>{" "}
+            <span>
+              {result.pathPrefix ? result.pathPrefix + "/" : ""}
+              {result.name}
+            </span>
           </>
         )}
         <>
@@ -441,7 +450,7 @@ export default class CacheRequestsCardComponent extends React.Component<CacheReq
         <div className="results-table">
           <div className="row column-headers">
             {this.getGroupBy() !== cache.GetCacheScoreCardRequest.GroupBy.GROUP_BY_ACTION && (
-              <div className="name-column">Action</div>
+              <div className="name-column">Name</div>
             )}
             <div className="cache-type-column">Cache</div>
             <div className="status-column">Status</div>
