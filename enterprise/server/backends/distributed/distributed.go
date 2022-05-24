@@ -78,7 +78,6 @@ type peerInfo struct {
 type Cache struct {
 	local                interfaces.Cache
 	log                  log.Logger
-	doneHeartbeat        chan bool
 	peerMetadata         map[string]*peerInfo
 	hintedHandoffsMu     *sync.RWMutex
 	hintedHandoffsByPeer map[string]chan *hintedHandoffOrder
@@ -86,7 +85,9 @@ type Cache struct {
 	consistentHash       *consistent_hash.ConsistentHash
 	heartbeatChannel     *heartbeat.Channel
 	heartbeatMu          *sync.Mutex
-	shutDownChan         chan bool
+	shutdownMu           *sync.RWMutex
+	shutDownChan         chan struct{}
+	finishedShutdown     bool
 	isolation            *dcpb.Isolation
 	config               CacheConfig
 	zone                 string
@@ -139,9 +140,11 @@ func NewDistributedCache(env environment.Env, c interfaces.Cache, config CacheCo
 		consistentHash: chash,
 		isolation:      &dcpb.Isolation{},
 
-		heartbeatMu:  &sync.Mutex{},
-		shutDownChan: make(chan bool, 0),
-		peerMetadata: make(map[string]*peerInfo, 0),
+		heartbeatMu:      &sync.Mutex{},
+		shutdownMu:       &sync.RWMutex{},
+		shutDownChan:     nil,
+		finishedShutdown: true,
+		peerMetadata:     make(map[string]*peerInfo, 0),
 
 		hintedHandoffsMu:     &sync.RWMutex{},
 		hintedHandoffsByPeer: make(map[string]chan *hintedHandoffOrder, 0),
@@ -260,13 +263,13 @@ func (c *Cache) handleHintedHandoffs(peer string) {
 	}
 }
 
-func (c *Cache) heartbeatPeers() {
+func (c *Cache) heartbeatPeers(shutDownChan chan struct{}) {
 	ticker := time.NewTicker(c.config.RPCHeartbeatInterval)
 	defer ticker.Stop()
 	for {
 		select {
-		case <-c.shutDownChan:
-			break
+		case <-shutDownChan:
+			return
 		case <-ticker.C:
 			for _, peer := range c.consistentHash.GetItems() {
 				ctx, cancel := context.WithTimeout(context.Background(), time.Second)
@@ -281,10 +284,14 @@ func (c *Cache) heartbeatPeers() {
 }
 
 func (c *Cache) StartListening() {
-	if c.shutDownChan == nil {
-		c.shutDownChan = make(chan bool, 0)
+	c.shutdownMu.Lock()
+	defer c.shutdownMu.Unlock()
+
+	if c.finishedShutdown == false {
+		return
 	}
-	go c.heartbeatPeers()
+	c.shutDownChan = make(chan struct{}, 0)
+	go c.heartbeatPeers(c.shutDownChan)
 	go func() {
 		log.Infof("Distributed cache listening on %q", c.config.ListenAddr)
 		if c.heartbeatChannel != nil {
@@ -294,17 +301,23 @@ func (c *Cache) StartListening() {
 			log.Warningf("Unable to start cacheproxy: %s", err)
 		}
 	}()
+	c.finishedShutdown = false
 }
 
 func (c *Cache) Shutdown(ctx context.Context) error {
 	log.Infof("Distributed cache shutting down %q", c.config.ListenAddr)
+	c.shutdownMu.Lock()
+	defer c.shutdownMu.Unlock()
+	if c.finishedShutdown {
+		log.Printf("Already finished shutdown, returning early.")
+		return nil
+	}
+
 	if c.heartbeatChannel != nil {
 		c.heartbeatChannel.StopAdvertising()
 	}
-	if c.shutDownChan != nil {
-		close(c.shutDownChan)
-		c.shutDownChan = nil
-	}
+	close(c.shutDownChan)
+	c.finishedShutdown = true
 	return c.cacheProxy.Shutdown(ctx)
 }
 
