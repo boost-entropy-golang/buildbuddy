@@ -2,6 +2,7 @@ package flagutil
 
 import (
 	"flag"
+	"net/url"
 	"reflect"
 	"testing"
 
@@ -125,27 +126,27 @@ func TestGenerateYAMLTypeMapFromFlags(t *testing.T) {
 	flags.Float64("one.two.two_and_a_half.float64", 5.2, "")
 	Slice("one.two.three.struct_slice", []testStruct{{Field: 4, Meadow: "Great"}}, "")
 	flags.String("a.b.string", "xxx", "")
-	URLString("a.b.url", "https://www.example.com", "")
-	actual, err := GenerateYAMLTypeMapFromFlags()
+	URLFromString("a.b.url", "https://www.example.com", "")
+	actual, err := GenerateYAMLMapWithValuesFromFlags(getYAMLTypeForFlag, IgnoreFilter)
 	require.NoError(t, err)
 	expected := map[string]any{
-		"bool": reflect.TypeOf(false),
+		"bool": reflect.TypeOf((*bool)(nil)),
 		"one": map[string]any{
 			"two": map[string]any{
-				"int":          reflect.TypeOf(int(0)),
-				"string_slice": reflect.TypeOf(([]string)(nil)),
+				"int":          reflect.TypeOf((*int)(nil)),
+				"string_slice": reflect.TypeOf((*[]string)(nil)),
 				"two_and_a_half": map[string]any{
-					"float64": reflect.TypeOf(float64(0)),
+					"float64": reflect.TypeOf((*float64)(nil)),
 				},
 				"three": map[string]any{
-					"struct_slice": reflect.TypeOf(([]testStruct)(nil)),
+					"struct_slice": reflect.TypeOf((*[]testStruct)(nil)),
 				},
 			},
 		},
 		"a": map[string]any{
 			"b": map[string]any{
-				"string": reflect.TypeOf(""),
-				"url":    reflect.TypeOf(URLFlag("")),
+				"string": reflect.TypeOf((*string)(nil)),
+				"url":    reflect.TypeOf((*URLFlag)(nil)),
 			},
 		},
 	}
@@ -159,47 +160,47 @@ func TestBadGenerateYAMLTypeMapFromFlags(t *testing.T) {
 
 	flags.Int("one.two.int", 10, "")
 	flags.Int("one.two", 10, "")
-	_, err := GenerateYAMLTypeMapFromFlags()
+	_, err := GenerateYAMLMapWithValuesFromFlags(getYAMLTypeForFlag, IgnoreFilter)
 	require.Error(t, err)
 
 	flags = replaceFlagsForTesting(t)
 
 	flags.Int("one.two", 10, "")
 	flags.Int("one.two.int", 10, "")
-	_, err = GenerateYAMLTypeMapFromFlags()
+	_, err = GenerateYAMLMapWithValuesFromFlags(getYAMLTypeForFlag, IgnoreFilter)
 	require.Error(t, err)
 
 	flags = replaceFlagsForTesting(t)
 
 	flags.Var(&unsupportedFlagValue{}, "unsupported", "")
-	_, err = GenerateYAMLTypeMapFromFlags()
+	_, err = GenerateYAMLMapWithValuesFromFlags(getYAMLTypeForFlag, IgnoreFilter)
 	require.Error(t, err)
 
 }
 
 func TestRetypeAndFilterYAMLMap(t *testing.T) {
 	typeMap := map[string]any{
-		"bool": reflect.TypeOf(false),
+		"bool": reflect.TypeOf((*bool)(nil)),
 		"one": map[string]any{
 			"two": map[string]any{
-				"int":          reflect.TypeOf(int(0)),
-				"string_slice": reflect.TypeOf(([]string)(nil)),
+				"int":          reflect.TypeOf((*int)(nil)),
+				"string_slice": reflect.TypeOf((*[]string)(nil)),
 				"two_and_a_half": map[string]any{
-					"float64": reflect.TypeOf(float64(0)),
+					"float64": reflect.TypeOf((*float64)(nil)),
 				},
 				"three": map[string]any{
-					"struct_slice": reflect.TypeOf(([]testStruct)(nil)),
+					"struct_slice": reflect.TypeOf((*[]testStruct)(nil)),
 				},
 			},
 		},
 		"a": map[string]any{
 			"b": map[string]any{
-				"string": reflect.TypeOf(""),
-				"url":    reflect.TypeOf(URLFlag("")),
+				"string": reflect.TypeOf((*string)(nil)),
+				"url":    reflect.TypeOf((*URLFlag)(nil)),
 			},
 		},
 		"foo": map[string]any{
-			"bar": reflect.TypeOf(int64(0)),
+			"bar": reflect.TypeOf((*int64)(nil)),
 		},
 	}
 	yamlData := `
@@ -219,7 +220,7 @@ one:
         - field: 5
 a:
   b:
-    url: "www.example.com"
+    url: "http://www.example.com"
 foo: 7
 first:
   second:
@@ -247,7 +248,7 @@ first:
 		},
 		"a": map[string]any{
 			"b": map[string]any{
-				"url": URLFlag("www.example.com"),
+				"url": URLFlag(url.URL{Scheme: "http", Host: "www.example.com"}),
 			},
 		},
 	}
@@ -258,7 +259,7 @@ first:
 
 func TestBadRetypeAndFilterYAMLMap(t *testing.T) {
 	typeMap := map[string]any{
-		"bool": reflect.TypeOf(false),
+		"bool": reflect.TypeOf((*bool)(nil)),
 	}
 	yamlData := `
 bool: 7
@@ -294,7 +295,7 @@ func TestPopulateFlagsFromData(t *testing.T) {
 	flagABString := flags.String("a.b.string", "xxx", "")
 	flagABStructSlice := []testStruct{{Field: 7, Meadow: "Chimney"}}
 	SliceVar(&flagABStructSlice, "a.b.struct_slice", "")
-	flagABURL := URLString("a.b.url", "https://www.example.com", "")
+	flagABURL := URLFromString("a.b.url", "https://www.example.com", "")
 	yamlData := `
 bool: true
 one:
@@ -312,7 +313,7 @@ one:
         - field: 5
 a:
   b:
-    url: "www.example.com:8080"
+    url: "http://www.example.com:8080"
 foo: 7
 first:
   second:
@@ -328,7 +329,7 @@ first:
 	assert.Equal(t, []testStruct{{Field: 4, Meadow: "Great"}, {Field: 9, Meadow: "Eternal"}, {Field: 5}}, flagOneTwoThreeStructSlice)
 	assert.Equal(t, "xxx", *flagABString)
 	assert.Equal(t, []testStruct{{Field: 7, Meadow: "Chimney"}}, flagABStructSlice)
-	assert.Equal(t, "www.example.com:8080", *flagABURL)
+	assert.Equal(t, url.URL{Scheme: "http", Host: "www.example.com:8080"}, *flagABURL)
 }
 
 func TestBadPopulateFlagsFromData(t *testing.T) {
@@ -368,7 +369,7 @@ func TestPopulateFlagsFromYAML(t *testing.T) {
 	flagABString := flags.String("a.b.string", "xxx", "")
 	flagABStructSlice := []testStruct{{Field: 7, Meadow: "Chimney"}}
 	SliceVar(&flagABStructSlice, "a.b.struct_slice", "")
-	flagABURL := URLString("a.b.url", "https://www.example.com", "")
+	flagABURL := URLFromString("a.b.url", "https://www.example.com", "")
 	input := map[string]any{
 		"bool": false,
 		"one": map[string]any{
@@ -386,12 +387,15 @@ func TestPopulateFlagsFromYAML(t *testing.T) {
 			"b": map[string]any{
 				"string":       "",
 				"struct_slice": []testStruct{{Field: 9}},
-				"url":          URLFlag("https://www.example.com:8080"),
+				"url":          URLFlag(url.URL{Scheme: "https", Host: "www.example.com:8080"}),
 			},
 		},
 		"undefined": struct{}{}, // keys without with no corresponding flag name should be ignored.
 	}
-	err := PopulateFlagsFromYAMLMap(input)
+	node := &yaml.Node{}
+	err := node.Encode(input)
+	require.NoError(t, err)
+	err = PopulateFlagsFromYAMLMap(input, node)
 	require.NoError(t, err)
 
 	assert.Equal(t, false, *flagBool)
@@ -401,7 +405,7 @@ func TestPopulateFlagsFromYAML(t *testing.T) {
 	assert.Equal(t, []testStruct{{Field: 4, Meadow: "Great"}}, flagOneTwoThreeStructSlice)
 	assert.Equal(t, "", *flagABString)
 	assert.Equal(t, []testStruct{{Field: 7, Meadow: "Chimney"}, {Field: 9}}, flagABStructSlice)
-	assert.Equal(t, "https://www.example.com:8080", *flagABURL)
+	assert.Equal(t, url.URL{Scheme: "https", Host: "www.example.com:8080"}, *flagABURL)
 }
 
 func TestBadPopulateFlagsFromYAML(t *testing.T) {
@@ -409,16 +413,24 @@ func TestBadPopulateFlagsFromYAML(t *testing.T) {
 
 	flags := replaceFlagsForTesting(t)
 	flags.Var(&unsupportedFlagValue{}, "unsupported", "")
-	err := PopulateFlagsFromYAMLMap(map[string]any{
+	input := map[string]any{
 		"unsupported": 0,
-	})
+	}
+	node := &yaml.Node{}
+	err := node.Encode(input)
+	require.NoError(t, err)
+	err = PopulateFlagsFromYAMLMap(input, node)
 	require.Error(t, err)
 
 	flags = replaceFlagsForTesting(t)
 	flags.Bool("bool", false, "")
-	err = PopulateFlagsFromYAMLMap(map[string]any{
+	input = map[string]any{
 		"bool": 0,
-	})
+	}
+	node = &yaml.Node{}
+	err = node.Encode(input)
+	require.NoError(t, err)
+	err = PopulateFlagsFromYAMLMap(input, node)
 	require.Error(t, err)
 }
 
@@ -526,16 +538,20 @@ func TestSetValueForFlagName(t *testing.T) {
 	assert.Equal(t, "2", *flagString)
 
 	flags = replaceFlagsForTesting(t)
-	flagURL := URLString("url", "https://www.example.com", "")
-	err = SetValueForFlagName("url", "https://www.example.com:8080", map[string]struct{}{}, true, true)
+	flagURL := URLFromString("url", "https://www.example.com", "")
+	u, err := url.Parse("https://www.example.com:8080")
 	require.NoError(t, err)
-	assert.Equal(t, "https://www.example.com:8080", *flagURL)
+	err = SetValueForFlagName("url", *u, map[string]struct{}{}, true, true)
+	require.NoError(t, err)
+	assert.Equal(t, url.URL{Scheme: "https", Host: "www.example.com:8080"}, *flagURL)
 
 	flags = replaceFlagsForTesting(t)
-	flagURL = URLString("url", "https://www.example.com", "")
-	err = SetValueForFlagName("url", "https://www.example.com:8080", map[string]struct{}{"url": struct{}{}}, true, true)
+	flagURL = URLFromString("url", "https://www.example.com", "")
+	u, err = url.Parse("https://www.example.com:8080")
 	require.NoError(t, err)
-	assert.Equal(t, "https://www.example.com", *flagURL)
+	err = SetValueForFlagName("url", *u, map[string]struct{}{"url": struct{}{}}, true, true)
+	require.NoError(t, err)
+	assert.Equal(t, url.URL{Scheme: "https", Host: "www.example.com"}, *flagURL)
 
 	flags = replaceFlagsForTesting(t)
 	string_slice := make([]string, 2)
@@ -765,13 +781,38 @@ func TestFlagAlias(t *testing.T) {
 
 	flagString := flags.String("string", "test", "")
 	Alias[string]("string_alias", "string")
+	Alias[string]("string_alias2", "string")
+	Alias[string]("string_alias3", "string")
 	yamlData := `
 string: "woof"
+string_alias2: "moo"
+string_alias3: "oink"
 string_alias: "meow"
 `
 	err := PopulateFlagsFromData([]byte(yamlData))
 	require.NoError(t, err)
 	assert.Equal(t, "meow", *flagString)
+
+	flags = replaceFlagsForTesting(t)
+
+	flagStringSlice := Slice("string_slice", []string{"test"}, "")
+	Alias[[]string]("string_slice_alias", "string_slice")
+	Alias[[]string]("string_slice_alias2", "string_slice")
+	Alias[[]string]("string_slice_alias3", "string_slice")
+	yamlData = `
+string_slice:
+  - "woof"
+string_slice_alias2:
+  - "moo"
+string_slice_alias3:
+  - "oink"
+  - "ribbit"
+string_slice_alias:
+  - "meow"
+`
+	err = PopulateFlagsFromData([]byte(yamlData))
+	require.NoError(t, err)
+	assert.Equal(t, []string{"test", "woof", "moo", "oink", "ribbit", "meow"}, *flagStringSlice)
 
 	flags = replaceFlagsForTesting(t)
 
