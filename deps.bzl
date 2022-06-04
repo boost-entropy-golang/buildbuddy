@@ -924,16 +924,13 @@ def install_buildbuddy_dependencies(workspace_name = "buildbuddy"):
         sum = "h1:a5mlkVzth6W5A4fOsS3D2EO5BUmsJpcB+cRlLU7cSug=",
         version = "v2.7.1+incompatible",
     )
-
-    # Generated with ./tools/vendor.sh docker/docker 363e9a88a11be517d9e8c65c998ff56f774eb4dc
-    http_archive(
+    go_repository(
         name = "com_github_docker_docker",
-        sha256 = "358b4cdf0e2f11b7a99087e349b41d0f5a0a5b9da83b0ef0609ad08160bcd5f0",
-        strip_prefix = "moby-363e9a88a11be517d9e8c65c998ff56f774eb4dc",
-        urls = ["https://github.com/docker/docker/archive/363e9a88a11be517d9e8c65c998ff56f774eb4dc.zip"],
-        patches = ["@%s//buildpatches:com_github_docker_docker" % workspace_name],
-        patch_args = ["-s", "-p0"],
+        importpath = "github.com/docker/docker",
+        sum = "h1:Z6O9Nhsjv+ayUEeI1IojKbYcsGdgYSNqxe1s2MYzUhQ=",
+        version = "v20.10.7+incompatible",
     )
+
     go_repository(
         name = "com_github_docker_go_connections",
         importpath = "github.com/docker/go-connections",
@@ -4619,15 +4616,11 @@ def install_buildbuddy_dependencies(workspace_name = "buildbuddy"):
         sum = "h1:SC+c6A1qTFstO9qmB86mPV2IpYme/2ZoEQ0hrP+wo+Q=",
         version = "v0.0.0-20160811212531-371fbbdaa898",
     )
-
-    # Generated with ./tools/vendor.sh googleapis/google-api-go-client 9d43e7dc08e2598d4dcb661324c4877dfd63c4f9 google.golang.org/api org_golang_google_api
-    http_archive(
+    go_repository(
         name = "org_golang_google_api",
-        sha256 = "ff6530ad088bdaf5508cc5bc34d1939b5a5e41b9edfee24c4ca3299c82115e47",
-        strip_prefix = "google-api-go-client-9d43e7dc08e2598d4dcb661324c4877dfd63c4f9",
-        urls = ["https://github.com/googleapis/google-api-go-client/archive/9d43e7dc08e2598d4dcb661324c4877dfd63c4f9.zip"],
-        patches = ["@%s//buildpatches:org_golang_google_api" % workspace_name],
-        patch_args = ["-s", "-p0"],
+        importpath = "google.golang.org/api",
+        sum = "h1:ExR2D+5TYIrMphWgs5JCgwRhEDlPDXXrLwHHMgPHTXE=",
+        version = "v0.74.0",
     )
 
     go_repository(
