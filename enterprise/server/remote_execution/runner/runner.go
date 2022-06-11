@@ -40,6 +40,7 @@ import (
 	"github.com/buildbuddy-io/buildbuddy/server/util/alert"
 	"github.com/buildbuddy-io/buildbuddy/server/util/background"
 	"github.com/buildbuddy-io/buildbuddy/server/util/flagutil"
+	"github.com/buildbuddy-io/buildbuddy/server/util/lockingbuffer"
 	"github.com/buildbuddy-io/buildbuddy/server/util/log"
 	"github.com/buildbuddy-io/buildbuddy/server/util/perms"
 	"github.com/buildbuddy-io/buildbuddy/server/util/status"
@@ -201,6 +202,7 @@ type commandRunner struct {
 	// Stdout handle to read persistent WorkResponses from.
 	// N.B. This is a bufio.Reader to support ByteReader required by ReadUvarint.
 	stdoutReader *bufio.Reader
+	stderr       lockingbuffer.LockingBuffer
 	// Stops the persistent worker associated with this runner. If this is nil,
 	// there is no persistent worker associated.
 	stopPersistentWorker func() error
@@ -367,7 +369,7 @@ func (r *commandRunner) Run(ctx context.Context) *interfaces.CommandResult {
 		return r.sendPersistentWorkRequest(ctx, command)
 	}
 
-	return r.Container.Exec(ctx, command, nil, nil)
+	return r.Container.Exec(ctx, command, &container.ExecOpts{})
 }
 
 func (r *commandRunner) UploadOutputs(ctx context.Context, ioStats *espb.IOStats, actionResult *repb.ActionResult, cmdResult *interfaces.CommandResult) error {
@@ -481,7 +483,7 @@ func (r *commandRunner) cleanupCIRunner(ctx context.Context) error {
 	cleanupCmd := proto.Clone(r.task.GetCommand()).(*repb.Command)
 	cleanupCmd.Arguments = append(cleanupCmd.Arguments, "--shutdown_and_exit")
 
-	res := commandutil.Run(ctx, cleanupCmd, r.Workspace.Path(), nil /*=stdin*/, nil /*=stdout*/)
+	res := commandutil.Run(ctx, cleanupCmd, r.Workspace.Path(), &container.ExecOpts{})
 	return res.Error
 }
 
@@ -1339,14 +1341,23 @@ func (r *commandRunner) startPersistentWorker(command *repb.Command, workerArgs,
 
 	go func() {
 		defer close(workerTerminated)
-		res := r.Container.Exec(ctx, command, stdinReader, stdoutWriter)
-		stdinWriter.Close()
-		stdoutReader.Close()
+		defer stdinReader.Close()
+		defer stdoutWriter.Close()
+
+		opts := &container.ExecOpts{
+			Stdin:  stdinReader,
+			Stdout: stdoutWriter,
+			Stderr: &r.stderr,
+		}
+		res := r.Container.Exec(ctx, command, opts)
 		log.Debugf("Persistent worker exited with response: %+v, flagFiles: %+v, workerArgs: %+v", res, flagFiles, workerArgs)
 	}()
 }
 
 func (r *commandRunner) sendPersistentWorkRequest(ctx context.Context, command *repb.Command) *interfaces.CommandResult {
+	// Clear any stderr that might be associated with a previous request.
+	r.stderr.Reset()
+
 	result := &interfaces.CommandResult{
 		CommandDebugString: fmt.Sprintf("(persistentworker) %s", command.GetArguments()),
 		ExitCode:           commandutil.NoExitCode,
@@ -1389,7 +1400,9 @@ func (r *commandRunner) sendPersistentWorkRequest(ctx context.Context, command *
 	// Encode the work requests
 	err = r.marshalWorkRequest(requestProto, r.stdinWriter)
 	if err != nil {
-		result.Error = status.WrapError(err, "marshaling work request")
+		result.Error = status.UnavailableErrorf(
+			"failed to send persistent work request: %s\npersistent worker stderr:\n%s",
+			err, r.workerStderrDebugString())
 		return result
 	}
 
@@ -1397,7 +1410,9 @@ func (r *commandRunner) sendPersistentWorkRequest(ctx context.Context, command *
 	responseProto := &wkpb.WorkResponse{}
 	err = r.unmarshalWorkResponse(responseProto, r.stdoutReader)
 	if err != nil {
-		result.Error = status.WrapError(err, "unmarshaling work response")
+		result.Error = status.UnavailableErrorf(
+			"failed to read persistent work response: %s\npersistent worker stderr:\n%s",
+			err, r.workerStderrDebugString())
 		return result
 	}
 
@@ -1406,6 +1421,15 @@ func (r *commandRunner) sendPersistentWorkRequest(ctx context.Context, command *
 	result.ExitCode = int(responseProto.ExitCode)
 	r.doNotReuse = false
 	return result
+}
+
+func (r *commandRunner) workerStderrDebugString() string {
+	stderr, _ := r.stderr.ReadAll()
+	str := string(stderr)
+	if str == "" {
+		return "<empty>"
+	}
+	return str
 }
 
 func (r *commandRunner) marshalWorkRequest(requestProto *wkpb.WorkRequest, writer io.Writer) error {
