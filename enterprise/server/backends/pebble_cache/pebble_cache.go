@@ -40,6 +40,7 @@ var (
 	rootDirectory       = flag.String("cache.pebble.root_directory", "", "The root directory to store the database in.")
 	blockCacheSizeBytes = flag.Int64("cache.pebble.block_cache_size_bytes", 1000*megabyte, "How much ram to give the block cache")
 	migrateFromDiskDir  = flag.String("cache.pebble.migrate_from_disk_dir", "", "If set, attempt to migrate this disk dir to a new pebble cache")
+	forceAllowMigration = flag.Bool("cache.pebble.force_allow_migration", false, "If set, allow migrating into an existing pebble cache")
 	partitions          = flagtypes.Slice("cache.pebble.partitions", []disk.Partition{}, "")
 	partitionMappings   = flagtypes.Slice("cache.pebble.partition_mappings", []disk.PartitionMapping{}, "")
 )
@@ -103,18 +104,18 @@ func Register(env environment.Env) error {
 	if *rootDirectory == "" {
 		return nil
 	}
-	if env.GetCache() != nil {
-		log.Warning("A cache has already been registered, skipping registering pebble_cache.")
-		return nil
+	if err := disk.EnsureDirectoryExists(*rootDirectory); err != nil {
+		return err
 	}
 	migrateDir := ""
 	if *migrateFromDiskDir != "" {
 		// Ensure a pebble DB doesn't already exist if we are migrating.
+		// But allow anyway if forceAllowMigration was set.
 		desc, err := pebble.Peek(*rootDirectory, vfs.Default)
 		if err != nil {
 			return err
 		}
-		if desc.Exists {
+		if desc.Exists && !*forceAllowMigration {
 			log.Warningf("Pebble DB at %q already exists, cannot migrate from disk dir: %q", *rootDirectory, *migrateFromDiskDir)
 		} else {
 			migrateDir = *migrateFromDiskDir
@@ -187,6 +188,9 @@ func NewPebbleCache(env environment.Env, opts *Options) (*PebbleCache, error) {
 	if err := validateOpts(opts); err != nil {
 		return nil, err
 	}
+	if err := disk.EnsureDirectoryExists(opts.RootDirectory); err != nil {
+		return nil, err
+	}
 	ensureDefaultPartitionExists(opts)
 
 	c := pebble.NewCache(*blockCacheSizeBytes)
@@ -254,6 +258,9 @@ func (p *PebbleCache) MigrateFromDiskDir(diskDir string) error {
 				return err
 			}
 			batch = p.db.NewBatch()
+		}
+		if inserted%1e6 == 0 {
+			log.Printf("Pebble Cache: migration progress [%d files in %s]...", inserted, time.Since(start))
 		}
 	}
 	if batch.Count() > 0 {
@@ -443,17 +450,26 @@ func (p *PebbleCache) Delete(ctx context.Context, d *repb.Digest) error {
 	if err != nil {
 		return err
 	}
-	file, err := constants.FileKey(fileRecord)
-	if err != nil {
-		return err
+
+	iter := p.db.NewIter(nil /*default iterOptions*/)
+	defer iter.Close()
+
+	// First, lookup the FileMetadata. If it's not found, we don't have the file.
+	found := iter.SeekGE(fileMetadataKey)
+	if !found || bytes.Compare(fileMetadataKey, iter.Key()) != 0 {
+		return status.NotFoundErrorf("file %q not found", fileMetadataKey)
 	}
-	filePath := filepath.Join(p.blobDir(), string(file))
+	fileMetadata := &rfpb.FileMetadata{}
+	if err := proto.Unmarshal(iter.Value(), fileMetadata); err != nil {
+		return status.InternalErrorf("error reading file %q metadata", fileMetadataKey)
+	}
+	fp := filestore.FilePath(p.blobDir(), fileMetadata.GetStorageMetadata().GetFileMetadata())
 
 	if err := p.db.Delete(fileMetadataKey, &pebble.WriteOptions{Sync: false}); err != nil {
 		return err
 	}
 	p.clearAtime(fileMetadataKey)
-	return disk.DeleteFile(ctx, filePath)
+	return disk.DeleteFile(ctx, fp)
 }
 
 func (p *PebbleCache) Reader(ctx context.Context, d *repb.Digest, offset, limit int64) (io.ReadCloser, error) {
@@ -657,11 +673,7 @@ func (e *partitionEvictor) randomSample(iter *pebble.Iterator, k int) ([]*evicti
 		}
 		seen[string(iter.Key())] = struct{}{}
 
-		file, err := constants.FileKey(fileMetadata.GetFileRecord())
-		if err != nil {
-			return nil, err
-		}
-		filePath := filepath.Join(e.blobDir, string(file))
+		filePath := filestore.FilePath(e.blobDir, fileMetadata.GetStorageMetadata().GetFileMetadata())
 		fileMetadataKey := make([]byte, len(iter.Key()))
 		copy(fileMetadataKey, iter.Key())
 
@@ -746,6 +758,7 @@ func (e *partitionEvictor) evict(count int) error {
 			if err := e.deleteFile(sample); err != nil {
 				continue
 			}
+			log.Debugf("Evictor deleted file %q", sample.filePath)
 			evicted += 1
 			e.samplePool = append(e.samplePool[:i], e.samplePool[i+1:]...)
 			break
