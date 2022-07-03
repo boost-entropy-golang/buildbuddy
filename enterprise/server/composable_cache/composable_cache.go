@@ -49,11 +49,19 @@ func (c *ComposableCache) WithIsolation(ctx context.Context, cacheType interface
 
 func (c *ComposableCache) Contains(ctx context.Context, d *repb.Digest) (bool, error) {
 	outerExists, err := c.outer.Contains(ctx, d)
-	if err != nil && outerExists {
+	if err == nil && outerExists {
 		return outerExists, nil
 	}
 
 	return c.inner.Contains(ctx, d)
+}
+
+func (c *ComposableCache) Metadata(ctx context.Context, d *repb.Digest) (*interfaces.CacheMetadata, error) {
+	md, err := c.outer.Metadata(ctx, d)
+	if err == nil {
+		return md, nil
+	}
+	return c.inner.Metadata(ctx, d)
 }
 
 func (c *ComposableCache) FindMissing(ctx context.Context, digests []*repb.Digest) ([]*repb.Digest, error) {

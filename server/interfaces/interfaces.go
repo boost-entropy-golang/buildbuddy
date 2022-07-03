@@ -23,6 +23,7 @@ import (
 	hlpb "github.com/buildbuddy-io/buildbuddy/proto/health"
 	inpb "github.com/buildbuddy-io/buildbuddy/proto/invocation"
 	pepb "github.com/buildbuddy-io/buildbuddy/proto/publish_build_event"
+	qpb "github.com/buildbuddy-io/buildbuddy/proto/quota"
 	repb "github.com/buildbuddy-io/buildbuddy/proto/remote_execution"
 	rnpb "github.com/buildbuddy-io/buildbuddy/proto/runner"
 	scpb "github.com/buildbuddy-io/buildbuddy/proto/scheduler"
@@ -213,6 +214,11 @@ func (t CacheType) Prefix() string {
 	}
 }
 
+type CacheMetadata struct {
+	// Size of the cache contents (uncompressed).
+	SizeBytes int64
+}
+
 // Similar to a blobstore, a cache allows for reading and writing data, but
 // additionally it is responsible for deleting data that is past TTL to keep to
 // a manageable size.
@@ -225,6 +231,7 @@ type Cache interface {
 
 	// Normal cache-like operations.
 	Contains(ctx context.Context, d *repb.Digest) (bool, error)
+	Metadata(ctx context.Context, d *repb.Digest) (*CacheMetadata, error)
 	FindMissing(ctx context.Context, digests []*repb.Digest) ([]*repb.Digest, error)
 	Get(ctx context.Context, d *repb.Digest) ([]byte, error)
 	GetMulti(ctx context.Context, digests []*repb.Digest) (map[*repb.Digest][]byte, error)
@@ -575,6 +582,10 @@ type Runner interface {
 	//
 	// It populates the upload stat fields in the given IOStats.
 	UploadOutputs(ctx context.Context, ioStats *repb.IOStats, ar *repb.ActionResult, cr *CommandResult) error
+
+	// GetIsolationType returns the runner's effective isolation type as a
+	// string, such as "none" or "podman".
+	GetIsolationType() string
 }
 
 // Pool is responsible for assigning tasks to runners.
@@ -597,7 +608,7 @@ type RunnerPool interface {
 	//
 	// The returned runner is ready to execute tasks, and the caller is
 	// responsible for walking the runner through the task lifecycle.
-	Get(ctx context.Context, task *repb.ExecutionTask) (Runner, error)
+	Get(ctx context.Context, task *repb.ScheduledTask) (Runner, error)
 
 	// TryRecycle attempts to add the runner to the pool for use by subsequent
 	// tasks.
@@ -827,4 +838,9 @@ type QuotaManager interface {
 	// If the rate limit has not been exceeded, the underlying storage is updated
 	// by the supplied quantity.
 	Allow(ctx context.Context, namespace string, quantity int64) (bool, error)
+
+	GetNamespace(ctx context.Context, req *qpb.GetNamespaceRequest) (*qpb.GetNamespaceResponse, error)
+	RemoveNamespace(ctx context.Context, req *qpb.RemoveNamespaceRequest) (*qpb.RemoveNamespaceResponse, error)
+	ApplyBucket(ctx context.Context, req *qpb.ApplyBucketRequest) (*qpb.ApplyBucketResponse, error)
+	ModifyNamespace(ctx context.Context, req *qpb.ModifyNamespaceRequest) (*qpb.ModifyNamespaceResponse, error)
 }

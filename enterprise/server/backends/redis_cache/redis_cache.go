@@ -55,7 +55,7 @@ func Register(env environment.Env) error {
 		return nil
 	}
 	if env.GetCache() == nil {
-		return status.FailedPreconditionErrorf("Redis layer requires a base cache; but one was not configured; please also enable a gcs/s3/disk cache")
+		return status.FailedPreconditionErrorf("Redis requires a base cache but one was not configured: please also enable a base cache")
 	}
 	rc, err := redisutil.NewClientWithOpts(opts, env.GetHealthChecker(), "cache_redis")
 	if err != nil {
@@ -155,6 +155,25 @@ func (c *Cache) Contains(ctx context.Context, d *repb.Digest) (bool, error) {
 	found, err := c.rdb.Expire(ctx, key, ttl).Result()
 	timer.ObserveContains(err)
 	return found, err
+}
+
+func (c *Cache) Metadata(ctx context.Context, d *repb.Digest) (*interfaces.CacheMetadata, error) {
+	key, err := c.key(ctx, d)
+	if err != nil {
+		return nil, err
+	}
+	found, err := c.rdb.Expire(ctx, key, ttl).Result()
+	if err != nil {
+		return nil, err
+	}
+	if !found {
+		return nil, status.NotFoundErrorf("Digest '%s/%d' not found in cache", d.GetHash(), d.GetSizeBytes())
+	}
+	blobLen, err := c.rdb.StrLen(ctx, key).Result()
+	if err != nil {
+		return nil, err
+	}
+	return &interfaces.CacheMetadata{SizeBytes: blobLen}, nil
 }
 
 func update(old, new map[string]bool) {

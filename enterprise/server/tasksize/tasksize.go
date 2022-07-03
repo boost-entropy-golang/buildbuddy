@@ -68,12 +68,6 @@ const (
 
 	// Redis key prefix used for holding current task size estimates.
 	redisKeyPrefix = "taskSize"
-
-	// When using measured task sizes, multiply the last measured peak memory
-	// usage by this much in order to determine effective the memory estimate.
-	// This allows some wiggle room for new tasks to use more memory than the
-	// previously recorded task.
-	measuredSizeMemoryMultiplier = 1.10
 )
 
 // Register registers the task sizer with the env.
@@ -103,23 +97,38 @@ func NewSizer(env environment.Env) (*taskSizer, error) {
 }
 
 func (s *taskSizer) Estimate(ctx context.Context, task *repb.ExecutionTask) *scpb.TaskSize {
-	defaultSize := Estimate(task)
+	initialEstimate := Estimate(task)
 	if !*useMeasuredSizes {
-		return defaultSize
+		return initialEstimate
+	}
+	props := platform.ParseProperties(task)
+	if props.EstimatedComputeUnits != 0 {
+		return initialEstimate
+	}
+	// TODO(bduffany): Remove or hide behind a dev-only flag once measured task sizing
+	// is battle-tested.
+	if props.DisableMeasuredTaskSize {
+		return initialEstimate
+	}
+	// Don't use measured task sizes for Firecracker tasks for now, since task
+	// sizes are used as hard limits on allowed resources.
+	if props.WorkloadIsolationType == string(platform.FirecrackerContainerType) {
+		return initialEstimate
 	}
 	recordedSize, err := s.lastRecordedSize(ctx, task)
 	if err != nil {
 		log.CtxWarningf(ctx, "Failed to read task size from Redis; falling back to default size estimate: %s", err)
-		return defaultSize
+		return initialEstimate
 	}
 	if recordedSize == nil {
 		// TODO: return a value indicating "unsized" here, and instead let the
 		// executor run this task once to estimate the size.
-		return defaultSize
+		return initialEstimate
 	}
 	return &scpb.TaskSize{
-		EstimatedMemoryBytes: int64(float64(recordedSize.EstimatedMemoryBytes) * measuredSizeMemoryMultiplier),
-		EstimatedMilliCpu:    recordedSize.EstimatedMilliCpu,
+		EstimatedMemoryBytes:   recordedSize.EstimatedMemoryBytes,
+		EstimatedMilliCpu:      recordedSize.EstimatedMilliCpu,
+		EstimatedFreeDiskBytes: initialEstimate.EstimatedFreeDiskBytes,
 	}
 }
 
@@ -245,7 +254,8 @@ func testSize(testSize string) (int64, int64) {
 	return int64(mb * 1e6), int64(cpu)
 }
 
-// Estimate returns the default task size estimate for a task. It does not use
+// Estimate returns the default task size estimate for a task. It respects hints
+// from the task such as test size and estimated compute units, but does not use
 // information about historical task executions.
 func Estimate(task *repb.ExecutionTask) *scpb.TaskSize {
 	props := platform.ParseProperties(task)

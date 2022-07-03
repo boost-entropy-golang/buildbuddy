@@ -52,12 +52,13 @@ const (
 )
 
 var (
-	rootDirectory     = flag.String("cache.disk.root_directory", "/tmp/buildbuddy_cache", "The root directory to store all blobs in, if using disk based storage.")
+	rootDirectory     = flag.String("cache.disk.root_directory", "", "The root directory to store all blobs in, if using disk based storage.")
 	partitions        = flagtypes.Slice("cache.disk.partitions", []disk.Partition{}, "")
 	partitionMappings = flagtypes.Slice("cache.disk.partition_mappings", []disk.PartitionMapping{}, "")
 	useV2Layout       = flag.Bool("cache.disk.use_v2_layout", false, "If enabled, files will be stored using the v2 layout. See disk_cache.MigrateToV2Layout for a description.")
 
 	migrateDiskCacheToV2AndExit = flag.Bool("migrate_disk_cache_to_v2_and_exit", false, "If true, attempt to migrate disk cache to v2 layout.")
+	enableLiveUpdates           = flag.Bool("cache.disk.enable_live_updates", false, "If set, enable live updates of disk cache adds / removes")
 )
 
 type Options struct {
@@ -149,6 +150,10 @@ type DiskCache struct {
 	env               environment.Env
 	partitions        map[string]*partition
 	partitionMappings []disk.PartitionMapping
+
+	addChan    chan *rfpb.FileMetadata
+	removeChan chan *rfpb.FileMetadata
+
 	// The currently selected partition. Initialized to the default partition.
 	// WithRemoteInstanceName can create a new cache accessor with a different selected partition.
 	partition          *partition
@@ -161,8 +166,7 @@ func Register(env environment.Env) error {
 		return nil
 	}
 	if env.GetCache() != nil {
-		log.Warning("A cache has already been registered, skipping registering disk_cache.")
-		return nil
+		log.Warningf("Overriding configured cache with disk_cache.")
 	}
 	dc := &Options{
 		RootDirectory:     *rootDirectory,
@@ -187,6 +191,18 @@ func NewDiskCache(env environment.Env, opts *Options, defaultMaxSizeBytes int64)
 		os.Exit(0)
 	}
 
+	c := &DiskCache{
+		env:                env,
+		partitionMappings:  opts.PartitionMappings,
+		cacheType:          interfaces.CASCacheType,
+		remoteInstanceName: "",
+	}
+
+	if *enableLiveUpdates {
+		c.addChan = make(chan *rfpb.FileMetadata, 1000)
+		c.removeChan = make(chan *rfpb.FileMetadata, 1000)
+	}
+
 	partitions := make(map[string]*partition)
 	var defaultPartition *partition
 	for _, pc := range opts.Partitions {
@@ -202,7 +218,7 @@ func NewDiskCache(env environment.Env, opts *Options, defaultMaxSizeBytes int64)
 			rootDir = filepath.Join(rootDir, PartitionDirectoryPrefix+pc.ID)
 		}
 
-		p, err := newPartition(pc.ID, rootDir, pc.MaxSizeBytes, opts.UseV2Layout)
+		p, err := newPartition(pc.ID, rootDir, pc.MaxSizeBytes, opts.UseV2Layout, c.addChan, c.removeChan)
 		if err != nil {
 			return nil, err
 		}
@@ -216,7 +232,7 @@ func NewDiskCache(env environment.Env, opts *Options, defaultMaxSizeBytes int64)
 		if opts.UseV2Layout {
 			rootDir = filepath.Join(rootDir, V2Dir, PartitionDirectoryPrefix+DefaultPartitionID)
 		}
-		p, err := newPartition(DefaultPartitionID, rootDir, defaultMaxSizeBytes, opts.UseV2Layout)
+		p, err := newPartition(DefaultPartitionID, rootDir, defaultMaxSizeBytes, opts.UseV2Layout, c.addChan, c.removeChan)
 		if err != nil {
 			return nil, err
 		}
@@ -224,16 +240,29 @@ func NewDiskCache(env environment.Env, opts *Options, defaultMaxSizeBytes int64)
 		partitions[DefaultPartitionID] = p
 	}
 
-	c := &DiskCache{
-		env:                env,
-		partitions:         partitions,
-		partitionMappings:  opts.PartitionMappings,
-		partition:          defaultPartition,
-		cacheType:          interfaces.CASCacheType,
-		remoteInstanceName: "",
+	c.partitions = partitions
+	c.partition = defaultPartition
+
+	if *enableLiveUpdates {
+		c.env.GetHealthChecker().RegisterShutdownFunction(func(ctx context.Context) error {
+			for _, p := range c.partitions {
+				p.mu.Lock()
+				p.addChan = nil
+				p.removeChan = nil
+				p.mu.Unlock()
+			}
+			close(c.addChan)
+			close(c.removeChan)
+			return nil
+		})
 	}
+
 	statusz.AddSection("disk_cache", "On disk LRU cache", c)
 	return c, nil
+}
+
+func (c *DiskCache) LiveUpdatesChan() (<-chan *rfpb.FileMetadata, <-chan *rfpb.FileMetadata) {
+	return c.addChan, c.removeChan
 }
 
 func (c *DiskCache) getPartition(ctx context.Context, remoteInstanceName string) (*partition, error) {
@@ -282,7 +311,19 @@ func (c *DiskCache) Statusz(ctx context.Context) string {
 }
 
 func (c *DiskCache) Contains(ctx context.Context, d *repb.Digest) (bool, error) {
-	return c.partition.contains(ctx, c.cacheType, c.remoteInstanceName, d)
+	contains, _, err := c.partition.contains(ctx, c.cacheType, c.remoteInstanceName, d)
+	return contains, err
+}
+
+func (c *DiskCache) Metadata(ctx context.Context, d *repb.Digest) (*interfaces.CacheMetadata, error) {
+	contains, sizeBytes, err := c.partition.contains(ctx, c.cacheType, c.remoteInstanceName, d)
+	if err != nil {
+		return nil, err
+	}
+	if !contains {
+		return nil, status.NotFoundErrorf("Digest '%s/%d' not found in cache", d.GetHash(), d.GetSizeBytes())
+	}
+	return &interfaces.CacheMetadata{SizeBytes: sizeBytes}, nil
 }
 
 func (c *DiskCache) FindMissing(ctx context.Context, digests []*repb.Digest) ([]*repb.Digest, error) {
@@ -340,9 +381,11 @@ type partition struct {
 	lastGCTime       time.Time
 	stringLock       sync.RWMutex
 	internedStrings  map[string]string
+	addChan          chan *rfpb.FileMetadata
+	removeChan       chan *rfpb.FileMetadata
 }
 
-func newPartition(id string, rootDir string, maxSizeBytes int64, useV2Layout bool) (*partition, error) {
+func newPartition(id string, rootDir string, maxSizeBytes int64, useV2Layout bool, addChan, removeChan chan *rfpb.FileMetadata) (*partition, error) {
 	p := &partition{
 		id:               id,
 		useV2Layout:      useV2Layout,
@@ -351,6 +394,8 @@ func newPartition(id string, rootDir string, maxSizeBytes int64, useV2Layout boo
 		fileChannel:      make(chan *fileRecord),
 		internedStrings:  make(map[string]string, 0),
 		doneAsyncLoading: make(chan struct{}),
+		addChan:          addChan,
+		removeChan:       removeChan,
 	}
 	l, err := lru.NewLRU(&lru.Config{MaxSize: maxSizeBytes, OnEvict: p.evictFn, SizeFn: sizeFn})
 	if err != nil {
@@ -469,8 +514,9 @@ func (p *partition) reduceCacheSize(targetSize int64) bool {
 	if !ok {
 		return false // should never happen
 	}
-	if f, ok := value.(*fileRecord); ok {
-		log.Debugf("Delete thread removed item from cache. Last use was: %d", f.lastUse)
+	if fr, ok := value.(*fileRecord); ok {
+		log.Debugf("Delete thread removed item from cache. Last use was: %d", fr.lastUse)
+		p.liveRemove(fr)
 	}
 	p.lastGCTime = time.Now()
 	return true
@@ -542,6 +588,9 @@ func (p *partition) initializeCache() error {
 				return nil
 			}
 			records = append(records, fileRecord)
+			if len(records)%1e6 == 0 {
+				log.Printf("Disk Cache: progress: scanned %d files in %s...", len(records), time.Since(start))
+			}
 			return nil
 		}
 		if err := filepath.WalkDir(p.rootDir, walkFn); err != nil {
@@ -557,6 +606,7 @@ func (p *partition) initializeCache() error {
 			if added := p.lru.PushBack(record.FullPath(), record); !added {
 				break
 			}
+			p.liveAdd(record)
 		}
 
 		// Add in-flight records to the LRU. These were new files
@@ -565,10 +615,10 @@ func (p *partition) initializeCache() error {
 		close(p.fileChannel)
 		<-finishedFileChannel
 		for _, record := range inFlightRecords {
-			p.lru.Add(record.FullPath(), record)
+			p.lruAdd(record)
 		}
 		inFlightRecords = nil
-		log.Debugf("DiskCache partition %q: statd %d files in %s", p.id, len(records), time.Since(start))
+		log.Infof("DiskCache partition %q: loaded %d files in %s", p.id, len(records), time.Since(start))
 		log.Infof("Finished initializing disk cache partition %q at %q. Current size: %d (max: %d) bytes", p.id, p.rootDir, p.lru.Size(), p.maxSizeBytes)
 
 		p.diskIsMapped = true
@@ -706,6 +756,7 @@ func ScanDiskDirectory(scanDir string) <-chan *rfpb.FileMetadata {
 					Filename: path,
 				},
 			},
+			SizeBytes: info.Size(),
 		}
 		scanned <- fm
 		return nil
@@ -780,30 +831,35 @@ func (p *partition) key(ctx context.Context, cacheType interfaces.CacheType, rem
 	}, nil
 }
 
+func (p *partition) lruAdd(record *fileRecord) {
+	p.lru.Add(record.FullPath(), record)
+	p.liveAdd(record)
+}
+
 // Adds a single file, using the provided path, to the LRU.
 // NB: Callers are responsible for locking the LRU before calling this function.
-func (p *partition) addFileToLRUIfExists(key *fileKey) bool {
+func (p *partition) addFileToLRUIfExists(key *fileKey) (bool, int64) {
 	if p.diskIsMapped {
-		return false
+		return false, 0
 	}
 	info, err := os.Stat(key.FullPath())
 	if err == nil {
 		if info.Size() == 0 {
 			log.Debugf("Skipping 0 length file: %q", key.FullPath())
-			return false
+			return false, 0
 		}
 		record := p.makeRecordFromFileInfo(key, info)
 		p.fileChannel <- record
-		p.lru.Add(record.FullPath(), record)
-		return true
+		p.lruAdd(record)
+		return true, record.sizeBytes
 	}
-	return false
+	return false, 0
 }
 
-func (p *partition) contains(ctx context.Context, cacheType interfaces.CacheType, remoteInstanceName string, d *repb.Digest) (bool, error) {
+func (p *partition) contains(ctx context.Context, cacheType interfaces.CacheType, remoteInstanceName string, d *repb.Digest) (bool, int64, error) {
 	k, err := p.key(ctx, cacheType, remoteInstanceName, d)
 	if err != nil {
-		return false, err
+		return false, 0, err
 	}
 	// Bazel does frequent "contains" checks, so we want to make this fast.
 	// We could check the disk and see if the file exists, because it's
@@ -820,45 +876,22 @@ func (p *partition) contains(ctx context.Context, cacheType interfaces.CacheType
 	// if necessary and applicable.
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	ok := p.lru.Contains(k.FullPath())
-
-	if !ok && !p.diskIsMapped {
+	v, ok := p.lru.Get(k.FullPath())
+	if ok {
+		vr, ok := v.(*fileRecord)
+		if !ok {
+			return false, 0, status.InternalErrorf("not a *fileRecord")
+		}
+		return true, vr.sizeBytes, nil
+	}
+	if !p.diskIsMapped {
 		// OK if we're here it means the disk contents are still being loaded
 		// into the LRU. But we still need to return an answer! So we'll go
 		// check the FS, and if the file is there we'll add it to the LRU.
-		ok = p.addFileToLRUIfExists(k)
+		ok, sizeBytes := p.addFileToLRUIfExists(k)
+		return ok, sizeBytes, nil
 	}
-	return ok, nil
-}
-
-func (p *partition) containsMulti(ctx context.Context, cacheType interfaces.CacheType, remoteInstanceName string, digests []*repb.Digest) (map[*repb.Digest]bool, error) {
-	lock := sync.RWMutex{} // protects(foundMap)
-	foundMap := make(map[*repb.Digest]bool, len(digests))
-	eg, ctx := errgroup.WithContext(ctx)
-
-	for _, d := range digests {
-		fetchFn := func(d *repb.Digest) {
-			eg.Go(func() error {
-				exists, err := p.contains(ctx, cacheType, remoteInstanceName, d)
-				// NotFoundError is never returned from contains above, so
-				// we don't check for it.
-				if err != nil {
-					return err
-				}
-				lock.Lock()
-				foundMap[d] = exists
-				lock.Unlock()
-				return nil
-			})
-		}
-		fetchFn(d)
-	}
-
-	if err := eg.Wait(); err != nil {
-		return nil, err
-	}
-
-	return foundMap, nil
+	return false, 0, nil
 }
 
 func (p *partition) findMissing(ctx context.Context, cacheType interfaces.CacheType, remoteInstanceName string, digests []*repb.Digest) ([]*repb.Digest, error) {
@@ -869,7 +902,7 @@ func (p *partition) findMissing(ctx context.Context, cacheType interfaces.CacheT
 	for _, d := range digests {
 		fetchFn := func(d *repb.Digest) {
 			eg.Go(func() error {
-				exists, err := p.contains(ctx, cacheType, remoteInstanceName, d)
+				exists, _, err := p.contains(ctx, cacheType, remoteInstanceName, d)
 				// NotFoundError is never returned from contains above, so
 				// we don't check for it.
 				if err != nil {
@@ -945,6 +978,58 @@ func (p *partition) getMulti(ctx context.Context, cacheType interfaces.CacheType
 	return foundMap, nil
 }
 
+func (p *partition) makeFileMetadata(fr *fileRecord) (*rfpb.FileMetadata, error) {
+	isolation := &rfpb.Isolation{}
+	switch fr.key.cacheType {
+	case interfaces.CASCacheType:
+		isolation.CacheType = rfpb.Isolation_CAS_CACHE
+	case interfaces.ActionCacheType:
+		isolation.CacheType = rfpb.Isolation_ACTION_CACHE
+	default:
+		return nil, status.InvalidArgumentErrorf("Unknown cache type %v", fr.key.cacheType)
+	}
+	isolation.RemoteInstanceName = fr.key.remoteInstanceName
+	isolation.PartitionId = fr.key.part.id
+	return &rfpb.FileMetadata{
+		FileRecord: &rfpb.FileRecord{
+			Isolation: isolation,
+			Digest: &repb.Digest{
+				Hash:      hex.EncodeToString(fr.key.digestBytes),
+				SizeBytes: fr.sizeBytes,
+			},
+		},
+		StorageMetadata: &rfpb.StorageMetadata{
+			FileMetadata: &rfpb.StorageMetadata_FileMetadata{
+				Filename: fr.FullPath(),
+			},
+		},
+		SizeBytes: fr.sizeBytes,
+	}, nil
+}
+
+// callers should acquire p.mu before calling this to avoid races.
+func (p *partition) liveAdd(fr *fileRecord) {
+	if p.addChan == nil {
+		return
+	}
+	if fm, err := p.makeFileMetadata(fr); err != nil {
+		log.Warningf("Error making file metadata: %s", err)
+	} else {
+		p.addChan <- fm
+	}
+}
+
+func (p *partition) liveRemove(fr *fileRecord) {
+	if p.removeChan == nil {
+		return
+	}
+	if fm, err := p.makeFileMetadata(fr); err != nil {
+		log.Warningf("Error making file metadata: %s", err)
+	} else {
+		p.removeChan <- fm
+	}
+}
+
 func (p *partition) set(ctx context.Context, cacheType interfaces.CacheType, remoteInstanceName string, d *repb.Digest, data []byte) error {
 	k, err := p.key(ctx, cacheType, remoteInstanceName, d)
 	if err != nil {
@@ -958,9 +1043,8 @@ func (p *partition) set(ctx context.Context, cacheType interfaces.CacheType, rem
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	record := p.makeRecord(k, int64(n), time.Now().UnixNano())
-	p.lru.Add(record.FullPath(), record)
+	p.lruAdd(record)
 	return err
-
 }
 
 func (p *partition) setMulti(ctx context.Context, cacheType interfaces.CacheType, remoteInstanceName string, kvs map[*repb.Digest][]byte) error {
@@ -1047,7 +1131,7 @@ func (p *partition) writer(ctx context.Context, cacheType interfaces.CacheType, 
 			p.mu.Lock()
 			defer p.mu.Unlock()
 			record := p.makeRecord(k, totalBytesWritten, time.Now().UnixNano())
-			p.lru.Add(record.FullPath(), record)
+			p.lruAdd(record)
 			return nil
 		},
 	}, nil

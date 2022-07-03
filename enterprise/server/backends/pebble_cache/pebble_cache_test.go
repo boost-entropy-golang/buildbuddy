@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"math/rand"
 	"testing"
 	"time"
 
@@ -29,7 +30,7 @@ var (
 	emptyUserMap = testauth.TestUsers()
 )
 
-func getAnonContext(t *testing.T, env environment.Env) context.Context {
+func getAnonContext(t testing.TB, env environment.Env) context.Context {
 	ctx, err := prefix.AttachUserPrefixToContext(context.Background(), env)
 	if err != nil {
 		t.Errorf("error attaching user prefix: %v", err)
@@ -191,6 +192,38 @@ func TestGetSet(t *testing.T) {
 	}
 }
 
+func TestMetadata(t *testing.T) {
+	te := testenv.GetTestEnv(t)
+	te.SetAuthenticator(testauth.NewTestAuthenticator(emptyUserMap))
+	ctx := getAnonContext(t, te)
+
+	maxSizeBytes := int64(1_000_000_000) // 1GB
+	pc, err := pebble_cache.NewPebbleCache(te, &pebble_cache.Options{RootDirectory: testfs.MakeTempDir(t), MaxSizeBytes: maxSizeBytes})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pc.Start()
+	defer pc.Stop()
+
+	testSizes := []int64{
+		1, 10, 100, 1000, 10000, 1000000, 10000000,
+	}
+	for _, testSize := range testSizes {
+		d, buf := testdigest.NewRandomDigestBuf(t, testSize)
+		// Set() the bytes in the cache.
+		err := pc.Set(ctx, d, buf)
+		if err != nil {
+			t.Fatalf("Error setting %q in cache: %s", d.GetHash(), err.Error())
+		}
+		// Metadata should return true size of the blob, regardless of queried size.
+		md, err := pc.Metadata(ctx, &repb.Digest{Hash: d.GetHash(), SizeBytes: 1})
+		if err != nil {
+			t.Fatalf("Error getting %q metadata from cache: %s", d.GetHash(), err.Error())
+		}
+		require.Equal(t, testSize, md.SizeBytes)
+	}
+}
+
 func randomDigests(t *testing.T, sizes ...int64) map[*repb.Digest][]byte {
 	m := make(map[*repb.Digest][]byte)
 	for _, size := range sizes {
@@ -331,7 +364,7 @@ func TestLRU(t *testing.T) {
 
 	numDigests := 1000
 	digestSize := 100
-	maxSizeBytes := int64(numDigests * digestSize)
+	maxSizeBytes := int64(float64(numDigests) * float64(digestSize) * (1 / pebble_cache.JanitorCutoffThreshold)) // account for .9 evictor cutoff
 	rootDir := testfs.MakeTempDir(t)
 	pc, err := pebble_cache.NewPebbleCache(te, &pebble_cache.Options{RootDirectory: rootDir, MaxSizeBytes: maxSizeBytes})
 	if err != nil {
@@ -529,5 +562,54 @@ func TestMigrationFromDiskV2(t *testing.T) {
 		require.Nil(t, err, err)
 
 		require.Equal(t, buf, gotBuf)
+	}
+}
+
+func BenchmarkGetMulti(b *testing.B) {
+	te := testenv.GetTestEnv(b)
+	te.SetAuthenticator(testauth.NewTestAuthenticator(emptyUserMap))
+	ctx := getAnonContext(b, te)
+
+	maxSizeBytes := int64(100_000_000)
+	rootDir := testfs.MakeTempDir(b)
+	pc, err := pebble_cache.NewPebbleCache(te, &pebble_cache.Options{RootDirectory: rootDir, MaxSizeBytes: maxSizeBytes})
+	if err != nil {
+		b.Fatal(err)
+	}
+	pc.Start()
+	defer pc.Stop()
+
+	digestKeys := make([]*repb.Digest, 0, 100000)
+	for i := 0; i < 100; i++ {
+		d, buf := testdigest.NewRandomDigestBuf(b, 1000)
+		digestKeys = append(digestKeys, d)
+		if err := pc.Set(ctx, d, buf); err != nil {
+			b.Fatalf("Error setting %q in cache: %s", d.GetHash(), err.Error())
+		}
+	}
+
+	randomDigests := func(n int) []*repb.Digest {
+		r := make([]*repb.Digest, 0, n)
+		offset := rand.Intn(len(digestKeys))
+		for i := 0; i < n; i++ {
+			r = append(r, digestKeys[(i+offset)%len(digestKeys)])
+		}
+		return r
+	}
+
+	b.ReportAllocs()
+	b.StopTimer()
+	for n := 0; n < b.N; n++ {
+		keys := randomDigests(100)
+
+		b.StartTimer()
+		m, err := pc.GetMulti(ctx, keys)
+		if err != nil {
+			b.Fatal(err)
+		}
+		b.StopTimer()
+		if len(m) != len(keys) {
+			b.Fatalf("Response was incomplete, asked for %d, got %d", len(keys), len(m))
+		}
 	}
 }

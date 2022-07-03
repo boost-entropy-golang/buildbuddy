@@ -6,21 +6,25 @@ import (
 )
 
 // Note: the doc generator script (`generate_docs.py`) in this directory
-// generates documentation from this file.
+// generates documentation from this file at build time.
 //
 // The doc generator treats comments starting with 3 slashes as markdown docs,
 // as well as the 'Help' field for each metric.
-//
-// Run `python3 generate_docs.py --watch` to interactively generate the
-// docs as you edit this file.
 
 const (
 	// Label constants.
 	// Commonly used labels can be added here, and their documentation will be
 	// displayed in the metrics where they are used.
 
+	// TODO(bduffany): Migrate StatusLabel usages to StatusHumanReadableLabel
+
 	/// Status code as defined by [grpc/codes](https://godoc.org/google.golang.org/grpc/codes#Code).
+	/// This is a numeric value; any non-zero code indicates an error.
 	StatusLabel = "status"
+
+	/// Status code as defined by [grpc/codes](https://godoc.org/google.golang.org/grpc/codes#Code)
+	/// in human-readable format, such as "OK" or "NotFound".
+	StatusHumanReadableLabel = "status"
 
 	/// Invocation status: `success`, `failure`, `disconnected`, or `unknown`.
 	InvocationStatusLabel = "invocation_status"
@@ -89,6 +93,10 @@ const (
 
 	/// Reason for a runner not being added to the runner pool.
 	RunnerPoolFailedRecycleReason = "reason"
+
+	/// Effective workload isolation type used for an executed task, such as
+	/// "docker", "podman", "firecracker", or "none".
+	IsolationTypeLabel = "isolation"
 
 	/// Group (organization) ID associated with the request.
 	GroupID = "group_id"
@@ -360,9 +368,11 @@ var (
 		Namespace: bbNamespace,
 		Subsystem: "remote_execution",
 		Name:      "count",
-		Help:      "Number of actions executed remotely.",
+		Help:      "Number of actions executed remotely. This only includes actions which reached the execution phase. If an action fails before execution (for example, if it fails authentication) then this metric is not incremented.",
 	}, []string{
 		ExitCodeLabel,
+		StatusHumanReadableLabel,
+		IsolationTypeLabel,
 	})
 
 	/// #### Examples

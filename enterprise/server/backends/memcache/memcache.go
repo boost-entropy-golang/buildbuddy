@@ -50,7 +50,7 @@ func Register(env environment.Env) error {
 		return nil
 	}
 	if env.GetCache() == nil {
-		return status.FailedPreconditionErrorf("Memcache layer requires a base cache; but one was not configured; please also enable a gcs/s3/disk cache")
+		return status.FailedPreconditionErrorf("Memcache requires a base cache but one was not configured: please also enable a base cache")
 	}
 	log.Infof("Enabling memcache layer with targets: %s", *memcacheTargets)
 	mc := NewCache(*memcacheTargets...)
@@ -125,6 +125,22 @@ func (c *Cache) Contains(ctx context.Context, d *repb.Digest) (bool, error) {
 		return false, nil
 	}
 	return false, err
+}
+
+func (c *Cache) Metadata(ctx context.Context, d *repb.Digest) (*interfaces.CacheMetadata, error) {
+	key, err := c.key(ctx, d)
+	if err != nil {
+		return nil, err
+	}
+
+	data, err := c.mcGet(key)
+	if err != nil {
+		return nil, err
+	}
+	if err == memcache.ErrCacheMiss {
+		return nil, status.NotFoundErrorf("Digest '%s/%d' not found in cache", d.GetHash(), d.GetSizeBytes())
+	}
+	return &interfaces.CacheMetadata{SizeBytes: int64(len(data))}, nil
 }
 
 func update(old, new map[string]bool) {
