@@ -117,17 +117,6 @@ func (x *execServer) Exec(ctx context.Context, req *vmxpb.ExecRequest) (*vmxpb.E
 		cmd.Dir = req.GetWorkingDirectory()
 	}
 
-	// TODO(tylerw): implement this.
-	if req.GetStdinVsockPort() != 0 {
-		return nil, status.UnimplementedError("Vsock stdin not implemented")
-	}
-	if req.GetStdoutVsockPort() != 0 {
-		return nil, status.UnimplementedError("Vsock stdout not implemented")
-	}
-	if req.GetStderrVsockPort() != 0 {
-		return nil, status.UnimplementedError("Vsock stderr not implemented")
-	}
-
 	// TODO(tylerw): use syncfs or something better here.
 	defer unix.Sync()
 
@@ -143,7 +132,7 @@ func (x *execServer) Exec(ctx context.Context, req *vmxpb.ExecRequest) (*vmxpb.E
 	defer x.reapMutex.RUnlock()
 
 	log.Debugf("Running command in VM: %q", cmd.String())
-	_, err := commandutil.RunWithProcessTreeCleanup(ctx, cmd, false /*=enableStats*/)
+	_, err := commandutil.RunWithProcessTreeCleanup(ctx, cmd, nil /*=statsListener*/)
 	exitCode, err := commandutil.ExitCode(ctx, cmd, err)
 	rsp := &vmxpb.ExecResponse{}
 	rsp.ExitCode = int32(exitCode)
@@ -151,4 +140,8 @@ func (x *execServer) Exec(ctx context.Context, req *vmxpb.ExecRequest) (*vmxpb.E
 	rsp.Stdout = stdoutBuf.Bytes()
 	rsp.Stderr = stderrBuf.Bytes()
 	return rsp, nil
+}
+
+func (x *execServer) ExecStreamed(stream vmxpb.Exec_ExecStreamedServer) error {
+	return status.UnimplementedError("not implemented")
 }
