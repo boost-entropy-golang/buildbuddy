@@ -715,6 +715,17 @@ func (p *PebbleCache) SetMulti(ctx context.Context, kvs map[*repb.Digest][]byte)
 	return nil
 }
 
+func (p *PebbleCache) sendSizeUpdate(partID string, fileMetadataKey []byte, delta int64) {
+	fileMetadataKeyCopy := make([]byte, len(fileMetadataKey))
+	copy(fileMetadataKeyCopy, fileMetadataKey)
+	up := &sizeUpdate{
+		partID: partID,
+		key:    fileMetadataKeyCopy,
+		delta:  delta,
+	}
+	p.edits <- up
+}
+
 func (p *PebbleCache) deleteMetadataOnly(fileMetadataKey []byte) error {
 	iter := p.db.NewIter(nil /*default iterOptions*/)
 	defer iter.Close()
@@ -729,7 +740,7 @@ func (p *PebbleCache) deleteMetadataOnly(fileMetadataKey []byte) error {
 		return err
 	}
 	p.clearAtime(fileMetadataKey)
-	p.edits <- &sizeUpdate{p.isolation.GetPartitionId(), fileMetadataKey, -1 * fileMetadata.GetSizeBytes()}
+	p.sendSizeUpdate(fileMetadata.GetFileRecord().GetIsolation().GetPartitionId(), fileMetadataKey, -1*fileMetadata.GetSizeBytes())
 	return nil
 }
 
@@ -748,7 +759,7 @@ func (p *PebbleCache) deleteRecord(ctx context.Context, fileMetadataKey []byte) 
 		return err
 	}
 	p.clearAtime(fileMetadataKey)
-	p.edits <- &sizeUpdate{p.isolation.GetPartitionId(), fileMetadataKey, -1 * fileMetadata.GetSizeBytes()}
+	p.sendSizeUpdate(p.isolation.GetPartitionId(), fileMetadataKey, -1*fileMetadata.GetSizeBytes())
 	return disk.DeleteFile(ctx, fp)
 }
 
@@ -855,7 +866,7 @@ func (p *PebbleCache) Writer(ctx context.Context, d *repb.Digest) (io.WriteClose
 		err = p.db.Set(fileMetadataKey, protoBytes, &pebble.WriteOptions{Sync: false})
 		if err == nil {
 			p.updateAtime(fileMetadataKey)
-			p.edits <- &sizeUpdate{p.isolation.GetPartitionId(), fileMetadataKey, bytesWritten}
+			p.sendSizeUpdate(p.isolation.GetPartitionId(), fileMetadataKey, bytesWritten)
 			metrics.DiskCacheAddedFileSizeBytes.Observe(float64(bytesWritten))
 		}
 		return err
@@ -1141,8 +1152,6 @@ func (e *partitionEvictor) refreshAtime(s *evictionPoolEntry) error {
 
 func (e *partitionEvictor) randomSample(iter *pebble.Iterator, k int) ([]*evictionPoolEntry, error) {
 	samples := make([]*evictionPoolEntry, 0, k)
-	fileMetadata := &rfpb.FileMetadata{}
-
 	seen := make(map[string]struct{}, len(e.samplePool))
 	for _, entry := range e.samplePool {
 		seen[string(entry.fileMetadataKey)] = struct{}{}
@@ -1156,6 +1165,7 @@ func (e *partitionEvictor) randomSample(iter *pebble.Iterator, k int) ([]*evicti
 		if !valid {
 			continue
 		}
+		fileMetadata := &rfpb.FileMetadata{}
 		if err := proto.Unmarshal(iter.Value(), fileMetadata); err != nil {
 			return nil, err
 		}
@@ -1258,11 +1268,11 @@ func (e *partitionEvictor) evict(count int) (*evictionPoolEntry, error) {
 				continue
 			}
 			closer.Close()
+			log.Infof("Evictor %q attempting to delete file: %q", e.part.ID, sample.fileMetadataKey)
 			if err := e.deleteFile(sample); err != nil {
 				log.Errorf("Error evicting file: %s (ignoring)", err)
 				continue
 			}
-			log.Debugf("Evictor %q deleted file: %q", e.part.ID, sample.fileMetadataKey)
 			evicted += 1
 			lastEvicted = sample
 			e.samplePool = append(e.samplePool[:i], e.samplePool[i+1:]...)
