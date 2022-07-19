@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"math/rand"
 	"os"
 	"path/filepath"
@@ -23,6 +24,7 @@ import (
 	"github.com/buildbuddy-io/buildbuddy/server/interfaces"
 	"github.com/buildbuddy-io/buildbuddy/server/metrics"
 	"github.com/buildbuddy-io/buildbuddy/server/remote_cache/digest"
+	"github.com/buildbuddy-io/buildbuddy/server/util/alert"
 	"github.com/buildbuddy-io/buildbuddy/server/util/disk"
 	"github.com/buildbuddy-io/buildbuddy/server/util/log"
 	"github.com/buildbuddy-io/buildbuddy/server/util/status"
@@ -52,6 +54,8 @@ var (
 	forceAllowMigration       = flag.Bool("cache.pebble.force_allow_migration", false, "If set, allow migrating into an existing pebble cache")
 	clearCacheBeforeMigration = flag.Bool("cache.pebble.clear_cache_before_migration", false, "If set, clear any existing cache content before migrating")
 	mirrorActiveDiskCache     = flagtypes.Alias[bool]("cache.disk.enable_live_updates", "cache.pebble.mirror_active_disk_cache")
+	orphanDeleteDryRun        = flag.Bool("cache.pebble.orphan_delete_dry_run", true, "If set, log orphaned files instead of deleting them")
+	dirDeletionDelay          = flag.Duration("cache.pebble.dir_deletion_delay", time.Hour, "How old directories must be before being eligible for deletion when empty")
 )
 
 const (
@@ -103,13 +107,17 @@ type PebbleCache struct {
 	db        *pebble.DB
 	isolation *rfpb.Isolation
 
-	statusMu *sync.Mutex // PROTECTS(evictors)
-	atimes   *sync.Map
-	edits    chan *sizeUpdate
+	atimes *sync.Map
+	edits  chan *sizeUpdate
 
 	quitChan chan struct{}
 	eg       *errgroup.Group
+
+	statusMu *sync.Mutex // PROTECTS(evictors)
 	evictors []*partitionEvictor
+
+	brokenFilesDone   chan struct{}
+	orphanedFilesDone chan struct{}
 }
 
 // Register creates a new PebbleCache from the configured flags and sets it in
@@ -249,15 +257,17 @@ func NewPebbleCache(env environment.Env, opts *Options) (*PebbleCache, error) {
 		return nil, err
 	}
 	pc := &PebbleCache{
-		opts:     opts,
-		env:      env,
-		db:       db,
-		quitChan: make(chan struct{}),
-		eg:       &errgroup.Group{},
-		statusMu: &sync.Mutex{},
-		atimes:   &sync.Map{},
-		edits:    make(chan *sizeUpdate, 1000),
-		evictors: make([]*partitionEvictor, len(opts.Partitions)),
+		opts:              opts,
+		env:               env,
+		db:                db,
+		quitChan:          make(chan struct{}),
+		brokenFilesDone:   make(chan struct{}),
+		orphanedFilesDone: make(chan struct{}),
+		eg:                &errgroup.Group{},
+		statusMu:          &sync.Mutex{},
+		atimes:            &sync.Map{},
+		edits:             make(chan *sizeUpdate, 1000),
+		evictors:          make([]*partitionEvictor, len(opts.Partitions)),
 		isolation: &rfpb.Isolation{
 			CacheType:   rfpb.Isolation_CAS_CACHE,
 			PartitionId: defaultPartitionID,
@@ -324,6 +334,73 @@ func (p *PebbleCache) processSizeUpdates(quitChan chan struct{}) {
 	}
 }
 
+func (p *PebbleCache) deleteOrphanedFiles(quitChan chan struct{}) {
+	const sep = "/"
+	iter := p.db.NewIter(&pebble.IterOptions{
+		LowerBound: []byte{constants.MinByte},
+		UpperBound: []byte{constants.MaxByte},
+	})
+	defer iter.Close()
+
+	orphanCount := 0
+	for _, part := range p.opts.Partitions {
+		blobDir := p.partitionBlobDir(part.ID)
+		walkFn := func(path string, d fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if d.IsDir() {
+				return nil
+			}
+
+			// Check if we're shutting down; exit if so.
+			select {
+			case <-quitChan:
+				return status.CanceledErrorf("cache shutting down")
+			default:
+			}
+
+			relPath, err := filepath.Rel(blobDir, path)
+			if err != nil {
+				return err
+			}
+			parts := strings.Split(relPath, sep)
+			if len(parts) < 3 {
+				log.Warningf("Skipping orphaned file: %q", path)
+				return nil
+			}
+			prefixIndex := len(parts) - 2
+			// Remove the second to last element which is the 4-char hash prefix.
+			parts = append(parts[:prefixIndex], parts[prefixIndex+1:]...)
+			fileMetadataKey := []byte(strings.Join(parts, sep))
+			if _, err := lookupFileMetadata(iter, fileMetadataKey); status.IsNotFoundError(err) {
+				if *orphanDeleteDryRun {
+					fi, err := d.Info()
+					if err != nil {
+						return err
+					}
+					log.Infof("Would delete orphaned file: %s (last modified: %s) which is not in cache", path, fi.ModTime())
+				} else {
+					if err := os.Remove(path); err == nil {
+						log.Infof("Removed orphaned file: %q", path)
+					}
+				}
+				orphanCount += 1
+			}
+
+			if orphanCount%1000 == 0 {
+				log.Infof("Removed %d orphans", orphanCount)
+			}
+			return nil
+		}
+		if err := filepath.WalkDir(blobDir, walkFn); err != nil {
+			alert.UnexpectedEvent("pebble_cache_error_deleting_orphans", "err: %s", err)
+		}
+	}
+	log.Infof("Pebble Cache: deleteOrphanedFiles removed %d files", orphanCount)
+	close(p.orphanedFilesDone)
+}
+
 func (p *PebbleCache) scanForBrokenFiles(quitChan chan struct{}) {
 	iter := p.db.NewIter(&pebble.IterOptions{
 		LowerBound: []byte{constants.MinByte},
@@ -335,6 +412,7 @@ func (p *PebbleCache) scanForBrokenFiles(quitChan chan struct{}) {
 	fileMetadata := &rfpb.FileMetadata{}
 	blobDir := ""
 
+	mismatchCount := 0
 	for iter.Next() {
 		// Check if we're shutting down; exit if so.
 		select {
@@ -353,8 +431,11 @@ func (p *PebbleCache) scanForBrokenFiles(quitChan chan struct{}) {
 		_, err := filestore.NewReader(p.env.GetServerContext(), blobDir, fileMetadata.GetStorageMetadata(), 0, 0)
 		if err != nil {
 			p.handleMetadataMismatch(err, fileMetadataKey, fileMetadata)
+			mismatchCount += 1
 		}
 	}
+	log.Infof("Pebble Cache: scanForBrokenFiles fixed %d files", mismatchCount)
+	close(p.brokenFilesDone)
 }
 
 func (p *PebbleCache) MigrateFromDiskDir(diskDir string) error {
@@ -760,7 +841,14 @@ func (p *PebbleCache) deleteRecord(ctx context.Context, fileMetadataKey []byte) 
 	}
 	p.clearAtime(fileMetadataKey)
 	p.sendSizeUpdate(p.isolation.GetPartitionId(), fileMetadataKey, -1*fileMetadata.GetSizeBytes())
-	return disk.DeleteFile(ctx, fp)
+	if err := disk.DeleteFile(ctx, fp); err != nil {
+		return err
+	}
+	parentDir := filepath.Dir(fp)
+	if err := deleteDirIfEmptyAndOld(parentDir); err != nil {
+		log.Debugf("Error deleting dir: %s: %s", parentDir, err)
+	}
+	return nil
 }
 
 func (p *PebbleCache) Delete(ctx context.Context, d *repb.Digest) error {
@@ -872,6 +960,26 @@ func (p *PebbleCache) Writer(ctx context.Context, d *repb.Digest) (io.WriteClose
 		return err
 	}}
 	return dc, nil
+}
+
+func (p *PebbleCache) DoneScanning() bool {
+	var brokenFilesDone, orphanedFilesDone bool
+
+	select {
+	case <-p.brokenFilesDone:
+		brokenFilesDone = true
+	default:
+		break
+	}
+
+	select {
+	case <-p.orphanedFilesDone:
+		orphanedFilesDone = true
+	default:
+		break
+	}
+
+	return brokenFilesDone && orphanedFilesDone
 }
 
 // TestingWaitForGC should be used by tests only.
@@ -1194,6 +1302,24 @@ func (e *partitionEvictor) randomSample(iter *pebble.Iterator, k int) ([]*evicti
 	return samples, nil
 }
 
+func deleteDirIfEmptyAndOld(dir string) error {
+	files, err := os.ReadDir(dir)
+	if err != nil {
+		return err
+	}
+	di, err := os.Stat(dir)
+	if err != nil {
+		return err
+	}
+
+	if len(files) != 0 || time.Since(di.ModTime()) < *dirDeletionDelay {
+		// dir was not empty or was too young
+		return nil
+	}
+
+	return os.Remove(dir)
+}
+
 func (e *partitionEvictor) deleteFile(sample *evictionPoolEntry) error {
 	if err := e.writer.Delete(sample.fileMetadataKey, &pebble.WriteOptions{Sync: true}); err != nil {
 		return err
@@ -1206,6 +1332,10 @@ func (e *partitionEvictor) deleteFile(sample *evictionPoolEntry) error {
 		fp := filestore.FilePath(e.blobDir, md.GetFileMetadata())
 		if err := disk.DeleteFile(context.TODO(), fp); err != nil {
 			return err
+		}
+		parentDir := filepath.Dir(fp)
+		if err := deleteDirIfEmptyAndOld(parentDir); err != nil {
+			log.Debugf("Error deleting dir: %s: %s", parentDir, err)
 		}
 	case md.GetInlineMetadata() != nil:
 		break
@@ -1360,6 +1490,10 @@ func (p *PebbleCache) Start() error {
 		p.scanForBrokenFiles(p.quitChan)
 		return nil
 	})
+	p.eg.Go(func() error {
+		p.deleteOrphanedFiles(p.quitChan)
+		return nil
+	})
 	return nil
 }
 
@@ -1372,7 +1506,5 @@ func (p *PebbleCache) Stop() error {
 		return err
 	}
 
-	// TODO(tylerw) re-enable this once shutdown race is debugged.
-	// return p.db.Close()
-	return nil
+	return p.db.Close()
 }
