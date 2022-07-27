@@ -99,48 +99,51 @@ func NewSizer(env environment.Env) (*taskSizer, error) {
 	return ts, nil
 }
 
-func (s *taskSizer) Estimate(ctx context.Context, task *repb.ExecutionTask) *scpb.TaskSize {
-	initialEstimate := Estimate(task)
+func (s *taskSizer) Get(ctx context.Context, task *repb.ExecutionTask) *scpb.TaskSize {
 	if !*useMeasuredSizes {
-		return initialEstimate
+		return nil
 	}
 	props := platform.ParseProperties(task)
+	// If a task size is explicitly requested, measured task size is not used.
 	if props.EstimatedComputeUnits != 0 {
-		return initialEstimate
+		return nil
 	}
 	// TODO(bduffany): Remove or hide behind a dev-only flag once measured task sizing
 	// is battle-tested.
 	if props.DisableMeasuredTaskSize {
-		return initialEstimate
+		return nil
 	}
 	// Don't use measured task sizes for Firecracker tasks for now, since task
 	// sizes are used as hard limits on allowed resources.
 	if props.WorkloadIsolationType == string(platform.FirecrackerContainerType) {
-		return initialEstimate
+		return nil
 	}
 	statusLabel := "hit"
 	defer func() {
+		groupID, _ := s.groupKey(ctx)
 		metrics.RemoteExecutionTaskSizeReadRequests.With(prometheus.Labels{
 			metrics.TaskSizeReadStatusLabel: statusLabel,
 			metrics.IsolationTypeLabel:      props.WorkloadIsolationType,
+			metrics.OS:                      props.OS,
+			metrics.Arch:                    props.Arch,
+			metrics.GroupID:                 groupID,
 		}).Inc()
 	}()
 	recordedSize, err := s.lastRecordedSize(ctx, task)
 	if err != nil {
 		log.CtxWarningf(ctx, "Failed to read task size from Redis; falling back to default size estimate: %s", err)
 		statusLabel = "error"
-		return initialEstimate
+		return nil
 	}
 	if recordedSize == nil {
 		statusLabel = "miss"
 		// TODO: return a value indicating "unsized" here, and instead let the
 		// executor run this task once to estimate the size.
-		return initialEstimate
+		return nil
 	}
 	return &scpb.TaskSize{
-		EstimatedMemoryBytes:   recordedSize.EstimatedMemoryBytes,
-		EstimatedMilliCpu:      recordedSize.EstimatedMilliCpu,
-		EstimatedFreeDiskBytes: initialEstimate.EstimatedFreeDiskBytes,
+		EstimatedMemoryBytes: recordedSize.EstimatedMemoryBytes,
+		EstimatedMilliCpu:    recordedSize.EstimatedMilliCpu,
 	}
 }
 
@@ -151,9 +154,13 @@ func (s *taskSizer) Update(ctx context.Context, cmd *repb.Command, md *repb.Exec
 	statusLabel := "ok"
 	defer func() {
 		props := platform.ParseProperties(&repb.ExecutionTask{Command: cmd})
+		groupID, _ := s.groupKey(ctx)
 		metrics.RemoteExecutionTaskSizeWriteRequests.With(prometheus.Labels{
 			metrics.TaskSizeWriteStatusLabel: statusLabel,
 			metrics.IsolationTypeLabel:       props.WorkloadIsolationType,
+			metrics.OS:                       props.OS,
+			metrics.Arch:                     props.Arch,
+			metrics.GroupID:                  groupID,
 		}).Inc()
 	}()
 	// If we are missing CPU/memory stats, do nothing. This is expected in some
@@ -218,15 +225,9 @@ func (s *taskSizer) lastRecordedSize(ctx context.Context, task *repb.ExecutionTa
 
 func (s *taskSizer) taskSizeKey(ctx context.Context, cmd *repb.Command) (string, error) {
 	// Get group ID (task sizing is segmented by group)
-	u, err := perms.AuthenticatedUser(ctx, s.env)
+	groupKey, err := s.groupKey(ctx)
 	if err != nil {
-		if !perms.IsAnonymousUserError(err) || !s.env.GetAuthenticator().AnonymousUsageEnabled() {
-			return "", err
-		}
-	}
-	groupKey := "ANON"
-	if u != nil {
-		groupKey = u.GetGroupID()
+		return "", err
 	}
 	// For now, associate stats with the exact command, including the full
 	// command line, env vars, and platform.
@@ -237,6 +238,17 @@ func (s *taskSizer) taskSizeKey(ctx context.Context, cmd *repb.Command) (string,
 		return "", err
 	}
 	return fmt.Sprintf("%s/%s/%s", redisKeyPrefix, groupKey, cmdKey), nil
+}
+
+func (s *taskSizer) groupKey(ctx context.Context) (string, error) {
+	u, err := perms.AuthenticatedUser(ctx, s.env)
+	if err != nil {
+		if perms.IsAnonymousUserError(err) && s.env.GetAuthenticator().AnonymousUsageEnabled() {
+			return "ANON", nil
+		}
+		return "", err
+	}
+	return u.GetGroupID(), nil
 }
 
 func commandKey(cmd *repb.Command) (string, error) {
