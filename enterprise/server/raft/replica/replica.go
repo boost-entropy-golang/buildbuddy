@@ -84,6 +84,8 @@ type Replica struct {
 	rangeMu         sync.RWMutex
 	rangeDescriptor *rfpb.RangeDescriptor
 	mappedRange     *rangemap.Range
+
+	fileStorer filestore.Store
 }
 
 func uint64ToBytes(i uint64) []byte {
@@ -115,6 +117,14 @@ func batchLookup(wb *pebble.Batch, query []byte) ([]byte, error) {
 	return val, nil
 }
 
+func sizeOf(val []byte) (int64, error) {
+	fileMetadata := &rfpb.FileMetadata{}
+	if err := proto.Unmarshal(val, fileMetadata); err != nil {
+		return 0, err
+	}
+	return fileMetadata.GetSizeBytes() + int64(len(val)), nil
+}
+
 func (sm *Replica) Usage() (*rfpb.ReplicaUsage, error) {
 	ru := &rfpb.ReplicaUsage{
 		Replica: &rfpb.ReplicaDescriptor{
@@ -122,14 +132,29 @@ func (sm *Replica) Usage() (*rfpb.ReplicaUsage, error) {
 			NodeId:    sm.nodeID,
 		},
 	}
-	if sm.db != nil {
-		du, err := sm.db.EstimateDiskUsage(keys.Key{constants.MinByte}, keys.Key{constants.MaxByte})
+	db, err := sm.Reader()
+	if err != nil {
+		return nil, err
+	}
+	defer db.Close()
+
+	iterOpts := &pebble.IterOptions{
+		LowerBound: keys.Key([]byte{constants.MinByte}),
+		UpperBound: keys.Key([]byte{constants.MaxByte}),
+	}
+
+	iter := db.NewIter(iterOpts)
+	defer iter.Close()
+
+	estimatedBytesUsed := int64(0)
+	for iter.Next() {
+		sizeBytes, err := sizeOf(iter.Value())
 		if err != nil {
-			log.Errorf("Error estimating disk usage: %s", err)
 			return nil, err
 		}
-		ru.EstimatedDiskBytesUsed = int64(du)
+		estimatedBytesUsed += sizeBytes
 	}
+	ru.EstimatedDiskBytesUsed = estimatedBytesUsed
 	return ru, nil
 }
 
@@ -346,7 +371,7 @@ func (sm *Replica) readFileFromPeer(ctx context.Context, fileRecord *rfpb.FileRe
 	}
 	defer rc.Close()
 
-	wc, err := filestore.NewWriter(ctx, sm.fileDir, wb, fileRecord)
+	wc, err := sm.fileStorer.NewWriter(ctx, sm.fileDir, wb, fileRecord)
 	if err != nil {
 		return nil, err
 	}
@@ -371,7 +396,7 @@ func (sm *Replica) fileWrite(wb *pebble.Batch, req *rfpb.FileWriteRequest) (*rfp
 	iter := wb.NewIter(nil /*default iter options*/)
 	defer iter.Close()
 
-	fileMetadataKey, err := constants.FileMetadataKey(req.GetFileRecord())
+	fileMetadataKey, err := sm.fileStorer.FileMetadataKey(req.GetFileRecord())
 	if err != nil {
 		return nil, err
 	}
@@ -480,28 +505,27 @@ func (sm *Replica) findSplitPoint(wb *pebble.Batch, req *rfpb.FindSplitPointRequ
 
 	iter := wb.NewIter(iterOpts)
 	defer iter.Close()
-	var t bool = iter.First()
 
 	totalSize := int64(0)
-	for ; t; t = iter.Next() {
-		if t {
-			totalSize += int64(len(iter.Value()))
+	for iter.Next() {
+		sizeBytes, err := sizeOf(iter.Value())
+		if err != nil {
+			return nil, err
 		}
+		totalSize += sizeBytes
 	}
 
 	leftSplitSize := int64(0)
-	t = iter.First()
+	var t bool = iter.First()
 	var lastKey []byte
 	for ; t; t = iter.Next() {
 		if leftSplitSize >= totalSize/2 && canSplitKeys(lastKey, iter.Key()) {
 			sp := &rfpb.FindSplitPointResponse{
-				Left:           make([]byte, len(lastKey)),
+				Split:          make([]byte, len(iter.Key())),
 				LeftSizeBytes:  leftSplitSize,
-				Right:          make([]byte, len(iter.Key())),
 				RightSizeBytes: totalSize - leftSplitSize,
 			}
-			copy(sp.Left, lastKey)
-			copy(sp.Right, iter.Key())
+			copy(sp.Split, iter.Key())
 			log.Debugf("Found split point: %+v", sp)
 			return sp, nil
 		}
@@ -680,11 +704,10 @@ func (sm *Replica) split(wb *pebble.Batch, req *rfpb.SplitRequest) (*rfpb.SplitR
 	// Delete the keys from each side that are now owned by the other side.
 	// Right side delete should be a no-op if this is a freshly created replica.
 	sp := req.GetSplitPoint()
-	rightDeleteEnd := keys.Key(sp.GetLeft()).Next()
-	if err := rwb.DeleteRange(keys.Key{constants.MinByte}, rightDeleteEnd, nil /*ignored write options*/); err != nil {
+	if err := rwb.DeleteRange(keys.Key{constants.MinByte}, sp.GetSplit(), nil /*ignored write options*/); err != nil {
 		return nil, err
 	}
-	if err := wb.DeleteRange(sp.GetRight(), keys.Key{constants.MaxByte}, nil /*ignored write options*/); err != nil {
+	if err := wb.DeleteRange(sp.GetSplit(), keys.Key{constants.MaxByte}, nil /*ignored write options*/); err != nil {
 		return nil, err
 	}
 
@@ -695,8 +718,8 @@ func (sm *Replica) split(wb *pebble.Batch, req *rfpb.SplitRequest) (*rfpb.SplitR
 	leftRD.Generation += 1                     // increment rd generation upon split
 	rightRD.Generation = leftRD.Generation + 1 // increment rd generation upon split
 	rightRD.Right = req.GetLeft().GetRight()   // new range's end is the prev range's end
-	rightRD.Left = sp.GetRight()               // new range's beginning is split point right side
-	leftRD.Right = sp.GetLeft()                // old range's end is now split point left side
+	rightRD.Left = sp.GetSplit()               // new range's beginning is split point right side
+	leftRD.Right = sp.GetSplit()               // old range's end is now split point left side
 	rightRDBuf, err := proto.Marshal(rightRD)
 	if err != nil {
 		return nil, err
@@ -1239,13 +1262,14 @@ func (sm *Replica) Close() error {
 // CreateReplica creates an ondisk statemachine.
 func New(rootDir, fileDir string, clusterID, nodeID uint64, store IStore) *Replica {
 	return &Replica{
-		closedMu:  &sync.RWMutex{},
-		wg:        sync.WaitGroup{},
-		rootDir:   rootDir,
-		fileDir:   fileDir,
-		clusterID: clusterID,
-		nodeID:    nodeID,
-		store:     store,
-		log:       log.NamedSubLogger(fmt.Sprintf("c%dn%d", clusterID, nodeID)),
+		closedMu:   &sync.RWMutex{},
+		wg:         sync.WaitGroup{},
+		rootDir:    rootDir,
+		fileDir:    fileDir,
+		clusterID:  clusterID,
+		nodeID:     nodeID,
+		store:      store,
+		log:        log.NamedSubLogger(fmt.Sprintf("c%dn%d", clusterID, nodeID)),
+		fileStorer: filestore.New(true /*=isolateByGroupIDs*/),
 	}
 }
