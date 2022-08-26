@@ -403,17 +403,17 @@ func writeRecord(ctx context.Context, t *testing.T, stores []*TestingStore, grou
 	fk, err := filestore.New(true /*=isolateByGroupIDs*/).FileMetadataKey(fr)
 	require.Nil(t, err)
 
-	rd, err := stores[0].Sender.LookupRangeDescriptor(ctx, fk, true /*skipCache*/)
-	require.Nil(t, err, err)
-	rangeID := rd.GetRangeId()
-
 	for _, ts := range stores {
+		rd, err := ts.Sender.LookupRangeDescriptor(ctx, fk, true /*skipCache*/)
+		require.Nil(t, err, err)
+		rangeID := rd.GetRangeId()
+
 		c, err := ts.APIClient.Get(ctx, ts.GRPCAddress)
 		require.Nil(t, err)
-		wc, err := client.RemoteWriter(ctx, c, &rfpb.Header{RangeId: rangeID}, fr)
+		wc, err := client.RemoteWriter(ctx, c, &rfpb.Header{RangeId: rangeID, Generation: rd.GetGeneration()}, fr)
 		require.Nil(t, err)
 		_, err = io.Copy(wc, bytes.NewReader(buf))
-		require.Nil(t, err)
+		require.Nil(t, err, err)
 		require.Nil(t, wc.Close())
 	}
 
@@ -596,7 +596,7 @@ func TestSplitNonMetaRange(t *testing.T) {
 
 	// Attempting to Split an empty range will always fail. So write a
 	// a small number of records before trying to Split.
-	written := writeNRecords(ctx, t, stores, 5)
+	written := writeNRecords(ctx, t, stores, 50)
 
 	_, err = s1.SplitCluster(ctx, &rfpb.SplitClusterRequest{
 		Range: rd,
@@ -615,7 +615,7 @@ func TestSplitNonMetaRange(t *testing.T) {
 	}
 
 	// Write some more records to the new right range.
-	written = append(written, writeNRecords(ctx, t, stores, 5)...)
+	written = append(written, writeNRecords(ctx, t, stores, 50)...)
 
 	_, err = s1.SplitCluster(ctx, &rfpb.SplitClusterRequest{
 		Range: s1.GetRange(2),
