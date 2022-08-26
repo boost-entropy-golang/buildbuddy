@@ -551,6 +551,7 @@ func (sm *Replica) populateReplicaFromSnapshot(rightSM *Replica) error {
 		if err := sm.SaveSnapshotToWriter(w, snap); err != nil {
 			w.CloseWithError(err)
 		}
+		w.Close()
 	}()
 	return rightSM.ApplySnapshotFromReader(r, rightDB)
 }
@@ -761,12 +762,14 @@ func (sm *Replica) scan(db ReplicaReader, req *rfpb.ScanRequest) (*rfpb.ScanResp
 
 	rsp := &rfpb.ScanResponse{}
 	for ; t; t = iter.Next() {
-		if t {
-			rsp.Kvs = append(rsp.Kvs, &rfpb.KV{
-				Key:   iter.Key(),
-				Value: iter.Value(),
-			})
-		}
+		k := make([]byte, len(iter.Key()))
+		copy(k, iter.Key())
+		v := make([]byte, len(iter.Value()))
+		copy(v, iter.Value())
+		rsp.Kvs = append(rsp.Kvs, &rfpb.KV{
+			Key:   k,
+			Value: v,
+		})
 	}
 	return rsp, nil
 }

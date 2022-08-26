@@ -274,6 +274,13 @@ type DBHandle interface {
 	IsDeadlockError(err error) bool
 }
 
+// OLAPDBHandle is a DB Handle for Online Analytical Processing(OLAP) DB
+type OLAPDBHandle interface {
+	DB(ctx context.Context) *gorm.DB
+	DateFromUsecTimestamp(fieldName string, timezoneOffsetMinutes int32) string
+	FlushInvocationStats(ctx context.Context, ti *tables.Invocation) error
+}
+
 type InvocationDB interface {
 	// Invocations API
 	CreateInvocation(ctx context.Context, in *tables.Invocation) (bool, error)
