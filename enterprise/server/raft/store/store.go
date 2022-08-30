@@ -51,7 +51,6 @@ const (
 
 type Store struct {
 	rootDir  string
-	fileDir  string
 	grpcAddr string
 
 	nodeHost      *dragonboat.NodeHost
@@ -74,10 +73,9 @@ type Store struct {
 	fileStorer filestore.Store
 }
 
-func New(rootDir, fileDir string, nodeHost *dragonboat.NodeHost, gossipManager *gossip.GossipManager, sender *sender.Sender, registry registry.NodeRegistry, apiClient *client.APIClient) *Store {
+func New(rootDir string, nodeHost *dragonboat.NodeHost, gossipManager *gossip.GossipManager, sender *sender.Sender, registry registry.NodeRegistry, apiClient *client.APIClient) *Store {
 	s := &Store{
 		rootDir:       rootDir,
-		fileDir:       fileDir,
 		nodeHost:      nodeHost,
 		gossipManager: gossipManager,
 		sender:        sender,
@@ -360,7 +358,7 @@ func (s *Store) RangeIsActive(header *rfpb.Header) error {
 }
 
 func (s *Store) ReplicaFactoryFn(clusterID, nodeID uint64) dbsm.IOnDiskStateMachine {
-	return replica.New(s.rootDir, s.fileDir, clusterID, nodeID, s)
+	return replica.New(s.rootDir, clusterID, nodeID, s)
 }
 
 func (s *Store) Sender() *sender.Sender {
@@ -495,7 +493,7 @@ func (s *Store) FindMissing(ctx context.Context, req *rfpb.FindMissingRequest) (
 	if err != nil {
 		return nil, err
 	}
-	missing, err := r.FindMissing(ctx, req.GetFileRecord())
+	missing, err := r.FindMissing(ctx, req.GetHeader(), req.GetFileRecord())
 	if err != nil {
 		return nil, err
 	}
@@ -524,7 +522,7 @@ func (s *Store) Read(req *rfpb.ReadRequest, stream rfspb.Api_ReadServer) error {
 		return err
 	}
 
-	readCloser, err := r.Reader(stream.Context(), req.GetFileRecord(), req.GetOffset(), req.GetLimit())
+	readCloser, err := r.Reader(stream.Context(), req.GetHeader(), req.GetFileRecord(), req.GetOffset(), req.GetLimit())
 	if err != nil {
 		return err
 	}
@@ -563,7 +561,7 @@ func (s *Store) Write(stream rfspb.Api_WriteServer) error {
 			if err != nil {
 				return err
 			}
-			writeCloser, err = r.Writer(stream.Context(), req.GetFileRecord())
+			writeCloser, err = r.Writer(stream.Context(), req.GetHeader(), req.GetFileRecord())
 			if err != nil {
 				return err
 			}

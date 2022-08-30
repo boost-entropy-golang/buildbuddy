@@ -49,6 +49,7 @@ var (
 	httpAddr            = flag.String("cache.raft.http_addr", "", "The address to listen for HTTP raft traffic. Ex. '1992'")
 	gRPCAddr            = flag.String("cache.raft.grpc_addr", "", "The address to listen for internal API traffic on. Ex. '1993'")
 	clearCacheOnStartup = flag.Bool("cache.raft.clear_cache_on_startup", false, "If set, remove all raft + cache data on start")
+	testMode            = flag.Bool("cache.raft.test_mode", false, "If set, use driver TestingOpts to split sooner / faster")
 )
 
 const (
@@ -211,20 +212,9 @@ func NewRaftCache(env environment.Env, conf *Config) (*RaftCache, error) {
 	}
 	rc.nodeHost = nodeHost
 
-	// PebbleLogDir is a parent directory for pebble data. Within this
-	// directory, subdirs will be created per raft (cluster_id, node_id).
-	pebbleLogDir := filepath.Join(conf.RootDir, "pebble")
-
-	// FileDir is a parent directory where files will be stored. This data
-	// is managed entirely by the raft statemachine.
-	fileDir := filepath.Join(conf.RootDir, "files")
-	if err := disk.EnsureDirectoryExists(fileDir); err != nil {
-		return nil, err
-	}
-
 	rc.apiClient = client.NewAPIClient(env, rc.nodeHost.ID())
 	rc.sender = sender.New(rc.rangeCache, rc.registry, rc.apiClient)
-	rc.store = store.New(pebbleLogDir, fileDir, rc.nodeHost, rc.gossipManager, rc.sender, rc.registry, rc.apiClient)
+	rc.store = store.New(conf.RootDir, rc.nodeHost, rc.gossipManager, rc.sender, rc.registry, rc.apiClient)
 	if err := rc.store.Start(rc.grpcAddress); err != nil {
 		return nil, err
 	}
@@ -237,7 +227,11 @@ func NewRaftCache(env environment.Env, conf *Config) (*RaftCache, error) {
 	}
 
 	// start the driver once bringup is complete.
-	rc.driver = driver.New(rc.store, rc.gossipManager, driver.TestingOpts())
+	driverOpts := driver.DefaultOpts()
+	if *testMode {
+		driverOpts = driver.TestingOpts()
+	}
+	rc.driver = driver.New(rc.store, rc.gossipManager, driverOpts)
 	go func() {
 		for !rc.clusterStarter.Done() {
 			time.Sleep(100 * time.Millisecond)

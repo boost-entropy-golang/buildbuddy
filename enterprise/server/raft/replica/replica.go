@@ -15,6 +15,8 @@ import (
 	"github.com/buildbuddy-io/buildbuddy/enterprise/server/raft/keys"
 	"github.com/buildbuddy-io/buildbuddy/enterprise/server/raft/rbuilder"
 	"github.com/buildbuddy-io/buildbuddy/enterprise/server/raft/sender"
+	"github.com/buildbuddy-io/buildbuddy/enterprise/server/util/pebbleutil"
+	"github.com/buildbuddy-io/buildbuddy/server/util/disk"
 	"github.com/buildbuddy-io/buildbuddy/server/util/log"
 	"github.com/buildbuddy-io/buildbuddy/server/util/rangemap"
 	"github.com/buildbuddy-io/buildbuddy/server/util/status"
@@ -64,10 +66,8 @@ type IStore interface {
 // It also provides opportunities for the system to signal Raft Log compactions
 // to free up disk spaces.
 type Replica struct {
-	db       *pebble.DB
-	closedMu *sync.RWMutex // PROTECTS(closed)
-	closed   bool
-	wg       sync.WaitGroup
+	db     *pebble.DB
+	leaser pebbleutil.Leaser
 
 	rootDir   string
 	fileDir   string
@@ -140,7 +140,7 @@ func (sm *Replica) Usage() (*rfpb.ReplicaUsage, error) {
 			NodeId:    sm.nodeID,
 		},
 	}
-	db, err := sm.ReadOnlyDB()
+	db, err := sm.leaser.DB()
 	if err != nil {
 		return nil, err
 	}
@@ -273,66 +273,6 @@ type ReplicaWriter interface {
 	NewSnapshot() *pebble.Snapshot
 }
 
-type refCounter struct {
-	wg     *sync.WaitGroup
-	closed bool
-}
-
-func newRefCounter(wg *sync.WaitGroup) *refCounter {
-	wg.Add(1)
-	return &refCounter{
-		wg:     wg,
-		closed: false,
-	}
-}
-func (r *refCounter) Close() error {
-	if !r.closed {
-		r.closed = true
-		r.wg.Add(-1)
-	}
-	return nil
-}
-
-type refCountedDB struct {
-	*pebble.DB
-	*refCounter
-}
-
-func (r *refCountedDB) Close() error {
-	// Just close the refcounter, not the DB.
-	return r.refCounter.Close()
-}
-
-func (sm *Replica) ReadOnlyDB() (ReplicaReader, error) {
-	sm.closedMu.RLock()
-	defer sm.closedMu.RUnlock()
-	if sm.closed {
-		return nil, status.FailedPreconditionError("db is closed.")
-	}
-
-	return &refCountedDB{
-		sm.db,
-		newRefCounter(&sm.wg),
-	}, nil
-}
-
-func (sm *Replica) DB() (ReplicaWriter, error) {
-	sm.closedMu.RLock()
-	defer sm.closedMu.RUnlock()
-	if sm.closed {
-		return nil, status.FailedPreconditionError("db is closed.")
-	}
-
-	// RLock the split lock. This prevents DB writes during a split.
-	sm.splitMu.RLock()
-	defer sm.splitMu.RUnlock()
-
-	return &refCountedDB{
-		sm.db,
-		newRefCounter(&sm.wg),
-	}, nil
-}
-
 // Open opens the existing on disk state machine to be used or it creates a
 // new state machine with empty state if it does not exist. Open returns the
 // most recent index value of the Raft log that has been persisted, or it
@@ -350,10 +290,8 @@ func (sm *Replica) Open(stopc <-chan struct{}) (uint64, error) {
 	if err != nil {
 		return 0, err
 	}
-	sm.closedMu.Lock()
 	sm.db = db
-	sm.closed = false
-	sm.closedMu.Unlock()
+	sm.leaser = pebbleutil.NewDBLeaser(db)
 
 	sm.checkAndSetRangeDescriptor(db)
 	return sm.getLastAppliedIndex(db)
@@ -541,10 +479,11 @@ func (sm *Replica) populateReplicaFromSnapshot(rightSM *Replica) error {
 	snap := sm.db.NewSnapshot()
 	defer snap.Close()
 
-	rightDB, err := rightSM.DB()
+	rightDB, err := rightSM.leaser.DB()
 	if err != nil {
 		return nil
 	}
+	defer rightDB.Close()
 
 	r, w := io.Pipe()
 	go func() {
@@ -628,6 +567,30 @@ func printRange(wb *pebble.Batch, tag string) {
 	defer iter.Close()
 }
 
+func (sm *Replica) deleteStoredFiles(start, end []byte) error {
+	ctx := context.Background()
+	iter := sm.db.NewIter(&pebble.IterOptions{
+		LowerBound: start,
+		UpperBound: end,
+	})
+	defer iter.Close()
+
+	for iter.First(); iter.Valid(); iter.Next() {
+		if isLocalKey(iter.Key()) {
+			continue
+		}
+
+		fileMetadata := &rfpb.FileMetadata{}
+		if err := proto.Unmarshal(iter.Value(), fileMetadata); err != nil {
+			return err
+		}
+		if err := sm.fileStorer.DeleteStoredFile(ctx, sm.fileDir, fileMetadata.GetStorageMetadata()); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (sm *Replica) split(wb *pebble.Batch, req *rfpb.SplitRequest) (*rfpb.SplitResponse, error) {
 	if req.GetLeft() == nil || req.GetProposedRight() == nil {
 		return nil, status.FailedPreconditionError("left and right ranges must be provided")
@@ -637,8 +600,8 @@ func (sm *Replica) split(wb *pebble.Batch, req *rfpb.SplitRequest) (*rfpb.SplitR
 	}
 
 	// Lock the range to external writes.
-	sm.splitMu.Lock()
-	defer sm.splitMu.Unlock()
+	sm.leaser.AcquireSplitLock()
+	defer sm.leaser.ReleaseSplitLock()
 
 	sm.rangeMu.Lock()
 	rd := sm.rangeDescriptor
@@ -656,7 +619,7 @@ func (sm *Replica) split(wb *pebble.Batch, req *rfpb.SplitRequest) (*rfpb.SplitR
 	}
 
 	// Populate the new replica.
-	rightDB, err := rightSM.DB()
+	rightDB, err := rightSM.leaser.DB()
 	if err != nil {
 		return nil, err
 	}
@@ -674,7 +637,13 @@ func (sm *Replica) split(wb *pebble.Batch, req *rfpb.SplitRequest) (*rfpb.SplitR
 	if err := rwb.DeleteRange(keys.Key{constants.MinByte}, sp.GetSplit(), nil /*ignored write options*/); err != nil {
 		return nil, err
 	}
+	if err := rightSM.deleteStoredFiles([]byte{constants.MinByte}, sp.GetSplit()); err != nil {
+		return nil, err
+	}
 	if err := wb.DeleteRange(sp.GetSplit(), keys.Key{constants.MaxByte}, nil /*ignored write options*/); err != nil {
+		return nil, err
+	}
+	if err := sm.deleteStoredFiles(sp.GetSplit(), []byte{constants.MaxByte}); err != nil {
 		return nil, err
 	}
 
@@ -886,8 +855,28 @@ func (f fnReadCloser) Close() error {
 	return f.fn()
 }
 
-func (sm *Replica) Reader(ctx context.Context, fileRecord *rfpb.FileRecord, offset, limit int64) (io.ReadCloser, error) {
-	db, err := sm.ReadOnlyDB()
+// validateRange checks that the requested range generation matches our range
+// generation. We perform the generation check both in the store and the replica
+// because of a race condition during splits. The replica may receive concurrent
+// read/write & split requests that may pass the store generation check and
+// enter the replica code. The split will hold the split lock and modify the
+// internal state with the new range information. goroutines that are unblocked
+// after the split lock is released need to verify that the generation has not
+// changed under them.
+func (sm *Replica) validateRange(header *rfpb.Header) error {
+	sm.rangeMu.RLock()
+	defer sm.rangeMu.RUnlock()
+	if sm.rangeDescriptor == nil {
+		return status.FailedPreconditionError("range descriptor is not set")
+	}
+	if sm.rangeDescriptor.GetGeneration() != header.GetGeneration() {
+		return status.OutOfRangeErrorf("%s: generation: %d requested: %d (split)", constants.RangeNotCurrentMsg, sm.rangeDescriptor.GetGeneration(), header.GetGeneration())
+	}
+	return nil
+}
+
+func (sm *Replica) Reader(ctx context.Context, header *rfpb.Header, fileRecord *rfpb.FileRecord, offset, limit int64) (io.ReadCloser, error) {
+	db, err := sm.leaser.DB()
 	if err != nil {
 		return nil, err
 	}
@@ -906,6 +895,10 @@ func (sm *Replica) Reader(ctx context.Context, fileRecord *rfpb.FileRecord, offs
 		return nil
 	}
 	defer cleanup()
+
+	if err := sm.validateRange(header); err != nil {
+		return nil, err
+	}
 
 	fileMetadataKey, err := sm.fileStorer.FileMetadataKey(fileRecord)
 	if err != nil {
@@ -930,12 +923,16 @@ func (sm *Replica) Reader(ctx context.Context, fileRecord *rfpb.FileRecord, offs
 	}}, nil
 }
 
-func (sm *Replica) FindMissing(ctx context.Context, fileRecords []*rfpb.FileRecord) ([]*rfpb.FileRecord, error) {
-	reader, err := sm.ReadOnlyDB()
+func (sm *Replica) FindMissing(ctx context.Context, header *rfpb.Header, fileRecords []*rfpb.FileRecord) ([]*rfpb.FileRecord, error) {
+	reader, err := sm.leaser.DB()
 	if err != nil {
 		return nil, err
 	}
 	defer reader.Close()
+
+	if err := sm.validateRange(header); err != nil {
+		return nil, err
+	}
 
 	iter := reader.NewIter(nil /*default iterOptions*/)
 	defer iter.Close()
@@ -980,8 +977,8 @@ func (dc *writeCloser) Write(p []byte) (int, error) {
 	return n, nil
 }
 
-func (sm *Replica) Writer(ctx context.Context, fileRecord *rfpb.FileRecord) (filestore.CommittedWriter, error) {
-	db, err := sm.DB()
+func (sm *Replica) Writer(ctx context.Context, header *rfpb.Header, fileRecord *rfpb.FileRecord) (filestore.CommittedWriter, error) {
+	db, err := sm.leaser.DB()
 	if err != nil {
 		return nil, err
 	}
@@ -999,6 +996,10 @@ func (sm *Replica) Writer(ctx context.Context, fileRecord *rfpb.FileRecord) (fil
 		return nil
 	}
 	defer cleanup()
+
+	if err := sm.validateRange(header); err != nil {
+		return nil, err
+	}
 
 	fileMetadataKey, err := sm.fileStorer.FileMetadataKey(fileRecord)
 	if err != nil {
@@ -1079,7 +1080,8 @@ func (sm *Replica) Writer(ctx context.Context, fileRecord *rfpb.FileRecord) (fil
 // Update returns an error when there is unrecoverable error when updating the
 // on disk state machine.
 func (sm *Replica) Update(entries []dbsm.Entry) ([]dbsm.Entry, error) {
-	db, err := sm.DB()
+
+	db, err := sm.leaser.DB()
 	if err != nil {
 		return nil, err
 	}
@@ -1151,7 +1153,7 @@ func (sm *Replica) Lookup(key interface{}) (interface{}, error) {
 		return nil, status.FailedPreconditionError("Cannot convert key to []byte")
 	}
 
-	db, err := sm.ReadOnlyDB()
+	db, err := sm.leaser.DB()
 	if err != nil {
 		return nil, err
 	}
@@ -1203,7 +1205,7 @@ func (sm *Replica) Sync() error {
 // PrepareSnapshot returns an error when there is unrecoverable error for
 // preparing the snapshot.
 func (sm *Replica) PrepareSnapshot() (interface{}, error) {
-	db, err := sm.DB()
+	db, err := sm.leaser.DB()
 	if err != nil {
 		return nil, err
 	}
@@ -1432,7 +1434,7 @@ func (sm *Replica) SaveSnapshot(preparedSnap interface{}, w io.Writer, quit <-ch
 // RecoverFromSnapshot is not required to synchronize its recovered in-core
 // state with that on disk.
 func (sm *Replica) RecoverFromSnapshot(r io.Reader, quit <-chan struct{}) error {
-	db, err := sm.DB()
+	db, err := sm.leaser.DB()
 	if err != nil {
 		return err
 	}
@@ -1442,7 +1444,7 @@ func (sm *Replica) RecoverFromSnapshot(r io.Reader, quit <-chan struct{}) error 
 		return err
 	}
 
-	readDB, err := sm.ReadOnlyDB()
+	readDB, err := sm.leaser.DB()
 	if err != nil {
 		return err
 	}
@@ -1476,13 +1478,7 @@ func (sm *Replica) RecoverFromSnapshot(r io.Reader, quit <-chan struct{}) error 
 // IOnDiskStateMachine instance has been closed, the Close method is not
 // allowed to update the state of IOnDiskStateMachine visible to the outside.
 func (sm *Replica) Close() error {
-	sm.closedMu.Lock()
-	defer sm.closedMu.Unlock()
-	if sm.closed {
-		return nil
-	}
-	sm.closed = true
-	sm.wg.Wait() // wait for all db users to finish up.
+	sm.leaser.Close()
 
 	sm.rangeMu.Lock()
 	rangeDescriptor := sm.rangeDescriptor
@@ -1491,17 +1487,17 @@ func (sm *Replica) Close() error {
 	if sm.store != nil && rangeDescriptor != nil {
 		sm.store.RemoveRange(rangeDescriptor, sm)
 	}
-	if sm.db != nil {
-		return sm.db.Close()
-	}
-	return nil
+	return sm.db.Close()
 }
 
 // CreateReplica creates an ondisk statemachine.
-func New(rootDir, fileDir string, clusterID, nodeID uint64, store IStore) *Replica {
+func New(rootDir string, clusterID, nodeID uint64, store IStore) *Replica {
+	fileDir := filepath.Join(rootDir, fmt.Sprintf("files-c%dn%d", clusterID, nodeID))
+	if err := disk.EnsureDirectoryExists(fileDir); err != nil {
+		log.Errorf("Error creating fileDir %q for replica: %s", fileDir, err)
+	}
 	return &Replica{
-		closedMu:   &sync.RWMutex{},
-		wg:         sync.WaitGroup{},
+		leaser:     nil,
 		rootDir:    rootDir,
 		fileDir:    fileDir,
 		clusterID:  clusterID,
