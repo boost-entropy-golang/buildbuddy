@@ -781,7 +781,7 @@ func (sm *Replica) split(wb *pebble.Batch, req *rfpb.SplitRequest) (*rfpb.SplitR
 			return nil, err
 		}
 	} else {
-		sm.log.Debugf("Split %+v doe not apply to this replica c%dn%d: skipping external changes!", req, sm.clusterID, sm.nodeID)
+		sm.log.Debugf("Split %+v does not apply to this replica c%dn%d: skipping external changes!", req, sm.clusterID, sm.nodeID)
 	}
 
 	// ensure that any data past the split point is deleted from this range.
@@ -1077,6 +1077,38 @@ func (sm *Replica) FindMissing(ctx context.Context, header *rfpb.Header, fileRec
 	return missing, nil
 }
 
+func (sm *Replica) GetMulti(ctx context.Context, header *rfpb.Header, fileRecords []*rfpb.FileRecord) ([]*rfpb.GetMultiResponse_Data, error) {
+	reader, err := sm.leaser.DB()
+	if err != nil {
+		return nil, err
+	}
+	defer reader.Close()
+
+	if err := sm.validateRange(header); err != nil {
+		return nil, err
+	}
+
+	var rsp []*rfpb.GetMultiResponse_Data
+	var buf bytes.Buffer
+	for _, fileRecord := range fileRecords {
+		rc, err := sm.Reader(ctx, header, fileRecord, 0, 0)
+		if err != nil {
+			return nil, err
+		}
+		_, err = io.Copy(&buf, rc)
+		rc.Close()
+		if err != nil {
+			return nil, err
+		}
+
+		data := make([]byte, buf.Len())
+		copy(data, buf.Bytes())
+		rsp = append(rsp, &rfpb.GetMultiResponse_Data{FileRecord: fileRecord, Data: data})
+		buf.Reset()
+	}
+	return rsp, nil
+}
+
 type writeCloser struct {
 	filestore.WriteCloserMetadata
 	commitFn     func(n int64) error
@@ -1212,7 +1244,6 @@ func (sm *Replica) Writer(ctx context.Context, header *rfpb.Header, fileRecord *
 // Update returns an error when there is unrecoverable error when updating the
 // on disk state machine.
 func (sm *Replica) Update(entries []dbsm.Entry) ([]dbsm.Entry, error) {
-
 	db, err := sm.leaser.DB()
 	if err != nil {
 		return nil, err
@@ -1565,6 +1596,10 @@ func (sm *Replica) RecoverFromSnapshot(r io.Reader, quit <-chan struct{}) error 
 	sm.lastAppliedIndex = newLastApplied
 	sm.checkAndSetRangeDescriptor(readDB)
 	return nil
+}
+
+func (sm *Replica) TestingDB() (pebbleutil.IPebbleDB, error) {
+	return sm.leaser.DB()
 }
 
 // Close closes the IOnDiskStateMachine instance. Close is invoked when the

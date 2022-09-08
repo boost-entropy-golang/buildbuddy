@@ -529,6 +529,23 @@ func (s *Store) FindMissing(ctx context.Context, req *rfpb.FindMissingRequest) (
 	}, nil
 }
 
+func (s *Store) GetMulti(ctx context.Context, req *rfpb.GetMultiRequest) (*rfpb.GetMultiResponse, error) {
+	if err := s.RangeIsActive(req.GetHeader()); err != nil {
+		return nil, err
+	}
+	r, err := s.GetReplica(req.GetHeader().GetRangeId())
+	if err != nil {
+		return nil, err
+	}
+	data, err := r.GetMulti(ctx, req.GetHeader(), req.GetFileRecord())
+	if err != nil {
+		return nil, err
+	}
+	return &rfpb.GetMultiResponse{
+		Data: data,
+	}, nil
+}
+
 type streamWriter struct {
 	stream rfspb.Api_ReadServer
 }
@@ -878,7 +895,9 @@ func (s *Store) SplitCluster(ctx context.Context, req *rfpb.SplitClusterRequest)
 		}
 		nodeGrpcAddrs[nhid] = grpcAddr
 	}
-	bootStrapInfo := bringup.MakeBootstrapInfo(newIDs.clusterID, newIDs.maxNodeID, nodeGrpcAddrs)
+
+	firstNodeID := newIDs.maxNodeID - uint64(len(existingMembers))
+	bootStrapInfo := bringup.MakeBootstrapInfo(newIDs.clusterID, firstNodeID, nodeGrpcAddrs)
 	stubRange := &rfpb.RangeDescriptor{
 		RangeId: newIDs.rangeID,
 	}
@@ -1209,6 +1228,7 @@ func (s *Store) reserveIDsForNewCluster(ctx context.Context, numNodes int) (*new
 		rangeID:   rangeIDIncrRsp.GetValue(),
 		maxNodeID: nodeIDsIncrRsp.GetValue(),
 	}
+
 	return ids, nil
 }
 
