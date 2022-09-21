@@ -23,15 +23,17 @@ go_library(
         "//server/util/status",
         "@com_github_pkg_errors//:errors",
         "@org_golang_x_sync//errgroup",
+        "@org_golang_x_time//rate",
     ],
 )
 
 go_test(
     name = "migration_cache_test",
-    size = "small",
+    size = "medium",
     srcs = ["migration_cache_test.go"],
     deps = [
         ":migration_cache",
+        "//enterprise/server/backends/pebble_cache",
         "//proto:remote_execution_go_proto",
         "//server/backends/disk_cache",
         "//server/environment",
