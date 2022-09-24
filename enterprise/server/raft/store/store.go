@@ -253,7 +253,7 @@ func (s *Store) GetRange(clusterID uint64) *rfpb.RangeDescriptor {
 // closed on this node will notify us when their range appears and disappears.
 // We'll use this information to drive the range tags we broadcast.
 func (s *Store) AddRange(rd *rfpb.RangeDescriptor, r *replica.Replica) {
-	s.log.Debugf("%q adding range: %d: [%q, %q)", s.nodeHost.ID(), rd.GetRangeId(), rd.GetLeft(), rd.GetRight())
+	s.log.Debugf("Adding range %d: [%q, %q) gen %d", rd.GetRangeId(), rd.GetLeft(), rd.GetRight(), rd.GetGeneration())
 	_, loaded := s.replicas.LoadOrStore(rd.GetRangeId(), r)
 	if loaded {
 		s.log.Warningf("AddRange stomped on another range. Did you forget to call RemoveRange?")
@@ -289,7 +289,7 @@ func (s *Store) AddRange(rd *rfpb.RangeDescriptor, r *replica.Replica) {
 }
 
 func (s *Store) RemoveRange(rd *rfpb.RangeDescriptor, r *replica.Replica) {
-	s.log.Debugf("%q remove range: %d: [%q, %q)", s.nodeHost.ID(), rd.GetRangeId(), rd.GetLeft(), rd.GetRight())
+	s.log.Debugf("Removing range %d: [%q, %q) gen %d", rd.GetRangeId(), rd.GetLeft(), rd.GetRight(), rd.GetGeneration())
 	s.replicas.Delete(rd.GetRangeId())
 
 	s.rangeMu.Lock()
@@ -494,6 +494,9 @@ func (s *Store) RemoveData(ctx context.Context, req *rfpb.RemoveDataRequest) (*r
 }
 
 func (s *Store) SyncPropose(ctx context.Context, req *rfpb.SyncProposeRequest) (*rfpb.SyncProposeResponse, error) {
+	if _, err := s.validatedRange(req.GetHeader()); err != nil {
+		return nil, err
+	}
 	r, err := s.GetReplica(req.GetHeader().GetRangeId())
 	if err != nil {
 		return nil, err
@@ -840,15 +843,7 @@ func (s *Store) loadSnapshot(ctx context.Context, req *rfpb.LoadSnapshotRequest)
 		if batch.Size() == 0 {
 			return nil
 		}
-		batchProto, err := batch.ToProto()
-		if err != nil {
-			return err
-		}
-		batchRsp, err := client.SyncProposeLocal(ctx, s.nodeHost, r.ClusterID, batchProto)
-		if err != nil {
-			return err
-		}
-		if err := rbuilder.NewBatchResponseFromProto(batchRsp).AnyError(); err != nil {
+		if err := client.SyncProposeLocalBatchNoRsp(ctx, s.nodeHost, r.ClusterID, batch); err != nil {
 			return err
 		}
 		batch = rbuilder.NewBatchBuilder()
@@ -934,39 +929,41 @@ func (s *Store) SplitCluster(ctx context.Context, req *rfpb.SplitClusterRequest)
 	firstNodeID := newIDs.maxNodeID - uint64(len(existingMembers))
 	bootStrapInfo := bringup.MakeBootstrapInfo(newIDs.clusterID, firstNodeID, nodeGrpcAddrs)
 
+	// Bump the local range descriptor so that outstanding reqeusts are rejected.
+	b := rbuilder.NewBatchBuilder()
+	oldLeftNewGen := proto.Clone(oldLeft).(*rfpb.RangeDescriptor)
+	oldLeftNewGen.Generation += 1
+	if err := addLocalRangeEdits(oldLeft, oldLeftNewGen, b); err != nil {
+		return nil, err
+	}
+	if err := client.SyncProposeLocalBatchNoRsp(ctx, s.nodeHost, clusterID, b); err != nil {
+		return nil, err
+	}
+
 	// Lock the cluster that is to be split.
 	// TODO(tylerw): add lease renewal goroutine instead of using such a long
 	// lease.
-	leaseReq, err := rbuilder.NewBatchBuilder().Add(&rfpb.SplitLeaseRequest{
+	leaseReq := rbuilder.NewBatchBuilder().Add(&rfpb.SplitLeaseRequest{
 		DurationSeconds: 10,
-	}).ToProto()
-	if err != nil {
+	})
+	if err := client.SyncProposeLocalBatchNoRsp(ctx, s.nodeHost, clusterID, leaseReq); err != nil {
 		return nil, err
 	}
-	leaseBatchRsp, err := client.SyncProposeLocal(ctx, s.nodeHost, clusterID, leaseReq)
-	if err != nil {
-		return nil, err
-	}
-	if err := rbuilder.NewBatchResponseFromProto(leaseBatchRsp).AnyError(); err != nil {
-		return nil, err
-	}
+
 	// Find an appropriate split point.
-	findSplitReq, err := rbuilder.NewBatchBuilder().Add(&rfpb.FindSplitPointRequest{}).ToProto()
+	findSplitReq := rbuilder.NewBatchBuilder().Add(&rfpb.FindSplitPointRequest{})
+	findSplitBatchRsp, err := client.SyncProposeLocalBatch(ctx, s.nodeHost, clusterID, findSplitReq)
 	if err != nil {
 		return nil, err
 	}
-	findSplitBatchRsp, err := client.SyncProposeLocal(ctx, s.nodeHost, clusterID, findSplitReq)
-	if err != nil {
-		return nil, err
-	}
-	findSplitRsp, err := rbuilder.NewBatchResponseFromProto(findSplitBatchRsp).FindSplitPointResponse(0)
+	findSplitRsp, err := findSplitBatchRsp.FindSplitPointResponse(0)
 	if err != nil {
 		return nil, err
 	}
 
 	// Create a new range descriptor for the left range. This will be inserted
 	// when the split lock is released, if the split succeeds successfully.
-	newLeft := proto.Clone(oldLeft).(*rfpb.RangeDescriptor)
+	newLeft := proto.Clone(oldLeftNewGen).(*rfpb.RangeDescriptor)
 	newLeft.Generation += 1 // increment rd generation upon split
 	newLeft.Right = findSplitRsp.GetSplit()
 
@@ -1006,22 +1003,16 @@ func (s *Store) SplitCluster(ctx context.Context, req *rfpb.SplitClusterRequest)
 	if err != nil {
 		return nil, err
 	}
-	copyStoredFiles, err := rbuilder.NewBatchBuilder().Add(&rfpb.CopyStoredFilesRequest{
+	copyStoredFiles := rbuilder.NewBatchBuilder().Add(&rfpb.CopyStoredFilesRequest{
 		SourceRange:   oldLeft,
 		TargetRangeId: newIDs.rangeID,
 		Start:         findSplitRsp.GetSplit(),
 		End:           oldLeft.GetRight(),
-	}).ToProto()
-	if err != nil {
+	})
+	if err := client.SyncProposeLocalBatchNoRsp(ctx, s.nodeHost, clusterID, copyStoredFiles); err != nil {
 		return nil, err
 	}
-	copyStoredFilesBatch, err := client.SyncProposeLocal(ctx, s.nodeHost, clusterID, copyStoredFiles)
-	if err != nil {
-		return nil, err
-	}
-	if err := rbuilder.NewBatchResponseFromProto(copyStoredFilesBatch).AnyError(); err != nil {
-		return nil, err
-	}
+
 	loadSnapReq := &rfpb.LoadSnapshotRequest{
 		Header: &rfpb.Header{
 			RangeId:    newIDs.rangeID,
@@ -1037,19 +1028,12 @@ func (s *Store) SplitCluster(ctx context.Context, req *rfpb.SplitClusterRequest)
 	// about to be activated.
 	oldRight := proto.Clone(newRight).(*rfpb.RangeDescriptor)
 	newRight.Replicas = bootStrapInfo.Replicas
-	b := rbuilder.NewBatchBuilder()
+	b = rbuilder.NewBatchBuilder()
 	if err := addLocalRangeEdits(oldRight, newRight, b); err != nil {
 		return nil, err
 	}
-	newRightReplicasBatch, err := b.ToProto()
-	if err != nil {
-		return nil, err
-	}
-	rightReplicasRspBatch, err := client.SyncProposeLocal(ctx, s.nodeHost, newIDs.clusterID, newRightReplicasBatch)
-	if err != nil {
-		return nil, err
-	}
-	if err := rbuilder.NewBatchResponseFromProto(rightReplicasRspBatch).AnyError(); err != nil {
+
+	if err := client.SyncProposeLocalBatchNoRsp(ctx, s.nodeHost, newIDs.clusterID, b); err != nil {
 		return nil, err
 	}
 
@@ -1061,40 +1045,27 @@ func (s *Store) SplitCluster(ctx context.Context, req *rfpb.SplitClusterRequest)
 	// Finally, update this ranges RangeDescriptor to reflect the fact that
 	// it is now split, and unlock it.
 	b = rbuilder.NewBatchBuilder()
-	if err := addLocalRangeEdits(oldLeft, newLeft, b); err != nil {
+	if err := addLocalRangeEdits(oldLeftNewGen, newLeft, b); err != nil {
 		return nil, err
 	}
 	batchProto, err := b.ToProto()
 	if err != nil {
 		return nil, err
 	}
-	releaseReq, err := rbuilder.NewBatchBuilder().Add(&rfpb.SplitReleaseRequest{
+	releaseReq := rbuilder.NewBatchBuilder().Add(&rfpb.SplitReleaseRequest{
 		Batch: batchProto,
-	}).ToProto()
-	if err != nil {
-		return nil, err
-	}
-	releaseRsp, err := client.SyncProposeLocal(ctx, s.nodeHost, clusterID, releaseReq)
-	if err != nil {
-		return nil, err
-	}
-	if err := rbuilder.NewBatchResponseFromProto(releaseRsp).AnyError(); err != nil {
+	})
+
+	if err := client.SyncProposeLocalBatchNoRsp(ctx, s.nodeHost, clusterID, releaseReq); err != nil {
 		return nil, err
 	}
 
 	// Delete old data from left range
-	deleteReq, err := rbuilder.NewBatchBuilder().Add(&rfpb.DeleteRangeRequest{
+	deleteReq := rbuilder.NewBatchBuilder().Add(&rfpb.DeleteRangeRequest{
 		Start: newLeft.Right,
 		End:   oldLeft.Right,
-	}).ToProto()
-	if err != nil {
-		return nil, err
-	}
-	deleteRsp, err := client.SyncProposeLocal(ctx, s.nodeHost, clusterID, deleteReq)
-	if err != nil {
-		return nil, err
-	}
-	if err := rbuilder.NewBatchResponseFromProto(deleteRsp).AnyError(); err != nil {
+	})
+	if err := client.SyncProposeLocalBatchNoRsp(ctx, s.nodeHost, clusterID, deleteReq); err != nil {
 		return nil, err
 	}
 
@@ -1211,7 +1182,7 @@ func (s *Store) AddClusterNode(ctx context.Context, req *rfpb.AddClusterNodeRequ
 	}, nil
 }
 
-// AddClusterNode removes a new node from the specified cluster if pre-reqs are
+// RemoveClusterNode removes a new node from the specified cluster if pre-reqs are
 // met. Pre-reqs are:
 //  * The request must be valid and contain all information
 //  * This node must be a member of the cluster that is being removed from
@@ -1464,41 +1435,54 @@ func (s *Store) updateRangeDescriptor(ctx context.Context, clusterID uint64, old
 	if err != nil {
 		return err
 	}
-	rangeLocalBatch, err := rbuilder.NewBatchBuilder().Add(&rfpb.CASRequest{
-		Kv: &rfpb.KV{
-			Key:   constants.LocalRangeKey,
-			Value: newBuf,
-		},
-		ExpectedValue: oldBuf,
-	}).ToProto()
-	if err != nil {
+
+	metaRangeBatch := rbuilder.NewBatchBuilder()
+	localBatch := rbuilder.NewBatchBuilder()
+	if err := addLocalRangeEdits(old, new, localBatch); err != nil {
 		return err
 	}
-
 	metaRangeDescriptorKey := keys.RangeMetaKey(new.GetRight())
-	metaRangeBatch, err := rbuilder.NewBatchBuilder().Add(&rfpb.CASRequest{
+	metaRangeCasReq := &rfpb.CASRequest{
 		Kv: &rfpb.KV{
 			Key:   metaRangeDescriptorKey,
 			Value: newBuf,
 		},
 		ExpectedValue: oldBuf,
-	}).ToProto()
+	}
+
+	if clusterID == constants.InitialClusterID {
+		localBatch.Add(metaRangeCasReq)
+	} else {
+		metaRangeBatch.Add(metaRangeCasReq)
+	}
+
+	localReq, err := localBatch.ToProto()
 	if err != nil {
 		return err
 	}
 
-	// first update the range descriptor in the range itself
-	rangeLocalRsp, err := client.SyncProposeLocal(ctx, s.nodeHost, clusterID, rangeLocalBatch)
+	// Update the local range.
+	localRsp, err := client.SyncProposeLocal(ctx, s.nodeHost, clusterID, localReq)
 	if err != nil {
 		return err
 	}
-	_, err = rbuilder.NewBatchResponseFromProto(rangeLocalRsp).CASResponse(0)
+	_, err = rbuilder.NewBatchResponseFromProto(localRsp).CASResponse(0)
 	if err != nil {
 		return err
+	}
+	// If both changes (to local and metarange descriptors) applied to the
+	// MetaRange, they were applied in the localReq, and there's nothing
+	// remaining to do.
+	if metaRangeBatch.Size() == 0 {
+		return nil
 	}
 
-	// then update the metarange
-	metaRangeRsp, err := s.sender.SyncPropose(ctx, metaRangeDescriptorKey, metaRangeBatch)
+	// Update the metarange.
+	metaReq, err := metaRangeBatch.ToProto()
+	if err != nil {
+		return err
+	}
+	metaRangeRsp, err := s.sender.SyncPropose(ctx, metaRangeDescriptorKey, metaReq)
 	if err != nil {
 		return err
 	}
