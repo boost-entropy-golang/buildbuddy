@@ -308,55 +308,54 @@ func (s *Store) RemoveRange(rd *rfpb.RangeDescriptor, r *replica.Replica) {
 // validatedRange verifies that the header is valid and the client is using
 // an up-to-date range descriptor. In most cases, it's also necessary to verify
 // that a local replica has a range lease for the given range ID which can be
-// done by using the RangeIsActive function.
-func (s *Store) validatedRange(header *rfpb.Header) (*rfpb.RangeDescriptor, error) {
+// done by using the LeasedRange function.
+func (s *Store) validatedRange(header *rfpb.Header) (*replica.Replica, *rfpb.RangeDescriptor, error) {
 	if header == nil {
-		return nil, status.FailedPreconditionError("Nil header not allowed")
+		return nil, nil, status.FailedPreconditionError("Nil header not allowed")
 	}
 
 	s.rangeMu.RLock()
 	rd, rangeOK := s.openRanges[header.GetRangeId()]
 	s.rangeMu.RUnlock()
 	if !rangeOK {
-		return nil, status.OutOfRangeErrorf("%s: range %d", constants.RangeNotFoundMsg, header.GetRangeId())
+		return nil, nil, status.OutOfRangeErrorf("%s: range %d", constants.RangeNotFoundMsg, header.GetRangeId())
 	}
 
 	if len(rd.GetReplicas()) == 0 {
-		return nil, status.OutOfRangeErrorf("%s: range had no replicas %d", constants.RangeNotFoundMsg, header.GetRangeId())
+		return nil, nil, status.OutOfRangeErrorf("%s: range had no replicas %d", constants.RangeNotFoundMsg, header.GetRangeId())
+	}
+
+	r, err := s.GetReplica(header.GetRangeId())
+	if err != nil {
+		return nil, nil, err
 	}
 
 	// Ensure the header generation matches what we have locally -- if not,
 	// force client to go back and re-pull the rangeDescriptor from the meta
 	// range.
 	if rd.GetGeneration() != header.GetGeneration() {
-		return nil, status.OutOfRangeErrorf("%s: generation: %d requested: %d", constants.RangeNotCurrentMsg, rd.GetGeneration(), header.GetGeneration())
+		if r.IsSplitting() {
+			return nil, nil, status.OutOfRangeErrorf("%s: id %d generation: %d requested: %d", constants.RangeSplittingMsg, rd.GetRangeId(), rd.GetGeneration(), header.GetGeneration())
+		}
+		return nil, nil, status.OutOfRangeErrorf("%s: id %d generation: %d requested: %d", constants.RangeNotCurrentMsg, rd.GetRangeId(), rd.GetGeneration(), header.GetGeneration())
 	}
 
-	return rd, nil
+	return r, rd, nil
 }
 
-// rangeIsValid verifies that the header is valid and the client is using
-// an up-to-date range descriptor. In most cases, it's also necessary to verify
-// that a local replica has a range lease for the given range ID which can be
-// done by using the RangeIsActive function.
-func (s *Store) rangeIsValid(header *rfpb.Header) error {
-	_, err := s.validatedRange(header)
-	return err
-}
-
-// RangeIsActive verifies that the header is valid and the client is using
+// LeasedRange verifies that the header is valid and the client is using
 // an up-to-date range descriptor. It also checks that a local replica owns
 // the range lease for the requested range.
-func (s *Store) RangeIsActive(header *rfpb.Header) error {
-	rd, err := s.validatedRange(header)
+func (s *Store) LeasedRange(header *rfpb.Header) (*replica.Replica, error) {
+	r, rd, err := s.validatedRange(header)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	if rlIface, ok := s.leases.Load(header.GetRangeId()); ok {
 		if rl, ok := rlIface.(*rangelease.Lease); ok {
 			if rl.Valid() {
-				return nil
+				return r, nil
 			}
 		} else {
 			alert.UnexpectedEvent("unexpected_leases_map_type_error")
@@ -364,7 +363,7 @@ func (s *Store) RangeIsActive(header *rfpb.Header) error {
 	}
 
 	go s.maybeAcquireRangeLease(rd)
-	return status.OutOfRangeErrorf("%s: no lease found for range: %d", constants.RangeLeaseInvalidMsg, header.GetRangeId())
+	return nil, status.OutOfRangeErrorf("%s: no lease found for range: %d", constants.RangeLeaseInvalidMsg, header.GetRangeId())
 }
 
 func (s *Store) ReplicaFactoryFn(clusterID, nodeID uint64) dbsm.IOnDiskStateMachine {
@@ -494,10 +493,7 @@ func (s *Store) RemoveData(ctx context.Context, req *rfpb.RemoveDataRequest) (*r
 }
 
 func (s *Store) SyncPropose(ctx context.Context, req *rfpb.SyncProposeRequest) (*rfpb.SyncProposeResponse, error) {
-	if _, err := s.validatedRange(req.GetHeader()); err != nil {
-		return nil, err
-	}
-	r, err := s.GetReplica(req.GetHeader().GetRangeId())
+	r, _, err := s.validatedRange(req.GetHeader())
 	if err != nil {
 		return nil, err
 	}
@@ -540,10 +536,7 @@ func (s *Store) SyncRead(ctx context.Context, req *rfpb.SyncReadRequest) (*rfpb.
 }
 
 func (s *Store) FindMissing(ctx context.Context, req *rfpb.FindMissingRequest) (*rfpb.FindMissingResponse, error) {
-	if err := s.RangeIsActive(req.GetHeader()); err != nil {
-		return nil, err
-	}
-	r, err := s.GetReplica(req.GetHeader().GetRangeId())
+	r, err := s.LeasedRange(req.GetHeader())
 	if err != nil {
 		return nil, err
 	}
@@ -557,10 +550,7 @@ func (s *Store) FindMissing(ctx context.Context, req *rfpb.FindMissingRequest) (
 }
 
 func (s *Store) GetMulti(ctx context.Context, req *rfpb.GetMultiRequest) (*rfpb.GetMultiResponse, error) {
-	if err := s.RangeIsActive(req.GetHeader()); err != nil {
-		return nil, err
-	}
-	r, err := s.GetReplica(req.GetHeader().GetRangeId())
+	r, err := s.LeasedRange(req.GetHeader())
 	if err != nil {
 		return nil, err
 	}
@@ -585,10 +575,7 @@ func (w *streamWriter) Write(buf []byte) (int, error) {
 }
 
 func (s *Store) Read(req *rfpb.ReadRequest, stream rfspb.Api_ReadServer) error {
-	if err := s.RangeIsActive(req.GetHeader()); err != nil {
-		return err
-	}
-	r, err := s.GetReplica(req.GetHeader().GetRangeId())
+	r, err := s.LeasedRange(req.GetHeader())
 	if err != nil {
 		return err
 	}
@@ -621,14 +608,11 @@ func (s *Store) Write(stream rfspb.Api_WriteServer) error {
 			return err
 		}
 		if writeCloser == nil {
-			if err := s.rangeIsValid(req.GetHeader()); err != nil {
-				return err
-			}
 			// It's expected that clients will directly write bytes
 			// to all replicas in a range and then syncpropose a
 			// write which confirms the data is in place. For that
 			// reason, we don't check if the range is leased here.
-			r, err := s.GetReplica(req.GetHeader().GetRangeId())
+			r, _, err := s.validatedRange(req.GetHeader())
 			if err != nil {
 				return err
 			}
@@ -868,6 +852,16 @@ func (s *Store) loadSnapshot(ctx context.Context, req *rfpb.LoadSnapshotRequest)
 	return &rfpb.LoadSnapshotResponse{}, nil
 }
 
+func casRevert(cas *rfpb.CASRequest) *rfpb.CASRequest {
+	return &rfpb.CASRequest{
+		Kv: &rfpb.KV{
+			Key:   cas.GetKv().GetKey(),
+			Value: cas.GetExpectedValue(),
+		},
+		ExpectedValue: cas.GetKv().GetValue(),
+	}
+}
+
 // SplitCluster splits a raft range into two roughly equal parts. For the time
 // being, splits are only supported for ranges active on this cluster.
 //
@@ -883,7 +877,7 @@ func (s *Store) loadSnapshot(ctx context.Context, req *rfpb.LoadSnapshotRequest)
 //   new endpoints.
 // 6) The split range is unlocked.
 func (s *Store) SplitCluster(ctx context.Context, req *rfpb.SplitClusterRequest) (*rfpb.SplitClusterResponse, error) {
-	if err := s.RangeIsActive(req.GetHeader()); err != nil {
+	if _, err := s.LeasedRange(req.GetHeader()); err != nil {
 		return nil, err
 	}
 
@@ -930,20 +924,21 @@ func (s *Store) SplitCluster(ctx context.Context, req *rfpb.SplitClusterRequest)
 	bootStrapInfo := bringup.MakeBootstrapInfo(newIDs.clusterID, firstNodeID, nodeGrpcAddrs)
 
 	// Bump the local range descriptor so that outstanding reqeusts are rejected.
-	b := rbuilder.NewBatchBuilder()
 	oldLeftNewGen := proto.Clone(oldLeft).(*rfpb.RangeDescriptor)
 	oldLeftNewGen.Generation += 1
-	if err := addLocalRangeEdits(oldLeft, oldLeftNewGen, b); err != nil {
-		return nil, err
-	}
-	if err := client.SyncProposeLocalBatchNoRsp(ctx, s.nodeHost, clusterID, b); err != nil {
-		return nil, err
-	}
 
+	cas, err := casRangeEdit(constants.LocalRangeKey, oldLeft, oldLeftNewGen)
+	if err != nil {
+		return nil, err
+	}
+	if err := client.SyncProposeLocalBatchNoRsp(ctx, s.nodeHost, clusterID, rbuilder.NewBatchBuilder().Add(cas)); err != nil {
+		return nil, err
+	}
 	// Lock the cluster that is to be split.
 	// TODO(tylerw): add lease renewal goroutine instead of using such a long
 	// lease.
 	leaseReq := rbuilder.NewBatchBuilder().Add(&rfpb.SplitLeaseRequest{
+		CasOnExpiry:     casRevert(cas),
 		DurationSeconds: 10,
 	})
 	if err := client.SyncProposeLocalBatchNoRsp(ctx, s.nodeHost, clusterID, leaseReq); err != nil {
@@ -1028,7 +1023,7 @@ func (s *Store) SplitCluster(ctx context.Context, req *rfpb.SplitClusterRequest)
 	// about to be activated.
 	oldRight := proto.Clone(newRight).(*rfpb.RangeDescriptor)
 	newRight.Replicas = bootStrapInfo.Replicas
-	b = rbuilder.NewBatchBuilder()
+	b := rbuilder.NewBatchBuilder()
 	if err := addLocalRangeEdits(oldRight, newRight, b); err != nil {
 		return nil, err
 	}
@@ -1273,7 +1268,7 @@ func (s *Store) ListCluster(ctx context.Context, req *rfpb.ListClusterRequest) (
 				RangeId:    rd.GetRangeId(),
 				Generation: rd.GetGeneration(),
 			}
-			if err := s.RangeIsActive(header); err != nil {
+			if _, err := s.LeasedRange(header); err != nil {
 				continue
 			}
 		}
@@ -1348,22 +1343,30 @@ func (s *Store) reserveIDsForNewCluster(ctx context.Context, numNodes int) (*new
 	return ids, nil
 }
 
-func addLocalRangeEdits(oldLeft, newLeft *rfpb.RangeDescriptor, b *rbuilder.BatchBuilder) error {
-	newLeftBuf, err := proto.Marshal(newLeft)
+func casRangeEdit(key []byte, old, new *rfpb.RangeDescriptor) (*rfpb.CASRequest, error) {
+	newBuf, err := proto.Marshal(new)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	oldLeftBuf, err := proto.Marshal(oldLeft)
+	oldBuf, err := proto.Marshal(old)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	b = b.Add(&rfpb.CASRequest{
+	return &rfpb.CASRequest{
 		Kv: &rfpb.KV{
-			Key:   constants.LocalRangeKey,
-			Value: newLeftBuf,
+			Key:   key,
+			Value: newBuf,
 		},
-		ExpectedValue: oldLeftBuf,
-	})
+		ExpectedValue: oldBuf,
+	}, nil
+}
+
+func addLocalRangeEdits(oldLeft, newLeft *rfpb.RangeDescriptor, b *rbuilder.BatchBuilder) error {
+	cas, err := casRangeEdit(constants.LocalRangeKey, oldLeft, newLeft)
+	if err != nil {
+		return err
+	}
+	b = b.Add(cas)
 	return nil
 }
 
