@@ -19,6 +19,7 @@ import (
 	"github.com/aws/aws-sdk-go/service/s3"
 	"github.com/aws/aws-sdk-go/service/s3/s3manager"
 	"github.com/aws/aws-sdk-go/service/sts"
+	"github.com/buildbuddy-io/buildbuddy/proto/resource"
 	"github.com/buildbuddy-io/buildbuddy/server/environment"
 	"github.com/buildbuddy-io/buildbuddy/server/interfaces"
 	"github.com/buildbuddy-io/buildbuddy/server/remote_cache/digest"
@@ -250,8 +251,8 @@ func isNotFoundErr(err error) bool {
 	}
 }
 
-func (s3c *S3Cache) WithIsolation(ctx context.Context, cacheType interfaces.CacheType, remoteInstanceName string) (interfaces.Cache, error) {
-	newPrefix := filepath.Join(remoteInstanceName, cacheType.Prefix())
+func (s3c *S3Cache) WithIsolation(ctx context.Context, cacheType resource.CacheType, remoteInstanceName string) (interfaces.Cache, error) {
+	newPrefix := filepath.Join(remoteInstanceName, digest.CacheTypeToPrefix(cacheType))
 	if len(newPrefix) > 0 && newPrefix[len(newPrefix)-1] != '/' {
 		newPrefix += "/"
 	}
@@ -528,6 +529,7 @@ func (s3c *S3Cache) Reader(ctx context.Context, d *repb.Digest, offset, limit in
 type waitForUploadWriteCloser struct {
 	io.WriteCloser
 	ctx           context.Context
+	cancelFunc    context.CancelFunc
 	finishedWrite chan struct{}
 	timer         *cache_metrics.CacheTimer
 	size          int64
@@ -539,7 +541,7 @@ func (w *waitForUploadWriteCloser) Write(p []byte) (int, error) {
 	return w.WriteCloser.Write(p)
 }
 
-func (w *waitForUploadWriteCloser) Close() error {
+func (w *waitForUploadWriteCloser) Commit() error {
 	err := w.WriteCloser.Close()
 	if err != nil {
 		return err
@@ -548,7 +550,11 @@ func (w *waitForUploadWriteCloser) Close() error {
 	return nil
 }
 
-func (s3c *S3Cache) Writer(ctx context.Context, d *repb.Digest) (io.WriteCloser, error) {
+func (w *waitForUploadWriteCloser) Close() error {
+	w.cancelFunc()
+	return nil
+}
+func (s3c *S3Cache) Writer(ctx context.Context, d *repb.Digest) (interfaces.CommittedWriteCloser, error) {
 	k, err := s3c.key(ctx, d)
 	if err != nil {
 		return nil, err
@@ -561,9 +567,11 @@ func (s3c *S3Cache) Writer(ctx context.Context, d *repb.Digest) (io.WriteCloser,
 		Body:   r,
 	}
 	timer := cache_metrics.NewCacheTimer(cacheLabels)
+	ctx, cancel := context.WithCancel(ctx)
 	closer := &waitForUploadWriteCloser{
 		WriteCloser:   w,
 		ctx:           ctx,
+		cancelFunc:    cancel,
 		finishedWrite: make(chan struct{}),
 		timer:         timer,
 		size:          d.GetSizeBytes(),

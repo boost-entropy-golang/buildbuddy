@@ -11,6 +11,7 @@ import (
 
 	"github.com/buildbuddy-io/buildbuddy/enterprise/server/backends/migration_cache"
 	"github.com/buildbuddy-io/buildbuddy/enterprise/server/backends/pebble_cache"
+	"github.com/buildbuddy-io/buildbuddy/proto/resource"
 	"github.com/buildbuddy-io/buildbuddy/server/backends/disk_cache"
 	"github.com/buildbuddy-io/buildbuddy/server/environment"
 	"github.com/buildbuddy-io/buildbuddy/server/interfaces"
@@ -90,7 +91,7 @@ func (c *errorCache) FindMissing(ctx context.Context, digests []*repb.Digest) ([
 	return nil, errors.New("error cache findmissing err")
 }
 
-func (c *errorCache) Writer(ctx context.Context, d *repb.Digest) (io.WriteCloser, error) {
+func (c *errorCache) Writer(ctx context.Context, d *repb.Digest) (interfaces.CommittedWriteCloser, error) {
 	return nil, errors.New("error cache writer err")
 }
 
@@ -113,7 +114,7 @@ func TestACIsolation(t *testing.T) {
 
 	mc := migration_cache.NewMigrationCache(&migration_cache.MigrationConfig{}, srcCache, destCache)
 
-	c1, err := mc.WithIsolation(ctx, interfaces.ActionCacheType, "")
+	c1, err := mc.WithIsolation(ctx, resource.CacheType_AC, "")
 	require.NoError(t, err)
 
 	d1, buf1 := testdigest.NewRandomDigestBuf(t, 100)
@@ -142,7 +143,7 @@ func TestACIsolation_RemoteInstanceName(t *testing.T) {
 	require.NoError(t, err)
 	mc := migration_cache.NewMigrationCache(&migration_cache.MigrationConfig{}, srcCache, destCache)
 
-	c1, err := mc.WithIsolation(ctx, interfaces.ActionCacheType, "remote")
+	c1, err := mc.WithIsolation(ctx, resource.CacheType_AC, "remote")
 	require.NoError(t, err)
 
 	d1, buf1 := testdigest.NewRandomDigestBuf(t, 100)
@@ -818,6 +819,9 @@ func TestReadWrite(t *testing.T) {
 		_, err = w.Write(buf)
 		require.NoError(t, err)
 
+		err = w.Commit()
+		require.NoError(t, err)
+
 		err = w.Close()
 		require.NoError(t, err)
 
@@ -883,6 +887,10 @@ func TestReaderWriter_DestFails(t *testing.T) {
 	// Should still write data to src cache without error
 	_, err = w.Write(buf)
 	require.NoError(t, err)
+
+	err = w.Commit()
+	require.NoError(t, err)
+
 	err = w.Close()
 	require.NoError(t, err)
 

@@ -10,10 +10,12 @@ import (
 
 	"github.com/bradfitz/gomemcache/memcache"
 	"github.com/buildbuddy-io/buildbuddy/enterprise/server/composable_cache"
+	"github.com/buildbuddy-io/buildbuddy/proto/resource"
 	"github.com/buildbuddy-io/buildbuddy/server/environment"
 	"github.com/buildbuddy-io/buildbuddy/server/interfaces"
 	"github.com/buildbuddy-io/buildbuddy/server/remote_cache/digest"
 	"github.com/buildbuddy-io/buildbuddy/server/util/flagutil"
+	"github.com/buildbuddy-io/buildbuddy/server/util/ioutil"
 	"github.com/buildbuddy-io/buildbuddy/server/util/log"
 	"github.com/buildbuddy-io/buildbuddy/server/util/prefix"
 	"github.com/buildbuddy-io/buildbuddy/server/util/status"
@@ -101,8 +103,8 @@ func (c *Cache) mcSet(key string, data []byte) error {
 	return c.mc.Set(makeItem(key, data))
 }
 
-func (c *Cache) WithIsolation(ctx context.Context, cacheType interfaces.CacheType, remoteInstanceName string) (interfaces.Cache, error) {
-	newPrefix := filepath.Join(remoteInstanceName, cacheType.Prefix())
+func (c *Cache) WithIsolation(ctx context.Context, cacheType resource.CacheType, remoteInstanceName string) (interfaces.Cache, error) {
+	newPrefix := filepath.Join(remoteInstanceName, digest.CacheTypeToPrefix(cacheType))
 	if len(newPrefix) > 0 && newPrefix[len(newPrefix)-1] != '/' {
 		newPrefix += "/"
 	}
@@ -291,17 +293,7 @@ func (c *Cache) Reader(ctx context.Context, d *repb.Digest, offset, limit int64)
 	return io.NopCloser(r), nil
 }
 
-type closeFn func(b *bytes.Buffer) error
-type setOnClose struct {
-	*bytes.Buffer
-	c closeFn
-}
-
-func (d *setOnClose) Close() error {
-	return d.c(d.Buffer)
-}
-
-func (c *Cache) Writer(ctx context.Context, d *repb.Digest) (io.WriteCloser, error) {
+func (c *Cache) Writer(ctx context.Context, d *repb.Digest) (interfaces.CommittedWriteCloser, error) {
 	if !eligibleForMc(d) {
 		return nil, status.ResourceExhaustedErrorf("Writer: Digest %v too big for memcache", d)
 	}
@@ -310,13 +302,12 @@ func (c *Cache) Writer(ctx context.Context, d *repb.Digest) (io.WriteCloser, err
 		return nil, err
 	}
 	var buffer bytes.Buffer
-	return &setOnClose{
-		Buffer: &buffer,
-		c: func(b *bytes.Buffer) error {
-			// Locking and key prefixing are handled in Set.
-			return c.mcSet(k, b.Bytes())
-		},
-	}, nil
+	wc := ioutil.NewCustomCommitWriteCloser(&buffer)
+	wc.CommitFn = func(int64) error {
+		// Locking and key prefixing are handled in Set.
+		return c.mcSet(k, buffer.Bytes())
+	}
+	return wc, nil
 }
 
 func (c *Cache) Start() error {

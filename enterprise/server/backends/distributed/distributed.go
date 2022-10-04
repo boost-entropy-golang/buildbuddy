@@ -14,8 +14,10 @@ import (
 	"github.com/buildbuddy-io/buildbuddy/enterprise/server/util/cacheproxy"
 	"github.com/buildbuddy-io/buildbuddy/enterprise/server/util/heartbeat"
 	"github.com/buildbuddy-io/buildbuddy/enterprise/server/util/redisutil"
+	"github.com/buildbuddy-io/buildbuddy/proto/resource"
 	"github.com/buildbuddy-io/buildbuddy/server/environment"
 	"github.com/buildbuddy-io/buildbuddy/server/interfaces"
+	"github.com/buildbuddy-io/buildbuddy/server/remote_cache/digest"
 	"github.com/buildbuddy-io/buildbuddy/server/resources"
 	"github.com/buildbuddy-io/buildbuddy/server/util/background"
 	"github.com/buildbuddy-io/buildbuddy/server/util/consistent_hash"
@@ -323,24 +325,24 @@ func (c *Cache) Shutdown(ctx context.Context) error {
 	return c.cacheProxy.Shutdown(ctx)
 }
 
-func toProtoCacheType(cacheType interfaces.CacheType) (dcpb.Isolation_CacheType, error) {
+func toProtoCacheType(cacheType resource.CacheType) (dcpb.Isolation_CacheType, error) {
 	switch cacheType {
-	case interfaces.CASCacheType:
+	case resource.CacheType_CAS:
 		return dcpb.Isolation_CAS_CACHE, nil
-	case interfaces.ActionCacheType:
+	case resource.CacheType_AC:
 		return dcpb.Isolation_ACTION_CACHE, nil
 	default:
 		return dcpb.Isolation_UNKNOWN_TYPE, status.InvalidArgumentErrorf("Unknown cache type %v", cacheType)
 	}
 }
 
-func (c *Cache) WithIsolation(ctx context.Context, cacheType interfaces.CacheType, remoteInstanceName string) (interfaces.Cache, error) {
+func (c *Cache) WithIsolation(ctx context.Context, cacheType resource.CacheType, remoteInstanceName string) (interfaces.Cache, error) {
 	newLocal, err := c.local.WithIsolation(ctx, cacheType, remoteInstanceName)
 	if err != nil {
 		return nil, err
 	}
 
-	newPrefix := filepath.Join(remoteInstanceName, cacheType.Prefix())
+	newPrefix := filepath.Join(remoteInstanceName, digest.CacheTypeToPrefix(cacheType))
 	if len(newPrefix) > 0 && newPrefix[len(newPrefix)-1] != '/' {
 		newPrefix += "/"
 	}
@@ -435,7 +437,7 @@ func (c *Cache) remoteReader(ctx context.Context, peer string, isolation *dcpb.I
 	}
 	return c.cacheProxy.RemoteReader(ctx, peer, isolation, d, offset, limit)
 }
-func (c *Cache) remoteWriter(ctx context.Context, peer, handoffPeer string, isolation *dcpb.Isolation, d *repb.Digest) (io.WriteCloser, error) {
+func (c *Cache) remoteWriter(ctx context.Context, peer, handoffPeer string, isolation *dcpb.Isolation, d *repb.Digest) (interfaces.CommittedWriteCloser, error) {
 	if c.config.EnableLocalWrites && peer == c.config.ListenAddr {
 		// No prefix necessary -- it's already set on the local cache.
 		return c.local.Writer(ctx, d)
@@ -474,6 +476,9 @@ func (c *Cache) sendFile(ctx context.Context, d *repb.Digest, isolation *dcpb.Is
 	if _, err := io.Copy(rwc, r); err != nil {
 		return err
 	}
+	if err := rwc.Commit(); err != nil {
+		return err
+	}
 	return rwc.Close()
 }
 
@@ -491,6 +496,9 @@ func (c *Cache) copyFile(ctx context.Context, d *repb.Digest, source string, iso
 		return err
 	}
 	if _, err := io.Copy(rwc, r); err != nil {
+		return err
+	}
+	if err := rwc.Commit(); err != nil {
 		return err
 	}
 	return rwc.Close()
@@ -860,7 +868,7 @@ type multiWriteCloser struct {
 	ctx           context.Context
 	log           log.Logger
 	isolation     *dcpb.Isolation
-	peerClosers   map[string]io.WriteCloser
+	peerClosers   map[string]interfaces.CommittedWriteCloser
 	mu            *sync.Mutex
 	d             *repb.Digest
 	listenAddr    string
@@ -886,13 +894,13 @@ func (mc *multiWriteCloser) Write(data []byte) (int, error) {
 	return len(data), eg.Wait()
 }
 
-func (mc *multiWriteCloser) Close() error {
+func (mc *multiWriteCloser) Commit() error {
 	eg, _ := errgroup.WithContext(mc.ctx)
 	for peer, wc := range mc.peerClosers {
 		wc := wc
 		peer := peer
 		eg.Go(func() error {
-			if err := wc.Close(); err != nil {
+			if err := wc.Commit(); err != nil {
 				return err
 			}
 			mc.log.Debugf("Successfully wrote %s to %q", cacheproxy.IsolationToString(mc.isolation)+mc.d.GetHash(), peer)
@@ -910,18 +918,34 @@ func (mc *multiWriteCloser) Close() error {
 	return err
 }
 
+func (mc *multiWriteCloser) Close() error {
+	eg, _ := errgroup.WithContext(mc.ctx)
+	for peer, wc := range mc.peerClosers {
+		wc := wc
+		peer := peer
+		eg.Go(func() error {
+			if err := wc.Close(); err != nil {
+				log.Errorf("Error closing peer %q writer: %s", peer, err)
+			}
+			return nil
+		})
+	}
+	err := eg.Wait()
+	return err
+}
+
 // Attempt to write digest to N peers (where N == replicationFactor).
 // Return an unavailable error if less than a quarum of peers can be
 // written to.
 //
 // This is like setting WRITE_CONSISTENCY = QUORUM.
-func (c *Cache) multiWriter(ctx context.Context, d *repb.Digest) (io.WriteCloser, error) {
+func (c *Cache) multiWriter(ctx context.Context, d *repb.Digest) (interfaces.CommittedWriteCloser, error) {
 	ps := c.peers(d)
 	mwc := &multiWriteCloser{
 		ctx:         ctx,
 		log:         c.log,
 		d:           d,
-		peerClosers: make(map[string]io.WriteCloser, 0),
+		peerClosers: make(map[string]interfaces.CommittedWriteCloser, 0),
 		mu:          &sync.Mutex{},
 		listenAddr:  c.config.ListenAddr,
 		isolation:   c.isolation,
@@ -953,6 +977,9 @@ func (c *Cache) Set(ctx context.Context, d *repb.Digest, data []byte) error {
 		return err
 	}
 	if _, err := wc.Write(data); err != nil {
+		return err
+	}
+	if err := wc.Commit(); err != nil {
 		return err
 	}
 	return wc.Close()
@@ -995,6 +1022,10 @@ func (c *Cache) Reader(ctx context.Context, d *repb.Digest, offset, limit int64)
 	return c.distributedReader(ctx, d, offset, limit)
 }
 
-func (c *Cache) Writer(ctx context.Context, d *repb.Digest) (io.WriteCloser, error) {
-	return c.multiWriter(ctx, d)
+func (c *Cache) Writer(ctx context.Context, d *repb.Digest) (interfaces.CommittedWriteCloser, error) {
+	mwc, err := c.multiWriter(ctx, d)
+	if err != nil {
+		return nil, err
+	}
+	return mwc, nil
 }

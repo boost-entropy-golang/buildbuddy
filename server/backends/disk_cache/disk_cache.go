@@ -16,6 +16,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/buildbuddy-io/buildbuddy/proto/resource"
 	"github.com/buildbuddy-io/buildbuddy/server/environment"
 	"github.com/buildbuddy-io/buildbuddy/server/interfaces"
 	"github.com/buildbuddy-io/buildbuddy/server/metrics"
@@ -23,6 +24,7 @@ import (
 	"github.com/buildbuddy-io/buildbuddy/server/util/alert"
 	"github.com/buildbuddy-io/buildbuddy/server/util/disk"
 	"github.com/buildbuddy-io/buildbuddy/server/util/flagutil"
+	"github.com/buildbuddy-io/buildbuddy/server/util/ioutil"
 	"github.com/buildbuddy-io/buildbuddy/server/util/log"
 	"github.com/buildbuddy-io/buildbuddy/server/util/lru"
 	"github.com/buildbuddy-io/buildbuddy/server/util/prefix"
@@ -154,10 +156,11 @@ type DiskCache struct {
 	addChan    chan *rfpb.FileMetadata
 	removeChan chan *rfpb.FileMetadata
 
+	// TODO(Maggie): Deprecate these fields
 	// The currently selected partition. Initialized to the default partition.
 	// WithRemoteInstanceName can create a new cache accessor with a different selected partition.
 	partition          *partition
-	cacheType          interfaces.CacheType
+	cacheType          resource.CacheType
 	remoteInstanceName string
 }
 
@@ -198,7 +201,7 @@ func NewDiskCache(env environment.Env, opts *Options, defaultMaxSizeBytes int64)
 	c := &DiskCache{
 		env:                env,
 		partitionMappings:  opts.PartitionMappings,
-		cacheType:          interfaces.CASCacheType,
+		cacheType:          resource.CacheType_CAS,
 		remoteInstanceName: "",
 	}
 
@@ -290,7 +293,7 @@ func (c *DiskCache) getPartition(ctx context.Context, remoteInstanceName string)
 	return c.partition, nil
 }
 
-func (c *DiskCache) WithIsolation(ctx context.Context, cacheType interfaces.CacheType, remoteInstanceName string) (interfaces.Cache, error) {
+func (c *DiskCache) WithIsolation(ctx context.Context, cacheType resource.CacheType, remoteInstanceName string) (interfaces.Cache, error) {
 	p, err := c.getPartition(ctx, remoteInstanceName)
 	if err != nil {
 		return nil, err
@@ -372,7 +375,7 @@ func (c *DiskCache) Reader(ctx context.Context, d *repb.Digest, offset, limit in
 	return c.partition.reader(ctx, c.cacheType, c.remoteInstanceName, d, offset, limit)
 }
 
-func (c *DiskCache) Writer(ctx context.Context, d *repb.Digest) (io.WriteCloser, error) {
+func (c *DiskCache) Writer(ctx context.Context, d *repb.Digest) (interfaces.CommittedWriteCloser, error) {
 	return c.partition.writer(ctx, c.cacheType, c.remoteInstanceName, d)
 }
 
@@ -674,7 +677,7 @@ func (p *partition) initializeCache() error {
 	return nil
 }
 
-func parseFilePath(rootDir, fullPath string, useV2Layout bool) (cacheType interfaces.CacheType, userPrefix, remoteInstanceName string, digestBytes []byte, err error) {
+func parseFilePath(rootDir, fullPath string, useV2Layout bool) (cacheType resource.CacheType, userPrefix, remoteInstanceName string, digestBytes []byte, err error) {
 	p := strings.TrimPrefix(fullPath, rootDir+"/")
 	parts := strings.Split(p, "/")
 
@@ -723,10 +726,10 @@ func parseFilePath(rootDir, fullPath string, useV2Layout bool) (cacheType interf
 	// If this is an /ac/ directory, this was an actionCache item
 	// otherwise it was a CAS item.
 	if len(parts) > 0 && parts[len(parts)-1] == "ac" {
-		cacheType = interfaces.ActionCacheType
+		cacheType = resource.CacheType_AC
 		parts = parts[:len(parts)-1]
 	} else {
-		cacheType = interfaces.CASCacheType
+		cacheType = resource.CacheType_CAS
 	}
 
 	if len(parts) > 0 {
@@ -780,9 +783,9 @@ func ScanDiskDirectory(scanDir string) <-chan *rfpb.FileMetadata {
 
 		isolation := &rfpb.Isolation{}
 		switch cacheType {
-		case interfaces.CASCacheType:
+		case resource.CacheType_CAS:
 			isolation.CacheType = rfpb.Isolation_CAS_CACHE
-		case interfaces.ActionCacheType:
+		case resource.CacheType_AC:
 			isolation.CacheType = rfpb.Isolation_ACTION_CACHE
 		default:
 			return status.InvalidArgumentErrorf("Unknown cache type %v", cacheType)
@@ -820,7 +823,7 @@ func ScanDiskDirectory(scanDir string) <-chan *rfpb.FileMetadata {
 
 type fileKey struct {
 	part               *partition
-	cacheType          interfaces.CacheType
+	cacheType          resource.CacheType
 	userPrefix         string
 	remoteInstanceName string
 	digestBytes        []byte
@@ -848,10 +851,10 @@ func (fk *fileKey) FullPath() string {
 	if fk.part.useV2Layout {
 		hashPrefixDir = digestHash[0:HashPrefixDirPrefixLen] + "/"
 	}
-	return filepath.Join(fk.part.rootDir, fk.userPrefix, fk.remoteInstanceName, fk.cacheType.Prefix(), hashPrefixDir+digestHash)
+	return filepath.Join(fk.part.rootDir, fk.userPrefix, fk.remoteInstanceName, digest.CacheTypeToPrefix(fk.cacheType), hashPrefixDir+digestHash)
 }
 
-func (p *partition) key(ctx context.Context, cacheType interfaces.CacheType, remoteInstanceName string, d *repb.Digest) (*fileKey, error) {
+func (p *partition) key(ctx context.Context, cacheType resource.CacheType, remoteInstanceName string, d *repb.Digest) (*fileKey, error) {
 	hash, err := digest.Validate(d)
 	if err != nil {
 		return nil, err
@@ -904,7 +907,7 @@ func (p *partition) addFileToLRUIfExists(key *fileKey) *fileRecord {
 	return nil
 }
 
-func (p *partition) lruGet(ctx context.Context, cacheType interfaces.CacheType, remoteInstanceName string, d *repb.Digest) (*fileRecord, error) {
+func (p *partition) lruGet(ctx context.Context, cacheType resource.CacheType, remoteInstanceName string, d *repb.Digest) (*fileRecord, error) {
 	k, err := p.key(ctx, cacheType, remoteInstanceName, d)
 	if err != nil {
 		return nil, err
@@ -942,7 +945,7 @@ func (p *partition) lruGet(ctx context.Context, cacheType interfaces.CacheType, 
 	return nil, nil
 }
 
-func (p *partition) findMissing(ctx context.Context, cacheType interfaces.CacheType, remoteInstanceName string, digests []*repb.Digest) ([]*repb.Digest, error) {
+func (p *partition) findMissing(ctx context.Context, cacheType resource.CacheType, remoteInstanceName string, digests []*repb.Digest) ([]*repb.Digest, error) {
 	lock := sync.RWMutex{} // protects(missing)
 	var missing []*repb.Digest
 	eg, ctx := errgroup.WithContext(ctx)
@@ -974,7 +977,7 @@ func (p *partition) findMissing(ctx context.Context, cacheType interfaces.CacheT
 	return missing, nil
 }
 
-func (p *partition) get(ctx context.Context, cacheType interfaces.CacheType, remoteInstanceName string, d *repb.Digest) ([]byte, error) {
+func (p *partition) get(ctx context.Context, cacheType resource.CacheType, remoteInstanceName string, d *repb.Digest) ([]byte, error) {
 	k, err := p.key(ctx, cacheType, remoteInstanceName, d)
 	if err != nil {
 		return nil, err
@@ -995,7 +998,7 @@ func (p *partition) get(ctx context.Context, cacheType interfaces.CacheType, rem
 	return buf, nil
 }
 
-func (p *partition) getMulti(ctx context.Context, cacheType interfaces.CacheType, remoteInstanceName string, digests []*repb.Digest) (map[*repb.Digest][]byte, error) {
+func (p *partition) getMulti(ctx context.Context, cacheType resource.CacheType, remoteInstanceName string, digests []*repb.Digest) (map[*repb.Digest][]byte, error) {
 	lock := sync.RWMutex{} // protects(foundMap)
 	foundMap := make(map[*repb.Digest][]byte, len(digests))
 	eg, ctx := errgroup.WithContext(ctx)
@@ -1029,9 +1032,9 @@ func (p *partition) getMulti(ctx context.Context, cacheType interfaces.CacheType
 func (p *partition) makeFileMetadata(fr *fileRecord) (*rfpb.FileMetadata, error) {
 	isolation := &rfpb.Isolation{}
 	switch fr.key.cacheType {
-	case interfaces.CASCacheType:
+	case resource.CacheType_CAS:
 		isolation.CacheType = rfpb.Isolation_CAS_CACHE
-	case interfaces.ActionCacheType:
+	case resource.CacheType_AC:
 		isolation.CacheType = rfpb.Isolation_ACTION_CACHE
 	default:
 		return nil, status.InvalidArgumentErrorf("Unknown cache type %v", fr.key.cacheType)
@@ -1078,7 +1081,7 @@ func (p *partition) liveRemove(fr *fileRecord) {
 	}
 }
 
-func (p *partition) set(ctx context.Context, cacheType interfaces.CacheType, remoteInstanceName string, d *repb.Digest, data []byte) error {
+func (p *partition) set(ctx context.Context, cacheType resource.CacheType, remoteInstanceName string, d *repb.Digest, data []byte) error {
 	k, err := p.key(ctx, cacheType, remoteInstanceName, d)
 	if err != nil {
 		return err
@@ -1096,7 +1099,7 @@ func (p *partition) set(ctx context.Context, cacheType interfaces.CacheType, rem
 	return err
 }
 
-func (p *partition) setMulti(ctx context.Context, cacheType interfaces.CacheType, remoteInstanceName string, kvs map[*repb.Digest][]byte) error {
+func (p *partition) setMulti(ctx context.Context, cacheType resource.CacheType, remoteInstanceName string, kvs map[*repb.Digest][]byte) error {
 	for d, data := range kvs {
 		if err := p.set(ctx, cacheType, remoteInstanceName, d, data); err != nil {
 			return err
@@ -1105,7 +1108,7 @@ func (p *partition) setMulti(ctx context.Context, cacheType interfaces.CacheType
 	return nil
 }
 
-func (p *partition) delete(ctx context.Context, cacheType interfaces.CacheType, remoteInstanceName string, d *repb.Digest) error {
+func (p *partition) delete(ctx context.Context, cacheType resource.CacheType, remoteInstanceName string, d *repb.Digest) error {
 	k, err := p.key(ctx, cacheType, remoteInstanceName, d)
 	if err != nil {
 		return err
@@ -1119,7 +1122,7 @@ func (p *partition) delete(ctx context.Context, cacheType interfaces.CacheType, 
 	return nil
 }
 
-func (p *partition) reader(ctx context.Context, cacheType interfaces.CacheType, remoteInstanceName string, d *repb.Digest, offset, limit int64) (io.ReadCloser, error) {
+func (p *partition) reader(ctx context.Context, cacheType resource.CacheType, remoteInstanceName string, d *repb.Digest, offset, limit int64) (io.ReadCloser, error) {
 	k, err := p.key(ctx, cacheType, remoteInstanceName, d)
 	if err != nil {
 		return nil, err
@@ -1158,7 +1161,7 @@ func (d *dbWriteOnClose) Close() error {
 	return d.closeFn(d.bytesWritten)
 }
 
-func (p *partition) writer(ctx context.Context, cacheType interfaces.CacheType, remoteInstanceName string, d *repb.Digest) (io.WriteCloser, error) {
+func (p *partition) writer(ctx context.Context, cacheType resource.CacheType, remoteInstanceName string, d *repb.Digest) (interfaces.CommittedWriteCloser, error) {
 	k, err := p.key(ctx, cacheType, remoteInstanceName, d)
 	if err != nil {
 		return nil, err
@@ -1173,19 +1176,17 @@ func (p *partition) writer(ctx context.Context, cacheType interfaces.CacheType, 
 		metrics.DiskCacheDuplicateWritesBytes.Add(float64(d.GetSizeBytes()))
 	}
 
-	writeCloser, err := disk.FileWriter(ctx, k.FullPath())
+	fw, err := disk.FileWriter(ctx, k.FullPath())
 	if err != nil {
 		return nil, err
 	}
-	return &dbWriteOnClose{
-		WriteCloser: writeCloser,
-		closeFn: func(totalBytesWritten int64) error {
-			record := makeRecord(k, totalBytesWritten)
-
-			p.mu.Lock()
-			defer p.mu.Unlock()
-			p.lruAdd(record)
-			return nil
-		},
-	}, nil
+	cwc := ioutil.NewCustomCommitWriteCloser(fw)
+	cwc.CommitFn = func(totalBytesWritten int64) error {
+		record := makeRecord(k, totalBytesWritten)
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		p.lruAdd(record)
+		return nil
+	}
+	return cwc, nil
 }

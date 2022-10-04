@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"cloud.google.com/go/storage"
+	"github.com/buildbuddy-io/buildbuddy/proto/resource"
 	"github.com/buildbuddy-io/buildbuddy/server/environment"
 	"github.com/buildbuddy-io/buildbuddy/server/interfaces"
 	"github.com/buildbuddy-io/buildbuddy/server/remote_cache/digest"
@@ -153,8 +154,8 @@ func (g *GCSCache) key(ctx context.Context, d *repb.Digest) (string, error) {
 	return userPrefix + g.prefix + hash, nil
 }
 
-func (g *GCSCache) WithIsolation(ctx context.Context, cacheType interfaces.CacheType, remoteInstanceName string) (interfaces.Cache, error) {
-	newPrefix := filepath.Join(remoteInstanceName, cacheType.Prefix())
+func (g *GCSCache) WithIsolation(ctx context.Context, cacheType resource.CacheType, remoteInstanceName string) (interfaces.Cache, error) {
+	newPrefix := filepath.Join(remoteInstanceName, digest.CacheTypeToPrefix(cacheType))
 	if len(newPrefix) > 0 && newPrefix[len(newPrefix)-1] != '/' {
 		newPrefix += "/"
 	}
@@ -454,6 +455,7 @@ func isRetryableGCSError(err error) bool {
 }
 
 type gcsDedupingWriteCloser struct {
+	cancelFunc context.CancelFunc
 	io.WriteCloser
 	timer *cache_metrics.CacheTimer
 	size  int64
@@ -473,8 +475,13 @@ func (wc *gcsDedupingWriteCloser) Write(in []byte) (int, error) {
 	return n, err
 }
 
-func (wc *gcsDedupingWriteCloser) Close() error {
+func (wc *gcsDedupingWriteCloser) Commit() error {
 	return swallowGCSAlreadyExistsError(wc.WriteCloser.Close())
+}
+
+func (wc *gcsDedupingWriteCloser) Close() error {
+	wc.cancelFunc()
+	return nil
 }
 
 func setChunkSize(d *repb.Digest, w *storage.Writer) {
@@ -488,7 +495,7 @@ func setChunkSize(d *repb.Digest, w *storage.Writer) {
 	}
 }
 
-func (g *GCSCache) Writer(ctx context.Context, d *repb.Digest) (io.WriteCloser, error) {
+func (g *GCSCache) Writer(ctx context.Context, d *repb.Digest) (interfaces.CommittedWriteCloser, error) {
 	k, err := g.key(ctx, d)
 	if err != nil {
 		return nil, err
@@ -497,11 +504,14 @@ func (g *GCSCache) Writer(ctx context.Context, d *repb.Digest) (io.WriteCloser, 
 	writer := obj.If(storage.Conditions{DoesNotExist: true}).NewWriter(ctx)
 	setChunkSize(d, writer)
 	timer := cache_metrics.NewCacheTimer(cacheLabels)
-	return &gcsDedupingWriteCloser{
+	ctx, cancel := context.WithCancel(ctx)
+	dwc := &gcsDedupingWriteCloser{
+		cancelFunc:  cancel,
 		WriteCloser: writer,
 		timer:       timer,
 		size:        d.GetSizeBytes(),
-	}, nil
+	}
+	return dwc, nil
 }
 
 func (g *GCSCache) Start() error {

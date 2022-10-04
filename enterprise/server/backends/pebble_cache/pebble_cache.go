@@ -19,6 +19,7 @@ import (
 	"github.com/buildbuddy-io/buildbuddy/enterprise/server/raft/constants"
 	"github.com/buildbuddy-io/buildbuddy/enterprise/server/raft/filestore"
 	"github.com/buildbuddy-io/buildbuddy/enterprise/server/util/pebbleutil"
+	"github.com/buildbuddy-io/buildbuddy/proto/resource"
 	"github.com/buildbuddy-io/buildbuddy/server/backends/disk_cache"
 	"github.com/buildbuddy-io/buildbuddy/server/environment"
 	"github.com/buildbuddy-io/buildbuddy/server/interfaces"
@@ -27,6 +28,7 @@ import (
 	"github.com/buildbuddy-io/buildbuddy/server/util/alert"
 	"github.com/buildbuddy-io/buildbuddy/server/util/disk"
 	"github.com/buildbuddy-io/buildbuddy/server/util/flagutil"
+	"github.com/buildbuddy-io/buildbuddy/server/util/ioutil"
 	"github.com/buildbuddy-io/buildbuddy/server/util/log"
 	"github.com/buildbuddy-io/buildbuddy/server/util/status"
 	"github.com/buildbuddy-io/buildbuddy/server/util/statusz"
@@ -795,7 +797,7 @@ func (p *PebbleCache) lookupGroupAndPartitionID(ctx context.Context, remoteInsta
 	return user.GetGroupID(), defaultPartitionID, nil
 }
 
-func (p *PebbleCache) WithIsolation(ctx context.Context, cacheType interfaces.CacheType, remoteInstanceName string) (interfaces.Cache, error) {
+func (p *PebbleCache) WithIsolation(ctx context.Context, cacheType resource.CacheType, remoteInstanceName string) (interfaces.Cache, error) {
 	groupID, partID, err := p.lookupGroupAndPartitionID(ctx, remoteInstanceName)
 	if err != nil {
 		return nil, err
@@ -803,9 +805,9 @@ func (p *PebbleCache) WithIsolation(ctx context.Context, cacheType interfaces.Ca
 
 	newIsolation := &rfpb.Isolation{}
 	switch cacheType {
-	case interfaces.CASCacheType:
+	case resource.CacheType_CAS:
 		newIsolation.CacheType = rfpb.Isolation_CAS_CACHE
-	case interfaces.ActionCacheType:
+	case resource.CacheType_AC:
 		newIsolation.CacheType = rfpb.Isolation_ACTION_CACHE
 	default:
 		return nil, status.InvalidArgumentErrorf("Unknown cache type %v", cacheType)
@@ -1020,6 +1022,9 @@ func (p *PebbleCache) Set(ctx context.Context, d *repb.Digest, data []byte) erro
 	if _, err := wc.Write(data); err != nil {
 		return err
 	}
+	if err := wc.Commit(); err != nil {
+		return err
+	}
 	return wc.Close()
 }
 
@@ -1201,7 +1206,7 @@ func (dc *writeCloser) Write(p []byte) (int, error) {
 	return n, nil
 }
 
-func (p *PebbleCache) Writer(ctx context.Context, d *repb.Digest) (io.WriteCloser, error) {
+func (p *PebbleCache) Writer(ctx context.Context, d *repb.Digest) (interfaces.CommittedWriteCloser, error) {
 	db, err := p.leaser.DB()
 	if err != nil {
 		return nil, err
@@ -1242,8 +1247,9 @@ func (p *PebbleCache) Writer(ctx context.Context, d *repb.Digest) (io.WriteClose
 	if err != nil {
 		return nil, err
 	}
-	dc := &writeCloser{MetadataWriteCloser: wcm, closeFn: func(bytesWritten int64) error {
-		defer db.Close()
+	wc := ioutil.NewCustomCommitWriteCloser(wcm)
+	wc.CloseFn = db.Close
+	wc.CommitFn = func(bytesWritten int64) error {
 		now := time.Now().UnixMicro()
 		md := &rfpb.FileMetadata{
 			FileRecord:      fileRecord,
@@ -1262,8 +1268,8 @@ func (p *PebbleCache) Writer(ctx context.Context, d *repb.Digest) (io.WriteClose
 			metrics.DiskCacheAddedFileSizeBytes.Observe(float64(bytesWritten))
 		}
 		return err
-	}}
-	return dc, nil
+	}
+	return wc, nil
 }
 
 func (p *PebbleCache) DoneScanning() bool {
