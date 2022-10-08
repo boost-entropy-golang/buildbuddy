@@ -11,6 +11,7 @@ import (
 
 	"github.com/buildbuddy-io/buildbuddy/enterprise/server/backends/migration_cache"
 	"github.com/buildbuddy-io/buildbuddy/enterprise/server/backends/pebble_cache"
+	"github.com/buildbuddy-io/buildbuddy/proto/resource"
 	"github.com/buildbuddy-io/buildbuddy/server/backends/disk_cache"
 	"github.com/buildbuddy-io/buildbuddy/server/environment"
 	"github.com/buildbuddy-io/buildbuddy/server/interfaces"
@@ -113,7 +114,7 @@ func TestACIsolation(t *testing.T) {
 
 	mc := migration_cache.NewMigrationCache(&migration_cache.MigrationConfig{}, srcCache, destCache)
 
-	c1, err := mc.WithIsolation(ctx, interfaces.ActionCacheType, "")
+	c1, err := mc.WithIsolation(ctx, resource.CacheType_AC, "")
 	require.NoError(t, err)
 
 	d1, buf1 := testdigest.NewRandomDigestBuf(t, 100)
@@ -142,7 +143,7 @@ func TestACIsolation_RemoteInstanceName(t *testing.T) {
 	require.NoError(t, err)
 	mc := migration_cache.NewMigrationCache(&migration_cache.MigrationConfig{}, srcCache, destCache)
 
-	c1, err := mc.WithIsolation(ctx, interfaces.ActionCacheType, "remote")
+	c1, err := mc.WithIsolation(ctx, resource.CacheType_AC, "remote")
 	require.NoError(t, err)
 
 	d1, buf1 := testdigest.NewRandomDigestBuf(t, 100)
@@ -499,6 +500,153 @@ func TestCopyDataInBackground_RateLimit(t *testing.T) {
 
 	// Should wait at least 1 second before the second digest is copied
 	require.True(t, time.Since(start) >= 1*time.Second)
+}
+
+func TestCopyDataInBackground_AuthenticatedUser(t *testing.T) {
+	testAPIKey := "AK2222"
+	testGroup := "GR7890"
+	testUsers := testauth.TestUsers(testAPIKey, testGroup)
+
+	te := getTestEnv(t, testUsers)
+	maxSizeBytes := int64(1000)
+	rootDirSrc := testfs.MakeTempDir(t)
+	rootDirDest := testfs.MakeTempDir(t)
+
+	srcCache, err := disk_cache.NewDiskCache(te, &disk_cache.Options{RootDirectory: rootDirSrc}, maxSizeBytes)
+	require.NoError(t, err)
+	pebbleOptions := &pebble_cache.Options{
+		RootDirectory:     rootDirDest,
+		MaxSizeBytes:      maxSizeBytes,
+		IsolateByGroupIDs: true,
+	}
+	destCache, err := pebble_cache.NewPebbleCache(te, pebbleOptions)
+	require.NoError(t, err)
+	destCache.Start()
+
+	config := &migration_cache.MigrationConfig{
+		CopyChanBufferSize: 10,
+		MaxCopiesPerSec:    10,
+	}
+	config.SetConfigDefaults()
+	mc := migration_cache.NewMigrationCache(config, srcCache, destCache)
+	mc.Start() // Starts copying in background
+	defer mc.Stop()
+
+	authenticatedCtx := te.GetAuthenticator().AuthContextFromAPIKey(context.Background(), testAPIKey)
+	authenticatedCtx, err = prefix.AttachUserPrefixToContext(authenticatedCtx, te)
+	require.NoError(t, err)
+
+	// Save data to different isolations in src cache
+	d, buf := testdigest.NewRandomDigestBuf(t, 100)
+	err = srcCache.Set(authenticatedCtx, d, buf)
+	require.NoError(t, err)
+
+	instanceName2 := "dog"
+	srcIsolation2, err := srcCache.WithIsolation(authenticatedCtx, resource.CacheType_AC, instanceName2)
+	require.NoError(t, err)
+	d2, buf2 := testdigest.NewRandomDigestBuf(t, 100)
+	err = srcIsolation2.Set(authenticatedCtx, d2, buf2)
+	require.NoError(t, err)
+
+	//Call get so the digests are copied to the destination cache
+	mcIsolation2, err := mc.WithIsolation(authenticatedCtx, resource.CacheType_AC, instanceName2)
+	require.NoError(t, err)
+	data, err := mcIsolation2.Get(authenticatedCtx, d2)
+	require.NoError(t, err)
+	require.True(t, bytes.Equal(buf2, data))
+
+	mcIsolation, err := mc.WithIsolation(authenticatedCtx, resource.CacheType_CAS, "")
+	data, err = mcIsolation.Get(authenticatedCtx, d)
+	require.NoError(t, err)
+	require.True(t, bytes.Equal(buf, data))
+
+	// Verify data was copied to correct isolation in destination cache
+	eg := errgroup.Group{}
+	eg.Go(func() error {
+		destIsolation1, err := destCache.WithIsolation(authenticatedCtx, resource.CacheType_CAS, "")
+		require.NoError(t, err)
+		waitForCopy(t, authenticatedCtx, destIsolation1, d)
+		return nil
+	})
+	eg.Go(func() error {
+		destIsolation2, err := destCache.WithIsolation(authenticatedCtx, resource.CacheType_AC, instanceName2)
+		require.NoError(t, err)
+		waitForCopy(t, authenticatedCtx, destIsolation2, d2)
+		return nil
+	})
+	eg.Wait()
+}
+
+func TestCopyDataInBackground_MultipleIsolations(t *testing.T) {
+	testAPIKey := "AK2222"
+	testGroup := "GR7890"
+	testUsers := testauth.TestUsers(testAPIKey, testGroup)
+
+	te := getTestEnv(t, testUsers)
+	ctx := getAnonContext(t, te)
+	maxSizeBytes := int64(1000)
+	rootDirSrc := testfs.MakeTempDir(t)
+	rootDirDest := testfs.MakeTempDir(t)
+
+	srcCache, err := disk_cache.NewDiskCache(te, &disk_cache.Options{RootDirectory: rootDirSrc}, maxSizeBytes)
+	require.NoError(t, err)
+	destCache, err := disk_cache.NewDiskCache(te, &disk_cache.Options{RootDirectory: rootDirDest}, maxSizeBytes)
+	require.NoError(t, err)
+
+	config := &migration_cache.MigrationConfig{
+		CopyChanBufferSize: 10,
+		MaxCopiesPerSec:    10,
+	}
+	config.SetConfigDefaults()
+	mc := migration_cache.NewMigrationCache(config, srcCache, destCache)
+	mc.Start() // Starts copying in background
+	defer mc.Stop()
+
+	// Save data to different isolations in src cache
+	instanceName1 := "cat"
+	srcIsolation1, err := srcCache.WithIsolation(ctx, resource.CacheType_AC, instanceName1)
+	require.NoError(t, err)
+	d, buf := testdigest.NewRandomDigestBuf(t, 100)
+	err = srcIsolation1.Set(ctx, d, buf)
+	require.NoError(t, err)
+
+	instanceName2 := "cow"
+	srcIsolation2, err := srcCache.WithIsolation(ctx, resource.CacheType_CAS, instanceName2)
+	require.NoError(t, err)
+	d2, buf2 := testdigest.NewRandomDigestBuf(t, 100)
+	err = srcIsolation2.Set(ctx, d2, buf2)
+	require.NoError(t, err)
+
+	// Call get so the digests are copied to the destination cache
+	mcIsolation2, err := mc.WithIsolation(ctx, resource.CacheType_CAS, instanceName2)
+	require.NoError(t, err)
+	data, err := mcIsolation2.Get(ctx, d2)
+	require.NoError(t, err)
+	require.True(t, bytes.Equal(buf2, data))
+
+	mcIsolation1, err := mc.WithIsolation(ctx, resource.CacheType_AC, instanceName1)
+	require.NoError(t, err)
+	data, err = mcIsolation1.Get(ctx, d)
+	require.NoError(t, err)
+	require.True(t, bytes.Equal(buf, data))
+
+	// Verify data was copied to correct isolation in destination cache
+	destIsolation1, err := destCache.WithIsolation(ctx, resource.CacheType_AC, instanceName1)
+	require.NoError(t, err)
+
+	destIsolation2, err := destCache.WithIsolation(ctx, resource.CacheType_CAS, instanceName2)
+	require.NoError(t, err)
+
+	eg := errgroup.Group{}
+	eg.Go(func() error {
+		waitForCopy(t, ctx, destIsolation1, d)
+		return nil
+	})
+	eg.Go(func() error {
+		waitForCopy(t, ctx, destIsolation2, d2)
+		return nil
+	})
+	eg.Wait()
 }
 
 func TestContains(t *testing.T) {
