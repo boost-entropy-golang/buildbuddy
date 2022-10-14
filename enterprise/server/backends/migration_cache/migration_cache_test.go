@@ -89,7 +89,7 @@ func (c *errorCache) ContainsDeprecated(ctx context.Context, d *repb.Digest) (bo
 	return false, errors.New("error cache contains err")
 }
 
-func (c *errorCache) Metadata(ctx context.Context, d *repb.Digest) (*interfaces.CacheMetadata, error) {
+func (c *errorCache) MetadataDeprecated(ctx context.Context, d *repb.Digest) (*interfaces.CacheMetadata, error) {
 	return nil, errors.New("error cache metadata err")
 }
 
@@ -661,23 +661,42 @@ func TestContains(t *testing.T) {
 	maxSizeBytes := int64(defaultExt4BlockSize * 1)
 	rootDirSrc := testfs.MakeTempDir(t)
 	rootDirDest := testfs.MakeTempDir(t)
+	remoteInstanceName := "cloud"
 
 	srcCache, err := disk_cache.NewDiskCache(te, &disk_cache.Options{RootDirectory: rootDirSrc}, maxSizeBytes)
 	require.NoError(t, err)
 	destCache, err := disk_cache.NewDiskCache(te, &disk_cache.Options{RootDirectory: rootDirDest}, maxSizeBytes)
 	require.NoError(t, err)
 	mc := migration_cache.NewMigrationCache(&migration_cache.MigrationConfig{}, srcCache, destCache)
-
-	d, buf := testdigest.NewRandomDigestBuf(t, 100)
-	err = mc.Set(ctx, d, buf)
+	mcWithIsolation, err := mc.WithIsolation(ctx, resource.CacheType_AC, remoteInstanceName)
 	require.NoError(t, err)
 
-	contains, err := mc.ContainsDeprecated(ctx, d)
+	d, buf := testdigest.NewRandomDigestBuf(t, 100)
+	err = mcWithIsolation.Set(ctx, d, buf)
+	require.NoError(t, err)
+
+	contains, err := mcWithIsolation.ContainsDeprecated(ctx, d)
+	require.NoError(t, err)
+	require.True(t, contains)
+
+	contains, err = mc.Contains(ctx, &resource.ResourceName{
+		Digest:       d,
+		InstanceName: remoteInstanceName,
+		CacheType:    resource.CacheType_AC,
+	})
 	require.NoError(t, err)
 	require.True(t, contains)
 
 	notWrittenDigest, _ := testdigest.NewRandomDigestBuf(t, 100)
 	contains, err = mc.ContainsDeprecated(ctx, notWrittenDigest)
+	require.NoError(t, err)
+	require.False(t, contains)
+
+	contains, err = mc.Contains(ctx, &resource.ResourceName{
+		Digest:       notWrittenDigest,
+		InstanceName: "",
+		CacheType:    resource.CacheType_CAS,
+	})
 	require.NoError(t, err)
 	require.False(t, contains)
 }
@@ -720,12 +739,24 @@ func TestMetadata(t *testing.T) {
 	err = mc.Set(ctx, d, buf)
 	require.NoError(t, err)
 
-	md, err := mc.Metadata(ctx, d)
+	md, err := mc.MetadataDeprecated(ctx, d)
+	require.NoError(t, err)
+	require.Equal(t, int64(100), md.SizeBytes)
+	md, err = mc.Metadata(ctx, &resource.ResourceName{
+		Digest:    d,
+		CacheType: resource.CacheType_CAS,
+	})
 	require.NoError(t, err)
 	require.Equal(t, int64(100), md.SizeBytes)
 
 	notWrittenDigest, _ := testdigest.NewRandomDigestBuf(t, 100)
-	md, err = mc.Metadata(ctx, notWrittenDigest)
+	md, err = mc.MetadataDeprecated(ctx, notWrittenDigest)
+	require.True(t, status.IsNotFoundError(err))
+	require.Nil(t, md)
+	md, err = mc.Metadata(ctx, &resource.ResourceName{
+		Digest:    notWrittenDigest,
+		CacheType: resource.CacheType_CAS,
+	})
 	require.True(t, status.IsNotFoundError(err))
 	require.Nil(t, md)
 }
@@ -746,7 +777,7 @@ func TestMetadata_DestErr(t *testing.T) {
 	require.NoError(t, err)
 
 	// Should return data from src cache without error
-	md, err := mc.Metadata(ctx, d)
+	md, err := mc.MetadataDeprecated(ctx, d)
 	require.NoError(t, err)
 	require.Equal(t, int64(100), md.SizeBytes)
 }

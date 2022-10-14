@@ -3,6 +3,7 @@ package plugin
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"net/url"
 	"os"
@@ -16,6 +17,7 @@ import (
 	"github.com/buildbuddy-io/buildbuddy/server/util/disk"
 	"github.com/buildbuddy-io/buildbuddy/server/util/git"
 	"github.com/buildbuddy-io/buildbuddy/server/util/status"
+	"github.com/creack/pty"
 	"gopkg.in/yaml.v2"
 )
 
@@ -69,18 +71,26 @@ func readConfig() (*BuildBuddyConfig, error) {
 // (if remote, they will be fetched).
 type Plugin struct {
 	config *PluginConfig
+	// tempDir is a directory where the plugin can store temporary files.
+	// This dir lasts only for the current CLI invocation and is visible
+	// to all hooks.
+	tempDir string
 }
 
 // LoadAll loads all plugins from the config, and ensures that any remote
 // plugins are downloaded.
-func LoadAll() ([]*Plugin, error) {
+func LoadAll(tempDir string) ([]*Plugin, error) {
 	cfg, err := readConfig()
 	if err != nil {
 		return nil, err
 	}
 	plugins := make([]*Plugin, 0, len(cfg.Plugins))
 	for _, p := range cfg.Plugins {
-		plugin := &Plugin{config: p}
+		pluginTempDir, err := os.MkdirTemp(tempDir, "plugin-tmp-*")
+		if err != nil {
+			return nil, status.InternalErrorf("failed to create plugin temp dir: %s", err)
+		}
+		plugin := &Plugin{config: p, tempDir: pluginTempDir}
 		if err := plugin.load(); err != nil {
 			return nil, err
 		}
@@ -90,6 +100,25 @@ func LoadAll() ([]*Plugin, error) {
 		plugins = append(plugins, plugin)
 	}
 	return plugins, nil
+}
+
+// PrepareEnv sets environment variables for use in plugins.
+func PrepareEnv() error {
+	ws, err := workspace.Path()
+	if err != nil {
+		return err
+	}
+	if err := os.Setenv("BUILD_WORKSPACE_DIRECTORY", ws); err != nil {
+		return err
+	}
+	cfg, err := os.UserConfigDir()
+	if err != nil {
+		return err
+	}
+	if err := os.Setenv("USER_CONFIG_DIR", cfg); err != nil {
+		return err
+	}
+	return nil
 }
 
 // RepoURL returns the normalized repo URL. It does not include the ref part of
@@ -222,6 +251,12 @@ func (p *Plugin) Path() (string, error) {
 	return filepath.Join(ws, p.config.Path), nil
 }
 
+func (p *Plugin) commandEnv() []string {
+	env := os.Environ()
+	env = append(env, fmt.Sprintf("PLUGIN_TEMPDIR=%s", p.tempDir))
+	return env
+}
+
 // PreBazel executes the plugin's pre-bazel hook if it exists, allowing the
 // plugin to return a set of transformed bazel arguments.
 //
@@ -270,8 +305,9 @@ func (p *Plugin) PreBazel(args []string) ([]string, error) {
 	cmd.Dir = path
 	cmd.Stderr = os.Stderr
 	cmd.Stdout = os.Stdout
+	cmd.Env = p.commandEnv()
 	if err := cmd.Run(); err != nil {
-		return nil, err
+		return nil, status.InternalErrorf("Pre-bazel hook for %s/%s failed: %s", p.config.Repo, p.config.Path, err)
 	}
 
 	newArgs, err := readArgsFile(argsFile.Name())
@@ -289,7 +325,7 @@ func (p *Plugin) PreBazel(args []string) ([]string, error) {
 // Currently the invocation data is fed as plain text via a file. The file path
 // is passed as the first argument.
 //
-// TODO(bduffany): Example
+// See cli/example_plugins/go_deps/post_bazel.sh for an example.
 func (p *Plugin) PostBazel(bazelOutputPath string) error {
 	path, err := p.Path()
 	if err != nil {
@@ -309,7 +345,12 @@ func (p *Plugin) PostBazel(bazelOutputPath string) error {
 	cmd.Dir = path
 	cmd.Stderr = os.Stderr
 	cmd.Stdout = os.Stdout
-	return cmd.Run()
+	cmd.Stdin = os.Stdin
+	cmd.Env = p.commandEnv()
+	if err := cmd.Run(); err != nil {
+		return status.InternalErrorf("Post-bazel hook for %s/%s failed: %s", p.config.Repo, p.config.Path, err)
+	}
+	return nil
 }
 
 // Pipe streams the combined console output (stdout + stderr) from the previous
@@ -337,13 +378,28 @@ func (p *Plugin) Pipe(r io.Reader) (io.Reader, error) {
 	cmd := exec.Command(scriptPath)
 	pr, pw := io.Pipe()
 	cmd.Dir = path
-	cmd.Stdout = pw
-	cmd.Stderr = pw
+	// Write command output to a pty to ensure line buffering.
+	ptmx, tty, err := pty.Open()
+	if err != nil {
+		return nil, status.InternalErrorf("failed to open pty: %s", err)
+	}
+	cmd.Stdout = tty
+	cmd.Stderr = tty
 	cmd.Stdin = r
+	cmd.Env = p.commandEnv()
 	go func() {
+		// Copy pty output to the next pipeline stage.
+		io.Copy(pw, ptmx)
+	}()
+	go func() {
+		defer tty.Close()
+		defer ptmx.Close()
 		defer pw.Close()
+		log.Debugf("Running bazel output handler for %s/%s", p.config.Repo, p.config.Path)
 		if err := cmd.Run(); err != nil {
 			log.Debugf("Command failed: %s", err)
+		} else {
+			log.Debugf("Command %s completed", cmd.Args)
 		}
 	}()
 	return pr, nil
