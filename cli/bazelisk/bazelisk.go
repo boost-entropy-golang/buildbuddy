@@ -4,11 +4,13 @@ import (
 	"context"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 
 	"github.com/bazelbuild/bazelisk/core"
 	"github.com/bazelbuild/bazelisk/repositories"
+	"github.com/buildbuddy-io/buildbuddy/cli/arg"
 	"github.com/buildbuddy-io/buildbuddy/cli/log"
 	"github.com/buildbuddy-io/buildbuddy/cli/plugin"
 	"github.com/buildbuddy-io/buildbuddy/cli/workspace"
@@ -78,9 +80,43 @@ func Run(args []string, outputPath string, w io.Writer) (int, error) {
 
 	exitCode, err := core.RunBazelisk(args, repos)
 	if err != nil {
-		log.Fatalf("error running bazelisk: %s", err)
+		return -1, status.InternalErrorf("failed to run bazelisk: %s", err)
 	}
 	return exitCode, nil
+}
+
+// ConfigureRunScript adds `--script_path` to a bazel run command so that we can
+// invoke the build and the run separately.
+func ConfigureRunScript(args []string, tempDir string) (newArgs []string, scriptPath string) {
+	if arg.GetCommand(args) != "run" {
+		return args, ""
+	}
+	// If --script_path is already set, don't create a run script ourselves,
+	// since the caller probably has the intention to invoke it on their own.
+	existingScript := arg.Get(args, "script_path")
+	if existingScript != "" {
+		return args, ""
+	}
+	scriptPath = filepath.Join(tempDir, "run.sh")
+	args = append(args, "--script_path="+scriptPath)
+	return args, scriptPath
+}
+
+func InvokeRunScript(path string) (exitCode int, err error) {
+	if err := os.Chmod(path, 0755); err != nil {
+		return -1, err
+	}
+	cmd := exec.Command(path)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		if err, ok := err.(*exec.ExitError); ok {
+			return err.ProcessState.ExitCode(), nil
+		}
+		return -1, err
+	}
+	return 0, nil
 }
 
 // makePipeWriter adapts a writer to an *os.File by using an os.Pipe().
@@ -106,6 +142,16 @@ func makePipeWriter(w io.Writer) (pw *os.File, closeFunc func(), err error) {
 }
 
 func setBazelVersion() error {
+	// If USE_BAZEL_VERSION is already set and not pointing to us (the BB CLI),
+	// preserve that value.
+	envVersion := os.Getenv("USE_BAZEL_VERSION")
+	if envVersion != "" && !strings.HasPrefix(envVersion, "buildbuddy-io/") {
+		return nil
+	}
+
+	// TODO: Handle the cases where we were invoked via .bazeliskrc
+	// or USE_BAZEL_FALLBACK_VERSION (less common).
+
 	ws, err := workspace.Path()
 	if err != nil {
 		return err
@@ -117,8 +163,6 @@ func setBazelVersion() error {
 		}
 	}
 	parts := strings.Split(string(b), "\n")
-	// TODO: Handle the cases where we were invoked via .bazeliskrc,
-	// USE_BAZEL_VERSION, or USE_BAZEL_FALLBACK_VERSION.
 
 	// Bazelisk probably chose us because we were specified first in
 	// .bazelversion. Delete the first line, if it exists.
