@@ -636,10 +636,18 @@ func (rc *RaftCache) SetDeprecated(ctx context.Context, d *repb.Digest, data []b
 	return rc.Set(ctx, rn, data)
 }
 
-func (rc *RaftCache) SetMulti(ctx context.Context, kvs map[*repb.Digest][]byte) error {
+func (rc *RaftCache) SetMulti(ctx context.Context, kvs map[*resource.ResourceName][]byte) error {
 	return nil
 }
 
-func (rc *RaftCache) Delete(ctx context.Context, d *repb.Digest) error {
+func (rc *RaftCache) SetMultiDeprecated(ctx context.Context, kvs map[*repb.Digest][]byte) error {
+	return nil
+}
+
+func (rc *RaftCache) Delete(ctx context.Context, r *resource.ResourceName) error {
+	return nil
+}
+
+func (rc *RaftCache) DeleteDeprecated(ctx context.Context, d *repb.Digest) error {
 	return nil
 }

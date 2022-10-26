@@ -297,16 +297,16 @@ func (g *GCSCache) SetDeprecated(ctx context.Context, d *repb.Digest, data []byt
 	return g.Set(ctx, rn, data)
 }
 
-func (g *GCSCache) SetMulti(ctx context.Context, kvs map[*repb.Digest][]byte) error {
+func (g *GCSCache) SetMulti(ctx context.Context, kvs map[*resource.ResourceName][]byte) error {
 	eg, ctx := errgroup.WithContext(ctx)
 
-	for d, data := range kvs {
-		setFn := func(d *repb.Digest, data []byte) {
+	for r, data := range kvs {
+		setFn := func(r *resource.ResourceName, data []byte) {
 			eg.Go(func() error {
-				return g.SetDeprecated(ctx, d, data)
+				return g.Set(ctx, r, data)
 			})
 		}
-		setFn(d, data)
+		setFn(r, data)
 	}
 
 	if err := eg.Wait(); err != nil {
@@ -316,13 +316,13 @@ func (g *GCSCache) SetMulti(ctx context.Context, kvs map[*repb.Digest][]byte) er
 	return nil
 }
 
-func (g *GCSCache) Delete(ctx context.Context, d *repb.Digest) error {
-	k, err := g.key(ctx, &resource.ResourceName{
-		Digest:       d,
-		InstanceName: g.remoteInstanceName,
-		Compressor:   repb.Compressor_IDENTITY,
-		CacheType:    g.cacheType,
-	})
+func (g *GCSCache) SetMultiDeprecated(ctx context.Context, kvs map[*repb.Digest][]byte) error {
+	rnMap := digest.ResourceNameMap(g.cacheType, g.remoteInstanceName, kvs)
+	return g.SetMulti(ctx, rnMap)
+}
+
+func (g *GCSCache) Delete(ctx context.Context, r *resource.ResourceName) error {
+	k, err := g.key(ctx, r)
 	if err != nil {
 		return err
 	}
@@ -334,9 +334,20 @@ func (g *GCSCache) Delete(ctx context.Context, d *repb.Digest) error {
 	// Note, if we decide to retry deletions in the future, be sure to
 	// add a new metric for retry count.
 	if errors.Is(err, storage.ErrObjectNotExist) {
+		d := r.GetDigest()
 		return status.NotFoundErrorf("digest %s/%d not found in gcs_cache: %s", d.GetHash(), d.GetSizeBytes(), err.Error())
 	}
 	return err
+}
+
+func (g *GCSCache) DeleteDeprecated(ctx context.Context, d *repb.Digest) error {
+	rn := &resource.ResourceName{
+		Digest:       d,
+		InstanceName: g.remoteInstanceName,
+		Compressor:   repb.Compressor_IDENTITY,
+		CacheType:    g.cacheType,
+	}
+	return g.Delete(ctx, rn)
 }
 
 func (g *GCSCache) bumpTTLIfStale(ctx context.Context, key string, t time.Time) bool {

@@ -362,16 +362,16 @@ func (s3c *S3Cache) SetDeprecated(ctx context.Context, d *repb.Digest, data []by
 	return s3c.Set(ctx, r, data)
 }
 
-func (s3c *S3Cache) SetMulti(ctx context.Context, kvs map[*repb.Digest][]byte) error {
+func (s3c *S3Cache) SetMulti(ctx context.Context, kvs map[*resource.ResourceName][]byte) error {
 	eg, ctx := errgroup.WithContext(ctx)
 
-	for d, data := range kvs {
-		setFn := func(d *repb.Digest, data []byte) {
+	for r, data := range kvs {
+		setFn := func(r *resource.ResourceName, data []byte) {
 			eg.Go(func() error {
-				return s3c.SetDeprecated(ctx, d, data)
+				return s3c.Set(ctx, r, data)
 			})
 		}
-		setFn(d, data)
+		setFn(r, data)
 	}
 
 	if err := eg.Wait(); err != nil {
@@ -381,13 +381,13 @@ func (s3c *S3Cache) SetMulti(ctx context.Context, kvs map[*repb.Digest][]byte) e
 	return nil
 }
 
-func (s3c *S3Cache) Delete(ctx context.Context, d *repb.Digest) error {
-	k, err := s3c.key(ctx, &resource.ResourceName{
-		Digest:       d,
-		InstanceName: s3c.remoteInstanceName,
-		Compressor:   repb.Compressor_IDENTITY,
-		CacheType:    s3c.cacheType,
-	})
+func (s3c *S3Cache) SetMultiDeprecated(ctx context.Context, kvs map[*repb.Digest][]byte) error {
+	rnMap := digest.ResourceNameMap(s3c.cacheType, s3c.remoteInstanceName, kvs)
+	return s3c.SetMulti(ctx, rnMap)
+}
+
+func (s3c *S3Cache) Delete(ctx context.Context, r *resource.ResourceName) error {
+	k, err := s3c.key(ctx, r)
 	if err != nil {
 		return err
 	}
@@ -395,6 +395,17 @@ func (s3c *S3Cache) Delete(ctx context.Context, d *repb.Digest) error {
 	err = s3c.delete(ctx, k)
 	timer.ObserveDelete(err)
 	return err
+
+}
+
+func (s3c *S3Cache) DeleteDeprecated(ctx context.Context, d *repb.Digest) error {
+	r := &resource.ResourceName{
+		Digest:       d,
+		InstanceName: s3c.remoteInstanceName,
+		Compressor:   repb.Compressor_IDENTITY,
+		CacheType:    s3c.cacheType,
+	}
+	return s3c.Delete(ctx, r)
 }
 
 func (s3c *S3Cache) delete(ctx context.Context, key string) error {

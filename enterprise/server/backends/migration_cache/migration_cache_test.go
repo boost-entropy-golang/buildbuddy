@@ -81,7 +81,7 @@ func (c *errorCache) Get(ctx context.Context, r *resource.ResourceName) ([]byte,
 	return nil, errors.New("error cache get err")
 }
 
-func (c *errorCache) Delete(ctx context.Context, d *repb.Digest) error {
+func (c *errorCache) DeleteDeprecated(ctx context.Context, d *repb.Digest) error {
 	return errors.New("error cache delete err")
 }
 
@@ -1144,13 +1144,17 @@ func TestSetMulti(t *testing.T) {
 
 	eg, ctx := errgroup.WithContext(ctx)
 	lock := sync.RWMutex{}
-	dataToSet := make(map[*repb.Digest][]byte, 50)
+	dataToSet := make(map[*resource.ResourceName][]byte, 50)
 	for i := 0; i < 50; i++ {
 		eg.Go(func() error {
 			d, buf := testdigest.NewRandomDigestBuf(t, 100)
+			rn := &resource.ResourceName{
+				Digest:    d,
+				CacheType: resource.CacheType_CAS,
+			}
 			lock.Lock()
 			defer lock.Unlock()
-			dataToSet[d] = buf
+			dataToSet[rn] = buf
 			return nil
 		})
 	}
@@ -1159,29 +1163,19 @@ func TestSetMulti(t *testing.T) {
 	err = mc.SetMulti(ctx, dataToSet)
 	require.NoError(t, err)
 
-	for d, expected := range dataToSet {
-		data, err := mc.Get(ctx, &resource.ResourceName{
-			Digest:    d,
-			CacheType: resource.CacheType_CAS,
-		})
+	for r, expected := range dataToSet {
+		data, err := mc.Get(ctx, r)
 		require.NoError(t, err)
 		require.True(t, bytes.Equal(expected, data))
 
-		data, err = srcCache.Get(ctx, &resource.ResourceName{
-			Digest:    d,
-			CacheType: resource.CacheType_CAS,
-		})
+		data, err = srcCache.Get(ctx, r)
 		require.NoError(t, err)
 		require.True(t, bytes.Equal(expected, data))
 
-		data, err = destCache.Get(ctx, &resource.ResourceName{
-			Digest:    d,
-			CacheType: resource.CacheType_CAS,
-		})
+		data, err = destCache.Get(ctx, r)
 		require.NoError(t, err)
 		require.True(t, bytes.Equal(expected, data))
 	}
-
 }
 
 func TestDelete(t *testing.T) {
@@ -1219,7 +1213,7 @@ func TestDelete(t *testing.T) {
 	require.True(t, bytes.Equal(buf, data))
 
 	// After delete, data should no longer exist
-	err = mc.Delete(ctx, d)
+	err = mc.DeleteDeprecated(ctx, d)
 	require.NoError(t, err)
 
 	data, err = mc.Get(ctx, r)
