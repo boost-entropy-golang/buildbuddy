@@ -563,13 +563,8 @@ func (s3c *S3Cache) FindMissingDeprecated(ctx context.Context, digests []*repb.D
 	return s3c.FindMissing(ctx, rns)
 }
 
-func (s3c *S3Cache) Reader(ctx context.Context, d *repb.Digest, offset, limit int64) (io.ReadCloser, error) {
-	k, err := s3c.key(ctx, &resource.ResourceName{
-		Digest:       d,
-		InstanceName: s3c.remoteInstanceName,
-		Compressor:   repb.Compressor_IDENTITY,
-		CacheType:    s3c.cacheType,
-	})
+func (s3c *S3Cache) Reader(ctx context.Context, r *resource.ResourceName, offset, limit int64) (io.ReadCloser, error) {
+	k, err := s3c.key(ctx, r)
 	if err != nil {
 		return nil, err
 	}
@@ -591,10 +586,21 @@ func (s3c *S3Cache) Reader(ctx context.Context, d *repb.Digest, offset, limit in
 	})
 	spn.End()
 	if isNotFoundErr(err) {
+		d := r.GetDigest()
 		return nil, status.NotFoundErrorf("Digest '%s/%d' not found in cache", d.GetHash(), d.GetSizeBytes())
 	}
 	timer := cache_metrics.NewCacheTimer(cacheLabels)
-	return io.NopCloser(timer.NewInstrumentedReader(result.Body, d.GetSizeBytes())), err
+	return io.NopCloser(timer.NewInstrumentedReader(result.Body, r.GetDigest().GetSizeBytes())), err
+}
+
+func (s3c *S3Cache) ReaderDeprecated(ctx context.Context, d *repb.Digest, offset, limit int64) (io.ReadCloser, error) {
+	r := &resource.ResourceName{
+		Digest:       d,
+		InstanceName: s3c.remoteInstanceName,
+		Compressor:   repb.Compressor_IDENTITY,
+		CacheType:    s3c.cacheType,
+	}
+	return s3c.Reader(ctx, r, offset, limit)
 }
 
 type waitForUploadWriteCloser struct {
@@ -625,13 +631,9 @@ func (w *waitForUploadWriteCloser) Close() error {
 	w.cancelFunc()
 	return nil
 }
-func (s3c *S3Cache) Writer(ctx context.Context, d *repb.Digest) (interfaces.CommittedWriteCloser, error) {
-	k, err := s3c.key(ctx, &resource.ResourceName{
-		Digest:       d,
-		InstanceName: s3c.remoteInstanceName,
-		Compressor:   repb.Compressor_IDENTITY,
-		CacheType:    s3c.cacheType,
-	})
+
+func (s3c *S3Cache) Writer(ctx context.Context, rn *resource.ResourceName) (interfaces.CommittedWriteCloser, error) {
+	k, err := s3c.key(ctx, rn)
 	if err != nil {
 		return nil, err
 	}
@@ -650,7 +652,7 @@ func (s3c *S3Cache) Writer(ctx context.Context, d *repb.Digest) (interfaces.Comm
 		cancelFunc:    cancel,
 		finishedWrite: make(chan struct{}),
 		timer:         timer,
-		size:          d.GetSizeBytes(),
+		size:          rn.GetDigest().GetSizeBytes(),
 	}
 	go func() {
 		if _, err = s3c.uploader.UploadWithContext(ctx, uploadParams); err != nil {
@@ -659,6 +661,16 @@ func (s3c *S3Cache) Writer(ctx context.Context, d *repb.Digest) (interfaces.Comm
 		close(closer.finishedWrite)
 	}()
 	return closer, nil
+}
+
+func (s3c *S3Cache) WriterDeprecated(ctx context.Context, d *repb.Digest) (interfaces.CommittedWriteCloser, error) {
+	r := &resource.ResourceName{
+		Digest:       d,
+		InstanceName: s3c.remoteInstanceName,
+		Compressor:   repb.Compressor_IDENTITY,
+		CacheType:    s3c.cacheType,
+	}
+	return s3c.Writer(ctx, r)
 }
 
 func (s3c *S3Cache) Start() error {

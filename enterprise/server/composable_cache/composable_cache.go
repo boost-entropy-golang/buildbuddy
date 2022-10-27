@@ -123,7 +123,7 @@ func (c *ComposableCache) Get(ctx context.Context, r *resource.ResourceName) ([]
 		return nil, err
 	}
 	if c.mode&ModeReadThrough != 0 {
-		c.outer.SetDeprecated(ctx, r.GetDigest(), innerRsp)
+		c.outer.Set(ctx, r, innerRsp)
 	}
 
 	return innerRsp, nil
@@ -304,12 +304,12 @@ func (m *MultiCloser) Close() error {
 	return nil
 }
 
-func (c *ComposableCache) Reader(ctx context.Context, d *repb.Digest, offset, limit int64) (io.ReadCloser, error) {
-	if outerReader, err := c.outer.Reader(ctx, d, offset, limit); err == nil {
+func (c *ComposableCache) Reader(ctx context.Context, r *resource.ResourceName, offset, limit int64) (io.ReadCloser, error) {
+	if outerReader, err := c.outer.Reader(ctx, r, offset, limit); err == nil {
 		return outerReader, nil
 	}
 
-	innerReader, err := c.inner.Reader(ctx, d, offset, limit)
+	innerReader, err := c.inner.Reader(ctx, r, offset, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -319,8 +319,7 @@ func (c *ComposableCache) Reader(ctx context.Context, d *repb.Digest, offset, li
 	}
 
 	// Copy the digest over to the outer cache.
-
-	outerWriter, err := c.outer.Writer(ctx, d)
+	outerWriter, err := c.outer.Writer(ctx, r)
 	// Directly return the inner reader if the outer cache doesn't want the
 	// blob.
 	if err != nil {
@@ -336,7 +335,46 @@ func (c *ComposableCache) Reader(ctx context.Context, d *repb.Digest, offset, li
 	if err := outerWriter.Commit(); err != nil {
 		return nil, err
 	}
-	outerReader, err := c.outer.Reader(ctx, d, offset, limit)
+	outerReader, err := c.outer.Reader(ctx, r, offset, limit)
+	if err != nil {
+		return nil, err
+	}
+	return outerReader, nil
+}
+
+func (c *ComposableCache) ReaderDeprecated(ctx context.Context, d *repb.Digest, offset, limit int64) (io.ReadCloser, error) {
+	if outerReader, err := c.outer.ReaderDeprecated(ctx, d, offset, limit); err == nil {
+		return outerReader, nil
+	}
+
+	innerReader, err := c.inner.ReaderDeprecated(ctx, d, offset, limit)
+	if err != nil {
+		return nil, err
+	}
+
+	if c.mode&ModeReadThrough == 0 || offset != 0 {
+		return innerReader, nil
+	}
+
+	// Copy the digest over to the outer cache.
+
+	outerWriter, err := c.outer.WriterDeprecated(ctx, d)
+	// Directly return the inner reader if the outer cache doesn't want the
+	// blob.
+	if err != nil {
+		return innerReader, nil
+	}
+	defer outerWriter.Close()
+	if _, err := io.Copy(outerWriter, innerReader); err != nil {
+		return nil, err
+	}
+	// We're done with the inner reader at this point, we'll create a new
+	// reader below.
+	innerReader.Close()
+	if err := outerWriter.Commit(); err != nil {
+		return nil, err
+	}
+	outerReader, err := c.outer.ReaderDeprecated(ctx, d, offset, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -374,14 +412,38 @@ func (d *doubleWriter) Close() error {
 	return err
 }
 
-func (c *ComposableCache) Writer(ctx context.Context, d *repb.Digest) (interfaces.CommittedWriteCloser, error) {
-	innerWriter, err := c.inner.Writer(ctx, d)
+func (c *ComposableCache) Writer(ctx context.Context, r *resource.ResourceName) (interfaces.CommittedWriteCloser, error) {
+	innerWriter, err := c.inner.Writer(ctx, r)
 	if err != nil {
 		return nil, err
 	}
 
 	if c.mode&ModeWriteThrough != 0 {
-		if outerWriter, err := c.outer.Writer(ctx, d); err == nil {
+		if outerWriter, err := c.outer.Writer(ctx, r); err == nil {
+			dw := &doubleWriter{
+				inner: innerWriter,
+				outer: outerWriter,
+				commitFn: func(err error) {
+					if err == nil {
+						outerWriter.Commit()
+					}
+				},
+			}
+			return dw, nil
+		}
+	}
+
+	return innerWriter, nil
+}
+
+func (c *ComposableCache) WriterDeprecated(ctx context.Context, d *repb.Digest) (interfaces.CommittedWriteCloser, error) {
+	innerWriter, err := c.inner.WriterDeprecated(ctx, d)
+	if err != nil {
+		return nil, err
+	}
+
+	if c.mode&ModeWriteThrough != 0 {
+		if outerWriter, err := c.outer.WriterDeprecated(ctx, d); err == nil {
 			dw := &doubleWriter{
 				inner: innerWriter,
 				outer: outerWriter,
