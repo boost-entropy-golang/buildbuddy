@@ -347,15 +347,6 @@ func (c *DiskCache) Metadata(ctx context.Context, r *resource.ResourceName) (*in
 	}, nil
 }
 
-func (c *DiskCache) MetadataDeprecated(ctx context.Context, d *repb.Digest) (*interfaces.CacheMetadata, error) {
-	return c.Metadata(ctx, &resource.ResourceName{
-		Digest:       d,
-		InstanceName: c.remoteInstanceName,
-		Compressor:   repb.Compressor_IDENTITY,
-		CacheType:    c.cacheType,
-	})
-}
-
 func (c *DiskCache) FindMissing(ctx context.Context, resources []*resource.ResourceName) ([]*repb.Digest, error) {
 	if len(resources) == 0 {
 		return nil, nil
@@ -381,10 +372,6 @@ func (c *DiskCache) Get(ctx context.Context, r *resource.ResourceName) ([]byte, 
 		return nil, err
 	}
 	return p.get(ctx, r.GetCacheType(), r.GetInstanceName(), r.GetDigest())
-}
-
-func (c *DiskCache) GetDeprecated(ctx context.Context, d *repb.Digest) ([]byte, error) {
-	return c.partition.get(ctx, c.cacheType, c.remoteInstanceName, d)
 }
 
 func (c *DiskCache) GetMulti(ctx context.Context, resources []*resource.ResourceName) (map[*repb.Digest][]byte, error) {

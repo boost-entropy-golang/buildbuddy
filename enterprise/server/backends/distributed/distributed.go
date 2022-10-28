@@ -625,15 +625,6 @@ func (c *Cache) Metadata(ctx context.Context, r *resource.ResourceName) (*interf
 	return nil, status.NotFoundErrorf("Exhausted all peers attempting to query metadata %q, peerset: %v", d.GetHash(), ps)
 }
 
-func (c *Cache) MetadataDeprecated(ctx context.Context, d *repb.Digest) (*interfaces.CacheMetadata, error) {
-	return c.Metadata(ctx, &resource.ResourceName{
-		Digest:       d,
-		InstanceName: c.isolation.GetRemoteInstanceName(),
-		Compressor:   repb.Compressor_IDENTITY,
-		CacheType:    c.isolation.GetCacheType(),
-	})
-}
-
 func (c *Cache) FindMissing(ctx context.Context, resources []*resource.ResourceName) ([]*repb.Digest, error) {
 	isolation := getIsolation(resources)
 	if isolation == nil {
@@ -809,15 +800,6 @@ func (c *Cache) Get(ctx context.Context, rn *resource.ResourceName) ([]byte, err
 	}
 	defer r.Close()
 	return io.ReadAll(r)
-}
-
-func (c *Cache) GetDeprecated(ctx context.Context, d *repb.Digest) ([]byte, error) {
-	return c.Get(ctx, &resource.ResourceName{
-		Digest:       d,
-		InstanceName: c.isolation.GetRemoteInstanceName(),
-		Compressor:   repb.Compressor_IDENTITY,
-		CacheType:    c.isolation.GetCacheType(),
-	})
 }
 
 func (c *Cache) GetMulti(ctx context.Context, resources []*resource.ResourceName) (map[*repb.Digest][]byte, error) {

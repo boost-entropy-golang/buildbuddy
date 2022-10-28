@@ -263,15 +263,6 @@ func (mc *MigrationCache) Metadata(ctx context.Context, r *resource.ResourceName
 	return srcMetadata, srcErr
 }
 
-func (mc *MigrationCache) MetadataDeprecated(ctx context.Context, d *repb.Digest) (*interfaces.CacheMetadata, error) {
-	return mc.Metadata(ctx, &resource.ResourceName{
-		Digest:       d,
-		InstanceName: mc.remoteInstanceName,
-		Compressor:   repb.Compressor_IDENTITY,
-		CacheType:    mc.cacheType,
-	})
-}
-
 func (mc *MigrationCache) FindMissing(ctx context.Context, resources []*resource.ResourceName) ([]*repb.Digest, error) {
 	eg, gctx := errgroup.WithContext(ctx)
 	var srcErr, dstErr error
@@ -718,15 +709,6 @@ func (mc *MigrationCache) Get(ctx context.Context, r *resource.ResourceName) ([]
 
 	// Return data from source cache
 	return srcBuf, srcErr
-}
-
-func (mc *MigrationCache) GetDeprecated(ctx context.Context, d *repb.Digest) ([]byte, error) {
-	return mc.Get(ctx, &resource.ResourceName{
-		Digest:       d,
-		InstanceName: mc.remoteInstanceName,
-		Compressor:   repb.Compressor_IDENTITY,
-		CacheType:    mc.cacheType,
-	})
 }
 
 func (mc *MigrationCache) sendNonBlockingCopy(ctx context.Context, r *resource.ResourceName, onlyCopyMissing bool) {

@@ -142,15 +142,6 @@ func (m *MemoryCache) Metadata(ctx context.Context, r *resource.ResourceName) (*
 	return &interfaces.CacheMetadata{SizeBytes: int64(len(vb))}, nil
 }
 
-func (m *MemoryCache) MetadataDeprecated(ctx context.Context, d *repb.Digest) (*interfaces.CacheMetadata, error) {
-	return m.Metadata(ctx, &resource.ResourceName{
-		Digest:       d,
-		InstanceName: m.remoteInstanceName,
-		Compressor:   repb.Compressor_IDENTITY,
-		CacheType:    m.cacheType,
-	})
-}
-
 func (m *MemoryCache) FindMissing(ctx context.Context, resources []*resource.ResourceName) ([]*repb.Digest, error) {
 	var missing []*repb.Digest
 	// No parallelism here either. Not necessary for an in-memory cache.
@@ -187,15 +178,6 @@ func (m *MemoryCache) Get(ctx context.Context, r *resource.ResourceName) ([]byte
 		return nil, status.InternalErrorf("LRU type assertion failed for %s", r.GetDigest())
 	}
 	return value, nil
-}
-
-func (m *MemoryCache) GetDeprecated(ctx context.Context, d *repb.Digest) ([]byte, error) {
-	return m.Get(ctx, &resource.ResourceName{
-		Digest:       d,
-		InstanceName: m.remoteInstanceName,
-		Compressor:   repb.Compressor_IDENTITY,
-		CacheType:    m.cacheType,
-	})
 }
 
 func (m *MemoryCache) GetMulti(ctx context.Context, resources []*resource.ResourceName) (map[*repb.Digest][]byte, error) {

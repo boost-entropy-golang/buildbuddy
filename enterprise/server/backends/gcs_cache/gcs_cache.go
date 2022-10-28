@@ -196,15 +196,6 @@ func (g *GCSCache) Get(ctx context.Context, r *resource.ResourceName) ([]byte, e
 	return b, err
 }
 
-func (g *GCSCache) GetDeprecated(ctx context.Context, d *repb.Digest) ([]byte, error) {
-	return g.Get(ctx, &resource.ResourceName{
-		Digest:       d,
-		InstanceName: g.remoteInstanceName,
-		Compressor:   repb.Compressor_IDENTITY,
-		CacheType:    g.cacheType,
-	})
-}
-
 func (g *GCSCache) GetMulti(ctx context.Context, resources []*resource.ResourceName) (map[*repb.Digest][]byte, error) {
 	lock := sync.RWMutex{} // protects(foundMap)
 	foundMap := make(map[*repb.Digest][]byte, len(resources))
@@ -438,15 +429,6 @@ func (g *GCSCache) Metadata(ctx context.Context, r *resource.ResourceName) (*int
 		SizeBytes:          metadata.Size,
 		LastModifyTimeUsec: metadata.Updated.UnixMicro(),
 	}, nil
-}
-
-func (g *GCSCache) MetadataDeprecated(ctx context.Context, d *repb.Digest) (*interfaces.CacheMetadata, error) {
-	return g.Metadata(ctx, &resource.ResourceName{
-		Digest:       d,
-		InstanceName: g.remoteInstanceName,
-		Compressor:   repb.Compressor_IDENTITY,
-		CacheType:    g.cacheType,
-	})
 }
 
 func (g *GCSCache) FindMissing(ctx context.Context, resources []*resource.ResourceName) ([]*repb.Digest, error) {

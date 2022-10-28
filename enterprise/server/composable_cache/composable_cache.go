@@ -75,14 +75,6 @@ func (c *ComposableCache) Metadata(ctx context.Context, r *resource.ResourceName
 	return c.inner.Metadata(ctx, r)
 }
 
-func (c *ComposableCache) MetadataDeprecated(ctx context.Context, d *repb.Digest) (*interfaces.CacheMetadata, error) {
-	md, err := c.outer.MetadataDeprecated(ctx, d)
-	if err == nil {
-		return md, nil
-	}
-	return c.inner.MetadataDeprecated(ctx, d)
-}
-
 func (c *ComposableCache) FindMissing(ctx context.Context, resources []*resource.ResourceName) ([]*repb.Digest, error) {
 	if len(resources) == 0 {
 		return nil, nil
@@ -124,23 +116,6 @@ func (c *ComposableCache) Get(ctx context.Context, r *resource.ResourceName) ([]
 	}
 	if c.mode&ModeReadThrough != 0 {
 		c.outer.Set(ctx, r, innerRsp)
-	}
-
-	return innerRsp, nil
-}
-
-func (c *ComposableCache) GetDeprecated(ctx context.Context, d *repb.Digest) ([]byte, error) {
-	outerRsp, err := c.outer.GetDeprecated(ctx, d)
-	if err == nil {
-		return outerRsp, nil
-	}
-
-	innerRsp, err := c.inner.GetDeprecated(ctx, d)
-	if err != nil {
-		return nil, err
-	}
-	if c.mode&ModeReadThrough != 0 {
-		c.outer.SetDeprecated(ctx, d, innerRsp)
 	}
 
 	return innerRsp, nil

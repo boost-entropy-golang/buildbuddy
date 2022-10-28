@@ -898,15 +898,6 @@ func (p *PebbleCache) Metadata(ctx context.Context, r *resource.ResourceName) (*
 	}, nil
 }
 
-func (p *PebbleCache) MetadataDeprecated(ctx context.Context, d *repb.Digest) (*interfaces.CacheMetadata, error) {
-	return p.Metadata(ctx, &resource.ResourceName{
-		Digest:       d,
-		InstanceName: p.isolation.RemoteInstanceName,
-		Compressor:   repb.Compressor_IDENTITY,
-		CacheType:    p.isolation.CacheType,
-	})
-}
-
 func (p *PebbleCache) FindMissing(ctx context.Context, resources []*resource.ResourceName) ([]*repb.Digest, error) {
 	db, err := p.leaser.DB()
 	if err != nil {
@@ -950,15 +941,6 @@ func (p *PebbleCache) Get(ctx context.Context, r *resource.ResourceName) ([]byte
 	}
 	defer rc.Close()
 	return io.ReadAll(rc)
-}
-
-func (p *PebbleCache) GetDeprecated(ctx context.Context, d *repb.Digest) ([]byte, error) {
-	return p.Get(ctx, &resource.ResourceName{
-		Digest:       d,
-		InstanceName: p.isolation.GetRemoteInstanceName(),
-		Compressor:   repb.Compressor_IDENTITY,
-		CacheType:    p.isolation.GetCacheType(),
-	})
 }
 
 func (p *PebbleCache) GetMulti(ctx context.Context, resources []*resource.ResourceName) (map[*repb.Digest][]byte, error) {

@@ -197,15 +197,6 @@ func (c *Cache) Metadata(ctx context.Context, r *resource.ResourceName) (*interf
 	}, nil
 }
 
-func (c *Cache) MetadataDeprecated(ctx context.Context, d *repb.Digest) (*interfaces.CacheMetadata, error) {
-	return c.Metadata(ctx, &resource.ResourceName{
-		Digest:       d,
-		InstanceName: c.remoteInstanceName,
-		Compressor:   repb.Compressor_IDENTITY,
-		CacheType:    c.cacheType,
-	})
-}
-
 func (c *Cache) FindMissing(ctx context.Context, resources []*resource.ResourceName) ([]*repb.Digest, error) {
 	if len(resources) == 0 {
 		return nil, nil
@@ -256,15 +247,6 @@ func (c *Cache) Get(ctx context.Context, r *resource.ResourceName) ([]byte, erro
 	b, err := c.rdbGet(ctx, k)
 	timer.ObserveGet(len(b), err)
 	return b, err
-}
-
-func (c *Cache) GetDeprecated(ctx context.Context, d *repb.Digest) ([]byte, error) {
-	return c.Get(ctx, &resource.ResourceName{
-		Digest:       d,
-		InstanceName: c.remoteInstanceName,
-		Compressor:   repb.Compressor_IDENTITY,
-		CacheType:    c.cacheType,
-	})
 }
 
 func (c *Cache) GetMulti(ctx context.Context, resources []*resource.ResourceName) (map[*repb.Digest][]byte, error) {

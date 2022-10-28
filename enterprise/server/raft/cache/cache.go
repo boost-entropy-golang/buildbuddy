@@ -495,10 +495,6 @@ func (rc *RaftCache) Metadata(ctx context.Context, r *resource.ResourceName) (*i
 	return nil, status.UnimplementedError("not implemented")
 }
 
-func (rc *RaftCache) MetadataDeprecated(ctx context.Context, d *repb.Digest) (*interfaces.CacheMetadata, error) {
-	return nil, status.UnimplementedError("not implemented")
-}
-
 func (rc *RaftCache) resourceNamesToKeyMetas(ctx context.Context, resourceNames []*resource.ResourceName) ([]*sender.KeyMeta, error) {
 	var keys []*sender.KeyMeta
 	for _, rn := range resourceNames {
@@ -566,15 +562,6 @@ func (rc *RaftCache) Get(ctx context.Context, rn *resource.ResourceName) ([]byte
 	}
 	defer r.Close()
 	return io.ReadAll(r)
-}
-
-func (rc *RaftCache) GetDeprecated(ctx context.Context, d *repb.Digest) ([]byte, error) {
-	return rc.Get(ctx, &resource.ResourceName{
-		Digest:       d,
-		InstanceName: rc.isolation.GetRemoteInstanceName(),
-		Compressor:   repb.Compressor_IDENTITY,
-		CacheType:    rc.isolation.GetCacheType(),
-	})
 }
 
 func (rc *RaftCache) GetMulti(ctx context.Context, resources []*resource.ResourceName) (map[*repb.Digest][]byte, error) {
