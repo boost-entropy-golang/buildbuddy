@@ -224,11 +224,6 @@ func (g *GCSCache) GetMulti(ctx context.Context, resources []*resource.ResourceN
 	return foundMap, nil
 }
 
-func (g *GCSCache) GetMultiDeprecated(ctx context.Context, digests []*repb.Digest) (map[*repb.Digest][]byte, error) {
-	rns := digest.ResourceNames(g.cacheType, g.remoteInstanceName, digests)
-	return g.GetMulti(ctx, rns)
-}
-
 func swallowGCSAlreadyExistsError(err error) error {
 	if err != nil {
 		if gerr, ok := err.(*googleapi.Error); ok {
@@ -297,11 +292,6 @@ func (g *GCSCache) SetMulti(ctx context.Context, kvs map[*resource.ResourceName]
 	return nil
 }
 
-func (g *GCSCache) SetMultiDeprecated(ctx context.Context, kvs map[*repb.Digest][]byte) error {
-	rnMap := digest.ResourceNameMap(g.cacheType, g.remoteInstanceName, kvs)
-	return g.SetMulti(ctx, rnMap)
-}
-
 func (g *GCSCache) Delete(ctx context.Context, r *resource.ResourceName) error {
 	k, err := g.key(ctx, r)
 	if err != nil {
@@ -319,16 +309,6 @@ func (g *GCSCache) Delete(ctx context.Context, r *resource.ResourceName) error {
 		return status.NotFoundErrorf("digest %s/%d not found in gcs_cache: %s", d.GetHash(), d.GetSizeBytes(), err.Error())
 	}
 	return err
-}
-
-func (g *GCSCache) DeleteDeprecated(ctx context.Context, d *repb.Digest) error {
-	rn := &resource.ResourceName{
-		Digest:       d,
-		InstanceName: g.remoteInstanceName,
-		Compressor:   repb.Compressor_IDENTITY,
-		CacheType:    g.cacheType,
-	}
-	return g.Delete(ctx, rn)
 }
 
 func (g *GCSCache) bumpTTLIfStale(ctx context.Context, key string, t time.Time) bool {
@@ -440,11 +420,6 @@ func (g *GCSCache) FindMissing(ctx context.Context, resources []*resource.Resour
 	}
 
 	return missing, nil
-}
-
-func (g *GCSCache) FindMissingDeprecated(ctx context.Context, digests []*repb.Digest) ([]*repb.Digest, error) {
-	rns := digest.ResourceNames(g.cacheType, g.remoteInstanceName, digests)
-	return g.FindMissing(ctx, rns)
 }
 
 func (g *GCSCache) Reader(ctx context.Context, r *resource.ResourceName, offset, limit int64) (io.ReadCloser, error) {

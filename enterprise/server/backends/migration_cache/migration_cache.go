@@ -315,11 +315,6 @@ func (mc *MigrationCache) FindMissing(ctx context.Context, resources []*resource
 	return srcMissing, srcErr
 }
 
-func (mc *MigrationCache) FindMissingDeprecated(ctx context.Context, digests []*repb.Digest) ([]*repb.Digest, error) {
-	rns := digest.ResourceNames(mc.cacheType, mc.remoteInstanceName, digests)
-	return mc.FindMissing(ctx, rns)
-}
-
 func (mc *MigrationCache) GetMulti(ctx context.Context, resources []*resource.ResourceName) (map[*repb.Digest][]byte, error) {
 	eg, gctx := errgroup.WithContext(ctx)
 	var srcErr, dstErr error
@@ -359,11 +354,6 @@ func (mc *MigrationCache) GetMulti(ctx context.Context, resources []*resource.Re
 	return srcData, srcErr
 }
 
-func (mc *MigrationCache) GetMultiDeprecated(ctx context.Context, digests []*repb.Digest) (map[*repb.Digest][]byte, error) {
-	rns := digest.ResourceNames(mc.cacheType, mc.remoteInstanceName, digests)
-	return mc.GetMulti(ctx, rns)
-}
-
 func (mc *MigrationCache) SetMulti(ctx context.Context, kvs map[*resource.ResourceName][]byte) error {
 	eg, gctx := errgroup.WithContext(ctx)
 	var srcErr, dstErr error
@@ -392,11 +382,6 @@ func (mc *MigrationCache) SetMulti(ctx context.Context, kvs map[*resource.Resour
 	}
 
 	return srcErr
-}
-
-func (mc *MigrationCache) SetMultiDeprecated(ctx context.Context, kvs map[*repb.Digest][]byte) error {
-	rnMap := digest.ResourceNameMap(mc.cacheType, mc.remoteInstanceName, kvs)
-	return mc.SetMulti(ctx, rnMap)
 }
 
 func (mc *MigrationCache) deleteMulti(ctx context.Context, kvs map[*resource.ResourceName][]byte) {
@@ -437,16 +422,6 @@ func (mc *MigrationCache) Delete(ctx context.Context, r *resource.ResourceName) 
 	}
 
 	return srcErr
-}
-
-func (mc *MigrationCache) DeleteDeprecated(ctx context.Context, d *repb.Digest) error {
-	rn := &resource.ResourceName{
-		Digest:       d,
-		InstanceName: mc.remoteInstanceName,
-		Compressor:   repb.Compressor_IDENTITY,
-		CacheType:    mc.cacheType,
-	}
-	return mc.Delete(ctx, rn)
 }
 
 type doubleReader struct {
@@ -753,7 +728,7 @@ func (mc *MigrationCache) Set(ctx context.Context, r *resource.ResourceName, dat
 	if err := eg.Wait(); err != nil {
 		if dstErr == nil {
 			// If error during write to source cache (source of truth), must delete from destination cache
-			deleteErr := mc.dest.DeleteDeprecated(ctx, r.GetDigest())
+			deleteErr := mc.dest.Delete(ctx, r)
 			if deleteErr != nil && !status.IsNotFoundError(deleteErr) {
 				log.Warningf("Migration double write err: src write of digest %v failed, but could not delete from dest cache: %s", r.GetDigest(), deleteErr)
 			}

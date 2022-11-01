@@ -148,11 +148,6 @@ func (m *MemoryCache) FindMissing(ctx context.Context, resources []*resource.Res
 	return missing, nil
 }
 
-func (m *MemoryCache) FindMissingDeprecated(ctx context.Context, digests []*repb.Digest) ([]*repb.Digest, error) {
-	rns := digest.ResourceNames(m.cacheType, m.remoteInstanceName, digests)
-	return m.FindMissing(ctx, rns)
-}
-
 func (m *MemoryCache) Get(ctx context.Context, r *resource.ResourceName) ([]byte, error) {
 	k, err := m.key(ctx, r)
 	if err != nil {
@@ -187,11 +182,6 @@ func (m *MemoryCache) GetMulti(ctx context.Context, resources []*resource.Resour
 	return foundMap, nil
 }
 
-func (m *MemoryCache) GetMultiDeprecated(ctx context.Context, digests []*repb.Digest) (map[*repb.Digest][]byte, error) {
-	rns := digest.ResourceNames(m.cacheType, m.remoteInstanceName, digests)
-	return m.GetMulti(ctx, rns)
-}
-
 func (m *MemoryCache) Set(ctx context.Context, r *resource.ResourceName, data []byte) error {
 	k, err := m.key(ctx, r)
 	if err != nil {
@@ -212,11 +202,6 @@ func (m *MemoryCache) SetMulti(ctx context.Context, kvs map[*resource.ResourceNa
 	return nil
 }
 
-func (m *MemoryCache) SetMultiDeprecated(ctx context.Context, kvs map[*repb.Digest][]byte) error {
-	rnMap := digest.ResourceNameMap(m.cacheType, m.remoteInstanceName, kvs)
-	return m.SetMulti(ctx, rnMap)
-}
-
 func (m *MemoryCache) Delete(ctx context.Context, r *resource.ResourceName) error {
 	k, err := m.key(ctx, r)
 	if err != nil {
@@ -230,16 +215,6 @@ func (m *MemoryCache) Delete(ctx context.Context, r *resource.ResourceName) erro
 		return status.NotFoundErrorf("digest %s/%d not found in memory cache", d.GetHash(), d.GetSizeBytes())
 	}
 	return nil
-}
-
-func (m *MemoryCache) DeleteDeprecated(ctx context.Context, d *repb.Digest) error {
-	rn := &resource.ResourceName{
-		Digest:       d,
-		InstanceName: m.remoteInstanceName,
-		Compressor:   repb.Compressor_IDENTITY,
-		CacheType:    m.cacheType,
-	}
-	return m.Delete(ctx, rn)
 }
 
 // Low level interface used for seeking and stream-writing.

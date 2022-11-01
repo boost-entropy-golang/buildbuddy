@@ -740,11 +740,6 @@ func getIsolation(resources []*resource.ResourceName) *dcpb.Isolation {
 	}
 }
 
-func (c *Cache) FindMissingDeprecated(ctx context.Context, digests []*repb.Digest) ([]*repb.Digest, error) {
-	rns := digest.ResourceNames(c.isolation.GetCacheType(), c.isolation.GetRemoteInstanceName(), digests)
-	return c.FindMissing(ctx, rns)
-}
-
 // The first reader with a non-empty value will be returned. If all potential
 // peers for the digest are exhausted, then return a NotFoundError.
 //
@@ -902,11 +897,6 @@ func (c *Cache) GetMulti(ctx context.Context, resources []*resource.ResourceName
 	return rsp, nil
 }
 
-func (c *Cache) GetMultiDeprecated(ctx context.Context, digests []*repb.Digest) (map[*repb.Digest][]byte, error) {
-	rns := digest.ResourceNames(c.isolation.GetCacheType(), c.isolation.GetRemoteInstanceName(), digests)
-	return c.GetMulti(ctx, rns)
-}
-
 type multiWriteCloser struct {
 	ctx           context.Context
 	log           log.Logger
@@ -1049,11 +1039,6 @@ func (c *Cache) SetMulti(ctx context.Context, kvs map[*resource.ResourceName][]b
 	return nil
 }
 
-func (c *Cache) SetMultiDeprecated(ctx context.Context, kvs map[*repb.Digest][]byte) error {
-	rnMap := digest.ResourceNameMap(c.isolation.CacheType, c.isolation.RemoteInstanceName, kvs)
-	return c.SetMulti(ctx, rnMap)
-}
-
 func (c *Cache) Delete(ctx context.Context, r *resource.ResourceName) error {
 	ps := c.readPeers(r.GetDigest())
 	for peer := ps.GetNextPeer(); peer != ""; peer = ps.GetNextPeer() {
@@ -1066,16 +1051,6 @@ func (c *Cache) Delete(ctx context.Context, r *resource.ResourceName) error {
 		}
 	}
 	return nil
-}
-
-func (c *Cache) DeleteDeprecated(ctx context.Context, d *repb.Digest) error {
-	rn := &resource.ResourceName{
-		Digest:       d,
-		InstanceName: c.isolation.GetRemoteInstanceName(),
-		Compressor:   repb.Compressor_IDENTITY,
-		CacheType:    c.isolation.GetCacheType(),
-	}
-	return c.Delete(ctx, rn)
 }
 
 func (c *Cache) Reader(ctx context.Context, r *resource.ResourceName, offset, limit int64) (io.ReadCloser, error) {

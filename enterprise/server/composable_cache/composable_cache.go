@@ -84,17 +84,6 @@ func (c *ComposableCache) FindMissing(ctx context.Context, resources []*resource
 	return c.inner.FindMissing(ctx, missingResources)
 }
 
-func (c *ComposableCache) FindMissingDeprecated(ctx context.Context, digests []*repb.Digest) ([]*repb.Digest, error) {
-	missing, err := c.outer.FindMissingDeprecated(ctx, digests)
-	if err != nil {
-		missing = digests
-	}
-	if len(missing) == 0 {
-		return nil, nil
-	}
-	return c.inner.FindMissingDeprecated(ctx, missing)
-}
-
 func (c *ComposableCache) Get(ctx context.Context, r *resource.ResourceName) ([]byte, error) {
 	outerRsp, err := c.outer.Get(ctx, r)
 	if err == nil {
@@ -150,33 +139,6 @@ func (c *ComposableCache) GetMulti(ctx context.Context, resources []*resource.Re
 	return foundMap, nil
 }
 
-func (c *ComposableCache) GetMultiDeprecated(ctx context.Context, digests []*repb.Digest) (map[*repb.Digest][]byte, error) {
-	foundMap := make(map[*repb.Digest][]byte, len(digests))
-	if outerFoundMap, err := c.outer.GetMultiDeprecated(ctx, digests); err == nil {
-		for d, data := range outerFoundMap {
-			foundMap[d] = data
-		}
-	}
-	stillMissing := make([]*repb.Digest, 0)
-	for _, d := range digests {
-		if _, ok := foundMap[d]; !ok {
-			stillMissing = append(stillMissing, d)
-		}
-	}
-	if len(stillMissing) == 0 {
-		return foundMap, nil
-	}
-
-	innerFoundMap, err := c.inner.GetMultiDeprecated(ctx, stillMissing)
-	if err != nil {
-		return nil, err
-	}
-	for d, data := range innerFoundMap {
-		foundMap[d] = data
-	}
-	return foundMap, nil
-}
-
 func (c *ComposableCache) Set(ctx context.Context, r *resource.ResourceName, data []byte) error {
 	// Special case -- we call set on the inner cache first (in case of
 	// error) and then if no error we'll maybe set on the outer.
@@ -199,16 +161,6 @@ func (c *ComposableCache) SetMulti(ctx context.Context, kvs map[*resource.Resour
 	return nil
 }
 
-func (c *ComposableCache) SetMultiDeprecated(ctx context.Context, kvs map[*repb.Digest][]byte) error {
-	if err := c.inner.SetMultiDeprecated(ctx, kvs); err != nil {
-		return err
-	}
-	if c.mode&ModeWriteThrough != 0 {
-		c.outer.SetMultiDeprecated(ctx, kvs)
-	}
-	return nil
-}
-
 func (c *ComposableCache) Delete(ctx context.Context, r *resource.ResourceName) error {
 	// Special case -- we call delete on the inner cache first (in case of
 	// error) and then if no error we'll maybe delete from the outer.
@@ -217,18 +169,6 @@ func (c *ComposableCache) Delete(ctx context.Context, r *resource.ResourceName) 
 	}
 	if c.mode&ModeWriteThrough != 0 {
 		c.outer.Delete(ctx, r)
-	}
-	return nil
-}
-
-func (c *ComposableCache) DeleteDeprecated(ctx context.Context, d *repb.Digest) error {
-	// Special case -- we call delete on the inner cache first (in case of
-	// error) and then if no error we'll maybe delete from the outer.
-	if err := c.inner.DeleteDeprecated(ctx, d); err != nil {
-		return err
-	}
-	if c.mode&ModeWriteThrough != 0 {
-		c.outer.DeleteDeprecated(ctx, d)
 	}
 	return nil
 }

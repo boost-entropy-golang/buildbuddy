@@ -541,11 +541,6 @@ func (rc *RaftCache) FindMissing(ctx context.Context, resources []*resource.Reso
 	return rc.findMissingResourceNames(ctx, resources)
 }
 
-func (rc *RaftCache) FindMissingDeprecated(ctx context.Context, digests []*repb.Digest) ([]*repb.Digest, error) {
-	resourceNames := digest.ResourceNames(rc.isolation.GetCacheType(), rc.isolation.GetRemoteInstanceName(), digests)
-	return rc.findMissingResourceNames(ctx, resourceNames)
-}
-
 func (rc *RaftCache) Get(ctx context.Context, rn *resource.ResourceName) ([]byte, error) {
 	r, err := rc.Reader(ctx, rn, 0, 0)
 	if err != nil {
@@ -590,11 +585,6 @@ func (rc *RaftCache) GetMulti(ctx context.Context, resources []*resource.Resourc
 	return dataMap, nil
 }
 
-func (rc *RaftCache) GetMultiDeprecated(ctx context.Context, digests []*repb.Digest) (map[*repb.Digest][]byte, error) {
-	rns := digest.ResourceNames(rc.isolation.GetCacheType(), rc.isolation.GetRemoteInstanceName(), digests)
-	return rc.GetMulti(ctx, rns)
-}
-
 func (rc *RaftCache) Set(ctx context.Context, r *resource.ResourceName, data []byte) error {
 	wc, err := rc.Writer(ctx, r)
 	if err != nil {
@@ -610,14 +600,6 @@ func (rc *RaftCache) SetMulti(ctx context.Context, kvs map[*resource.ResourceNam
 	return nil
 }
 
-func (rc *RaftCache) SetMultiDeprecated(ctx context.Context, kvs map[*repb.Digest][]byte) error {
-	return nil
-}
-
 func (rc *RaftCache) Delete(ctx context.Context, r *resource.ResourceName) error {
-	return nil
-}
-
-func (rc *RaftCache) DeleteDeprecated(ctx context.Context, d *repb.Digest) error {
 	return nil
 }

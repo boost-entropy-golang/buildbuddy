@@ -352,11 +352,6 @@ func (c *DiskCache) FindMissing(ctx context.Context, resources []*resource.Resou
 	return p.findMissing(ctx, resources)
 }
 
-func (c *DiskCache) FindMissingDeprecated(ctx context.Context, digests []*repb.Digest) ([]*repb.Digest, error) {
-	rns := digest.ResourceNames(c.cacheType, c.remoteInstanceName, digests)
-	return c.FindMissing(ctx, rns)
-}
-
 func (c *DiskCache) Get(ctx context.Context, r *resource.ResourceName) ([]byte, error) {
 	p, err := c.getPartition(ctx, r.GetInstanceName())
 	if err != nil {
@@ -375,11 +370,6 @@ func (c *DiskCache) GetMulti(ctx context.Context, resources []*resource.Resource
 		return nil, err
 	}
 	return p.getMulti(ctx, resources)
-}
-
-func (c *DiskCache) GetMultiDeprecated(ctx context.Context, digests []*repb.Digest) (map[*repb.Digest][]byte, error) {
-	rns := digest.ResourceNames(c.cacheType, c.remoteInstanceName, digests)
-	return c.partition.getMulti(ctx, rns)
 }
 
 func (c *DiskCache) Set(ctx context.Context, r *resource.ResourceName, data []byte) error {
@@ -405,21 +395,6 @@ func (c *DiskCache) SetMulti(ctx context.Context, kvs map[*resource.ResourceName
 		return err
 	}
 	return p.setMulti(ctx, kvs)
-}
-
-func (c *DiskCache) SetMultiDeprecated(ctx context.Context, kvs map[*repb.Digest][]byte) error {
-	rnMap := digest.ResourceNameMap(c.cacheType, c.remoteInstanceName, kvs)
-	return c.partition.setMulti(ctx, rnMap)
-}
-
-func (c *DiskCache) DeleteDeprecated(ctx context.Context, d *repb.Digest) error {
-	r := &resource.ResourceName{
-		Digest:       d,
-		InstanceName: c.remoteInstanceName,
-		Compressor:   repb.Compressor_IDENTITY,
-		CacheType:    c.cacheType,
-	}
-	return c.Delete(ctx, r)
 }
 
 func (c *DiskCache) Delete(ctx context.Context, r *resource.ResourceName) error {
