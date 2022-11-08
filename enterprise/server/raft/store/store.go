@@ -2,11 +2,13 @@ package store
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"io"
 	"net"
 	"os"
 	"sort"
+	"strconv"
 	"sync"
 	"time"
 
@@ -24,6 +26,7 @@ import (
 	"github.com/buildbuddy-io/buildbuddy/enterprise/server/raft/sender"
 	"github.com/buildbuddy-io/buildbuddy/server/gossip"
 	"github.com/buildbuddy-io/buildbuddy/server/interfaces"
+	"github.com/buildbuddy-io/buildbuddy/server/metrics"
 	"github.com/buildbuddy-io/buildbuddy/server/util/alert"
 	"github.com/buildbuddy-io/buildbuddy/server/util/disk"
 	"github.com/buildbuddy-io/buildbuddy/server/util/grpc_server"
@@ -35,6 +38,8 @@ import (
 	"github.com/hashicorp/serf/serf"
 	"github.com/lni/dragonboat/v3"
 	"github.com/lni/dragonboat/v3/raftio"
+	"github.com/prometheus/client_golang/prometheus"
+	"golang.org/x/sync/errgroup"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/reflection"
 	"google.golang.org/protobuf/encoding/prototext"
@@ -53,6 +58,12 @@ const (
 	// If a node's disk is fuller than this (by percentage), it is not
 	// eligible to receive ranges moved from other nodes.
 	maximumDiskCapacity = .95
+
+	splitQueueSize = 100
+)
+
+var (
+	enableSplittingReplicas = flag.Bool("cache.raft.enable_splitting_replicas", true, "If set, allow splitting oversize replicas")
 )
 
 type Store struct {
@@ -79,6 +90,9 @@ type Store struct {
 
 	fileStorer filestore.Store
 	splitMu    sync.Mutex
+	splitQueue chan *rfpb.RangeDescriptor
+	eg         *errgroup.Group
+	quitChan   chan struct{}
 }
 
 func New(rootDir string, nodeHost *dragonboat.NodeHost, gossipManager *gossip.GossipManager, sender *sender.Sender, registry registry.NodeRegistry, apiClient *client.APIClient) *Store {
@@ -103,7 +117,9 @@ func New(rootDir string, nodeHost *dragonboat.NodeHost, gossipManager *gossip.Go
 			IsolateByGroupIDs:           true,
 			PrioritizeHashInMetadataKey: true,
 		}),
-		splitMu: sync.Mutex{},
+		splitMu:    sync.Mutex{},
+		splitQueue: make(chan *rfpb.RangeDescriptor, splitQueueSize),
+		eg:         &errgroup.Group{},
 	}
 	s.leaderUpdatedCB = listener.LeaderCB(s.onLeaderUpdated)
 	gossipManager.AddListener(s)
@@ -165,7 +181,52 @@ func (s *Store) onLeaderUpdated(info raftio.LeaderInfo) {
 	go s.maybeAcquireRangeLease(rd)
 }
 
+func (s *Store) RequestSplit(clusterID uint64) {
+	rd := s.lookupRange(clusterID)
+	if rd == nil {
+		return
+	}
+	header := &rfpb.Header{
+		RangeId:    rd.GetRangeId(),
+		Generation: rd.GetGeneration(),
+	}
+	if _, err := s.LeasedRange(header); err != nil {
+		return
+	}
+	select {
+	case s.splitQueue <- rd:
+		break
+	default:
+		s.log.Warningf("Split queue was full; dropping request to split cluster %d.", clusterID)
+	}
+}
+
+func (s *Store) handleSplits(quitChan <-chan struct{}) error {
+	for {
+		select {
+		case <-quitChan:
+			return nil
+		case rd := <-s.splitQueue:
+			req := &rfpb.SplitClusterRequest{
+				Header: &rfpb.Header{
+					RangeId:    rd.GetRangeId(),
+					Generation: rd.GetGeneration(),
+				},
+				Range: rd,
+			}
+			ctx, cancel := context.WithTimeout(context.TODO(), 60*time.Second)
+			_, err := s.SplitCluster(ctx, req)
+			cancel()
+			if err != nil {
+				s.log.Warningf("Error splitting cluster: %s", err)
+			}
+		}
+	}
+}
+
 func (s *Store) Start(grpcAddress string) error {
+	s.quitChan = make(chan struct{}, 0)
+
 	// A grpcServer is run which is responsible for presenting a meta API
 	// to manage raft nodes on each host, as well as an API to shuffle data
 	// around between nodes, outside of raft.
@@ -182,10 +243,21 @@ func (s *Store) Start(grpcAddress string) error {
 		s.grpcServer.Serve(lis)
 	}()
 	s.grpcAddr = grpcAddress
+
+	s.eg.Go(func() error {
+		return s.handleSplits(s.quitChan)
+	})
+
 	return nil
 }
 
 func (s *Store) Stop(ctx context.Context) error {
+	close(s.quitChan)
+	if err := s.eg.Wait(); err != nil {
+		return err
+	}
+	s.log.Info("Store: waitgroups finished")
+
 	listener.DefaultListener().UnregisterLeaderUpdatedCB(&s.leaderUpdatedCB)
 	return grpc_server.GRPCShutdown(ctx, s.grpcServer)
 }
@@ -273,6 +345,10 @@ func (s *Store) AddRange(rd *rfpb.RangeDescriptor, r *replica.Replica) {
 	s.openRanges[rd.GetRangeId()] = rd
 	s.rangeMu.Unlock()
 
+	metrics.RaftRanges.With(prometheus.Labels{
+		metrics.RaftNodeHostIDLabel: s.nodeHost.ID(),
+	}).Inc()
+
 	if len(rd.GetReplicas()) == 0 {
 		s.log.Debugf("range %d has no replicas (yet?)", rd.GetRangeId())
 		return
@@ -305,6 +381,10 @@ func (s *Store) RemoveRange(rd *rfpb.RangeDescriptor, r *replica.Replica) {
 	s.rangeMu.Lock()
 	delete(s.openRanges, rd.GetRangeId())
 	s.rangeMu.Unlock()
+
+	metrics.RaftRanges.With(prometheus.Labels{
+		metrics.RaftNodeHostIDLabel: s.nodeHost.ID(),
+	}).Dec()
 
 	if len(rd.GetReplicas()) == 0 {
 		s.log.Debugf("range descriptor had no replicas yet")
@@ -884,6 +964,10 @@ func casRevert(cas *rfpb.CASRequest) *rfpb.CASRequest {
 //   new endpoints.
 // 6) The split range is unlocked.
 func (s *Store) SplitCluster(ctx context.Context, req *rfpb.SplitClusterRequest) (*rfpb.SplitClusterResponse, error) {
+	if !*enableSplittingReplicas {
+		return nil, status.FailedPreconditionError("Splitting not enabled")
+	}
+
 	s.splitMu.Lock()
 	defer s.splitMu.Unlock()
 
@@ -1083,6 +1167,14 @@ func (s *Store) SplitCluster(ctx context.Context, req *rfpb.SplitClusterRequest)
 
 	s.log.Infof("splitlog: cleaned up old data on cluster %d", clusterID)
 
+	metrics.RaftSplits.With(prometheus.Labels{
+		metrics.RaftNodeHostIDLabel: s.nodeHost.ID(),
+	}).Inc()
+
+	metrics.RaftSplitDurationUs.With(prometheus.Labels{
+		metrics.RaftRangeIDLabel: strconv.Itoa(int(newLeft.GetRangeId())),
+	}).Observe(float64(time.Since(splitStart).Microseconds()))
+
 	splitRsp := &rfpb.SplitClusterResponse{
 		Left:  newLeft,
 		Right: newRight,
@@ -1190,6 +1282,10 @@ func (s *Store) AddClusterNode(ctx context.Context, req *rfpb.AddClusterNodeRequ
 	if err != nil {
 		return nil, err
 	}
+	metrics.RaftMoves.With(prometheus.Labels{
+		metrics.RaftNodeHostIDLabel: s.nodeHost.ID(),
+		metrics.RaftMoveLabel:       "add",
+	}).Inc()
 
 	return &rfpb.AddClusterNodeResponse{
 		Range: rd,
@@ -1265,6 +1361,12 @@ func (s *Store) RemoveClusterNode(ctx context.Context, req *rfpb.RemoveClusterNo
 	if err != nil {
 		return nil, err
 	}
+
+	metrics.RaftMoves.With(prometheus.Labels{
+		metrics.RaftNodeHostIDLabel: s.nodeHost.ID(),
+		metrics.RaftMoveLabel:       "remove",
+	}).Inc()
+
 	return &rfpb.RemoveClusterNodeResponse{
 		Range: rd,
 	}, nil
