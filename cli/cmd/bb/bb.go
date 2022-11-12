@@ -9,6 +9,7 @@ import (
 	"github.com/buildbuddy-io/buildbuddy/cli/help"
 	"github.com/buildbuddy-io/buildbuddy/cli/log"
 	"github.com/buildbuddy-io/buildbuddy/cli/login"
+	"github.com/buildbuddy-io/buildbuddy/cli/metadata"
 	"github.com/buildbuddy-io/buildbuddy/cli/parser"
 	"github.com/buildbuddy-io/buildbuddy/cli/plugin"
 	"github.com/buildbuddy-io/buildbuddy/cli/remotebazel"
@@ -17,9 +18,15 @@ import (
 	"github.com/buildbuddy-io/buildbuddy/cli/version"
 	"github.com/buildbuddy-io/buildbuddy/cli/watcher"
 	"github.com/buildbuddy-io/buildbuddy/server/util/status"
+
+	sidecarmain "github.com/buildbuddy-io/buildbuddy/cli/cmd/sidecar"
 )
 
 func main() {
+	// If we're the sidecar (CLI server) process, run the sidecar instead of the
+	// CLI.
+	sidecarmain.Handle()
+
 	exitCode, err := run()
 	if err != nil {
 		log.Fatal(status.Message(err))
@@ -28,6 +35,9 @@ func main() {
 }
 
 func run() (exitCode int, err error) {
+	// Record original arguments so we can show them in the UI.
+	originalArgs := append([]string{}, os.Args...)
+
 	// Handle global args that don't apply to any specific subcommand
 	// (--verbose, etc.)
 	args := log.Configure(os.Args[1:])
@@ -113,6 +123,12 @@ func run() (exitCode int, err error) {
 	// If this is a `bazel run` command, add a --run_script arg so that
 	// we can execute post-bazel plugins between the build and the run step.
 	args, scriptPath, err = bazelisk.ConfigureRunScript(args)
+	if err != nil {
+		return -1, err
+	}
+	// Append metadata just before running bazelisk.
+	// Note, this means plugins cannot modify this metadata.
+	args, err = metadata.AppendBuildMetadata(args, originalArgs)
 	if err != nil {
 		return -1, err
 	}

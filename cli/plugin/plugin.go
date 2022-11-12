@@ -38,7 +38,7 @@ const (
 	pluginsStorageDirName = "plugins"
 
 	installCommandUsage = `
-Usage: bb install [REPO[@VERSION][:SUBDIR]] [--path=PATH] [--user]
+Usage: bb install [REPO[@VERSION]][:PATH] [--user]
 
 Installs a remote or local CLI plugin for the current bazel workspace.
 
@@ -46,7 +46,7 @@ The --user flag installs the plugin globally for your user in ~/buildbuddy.yaml,
 instead of just for the current workspace.
 
 A local plugin can be installed by omitting the repo argument and specifying
---path=PATH instead.
+just :PATH, or the flag --path=PATH.
 
 Examples:
   # Install the latest version of "github.com/example-inc/example-bb-plugin"
@@ -59,8 +59,10 @@ Examples:
   # where the plugin is located in the "src" directory in that repo.
   bb install example.com/example-bb-plugin@abc123:src
 
-  # Use the local plugin in "./plugins/local_plugin".
-  bb install --path=./plugins/local_plugin
+  # Use the local plugin located at "./plugins/local_plugin".
+  bb install :plugins/local_plugin
+  # or:
+  bb install --path plugins/local_plugin
 `
 )
 
@@ -114,7 +116,7 @@ func HandleInstall(args []string) (exitCode int, err error) {
 	}
 	if len(installCmd.Args()) == 1 {
 		repo := installCmd.Args()[0]
-		cfg, err := parseRepoInstallSpec(repo, *installPath)
+		cfg, err := parsePluginSpec(repo, *installPath)
 		if err != nil {
 			log.Printf("Failed to parse repo: %s", repo)
 			return 1, nil
@@ -147,26 +149,25 @@ func HandleInstall(args []string) (exitCode int, err error) {
 	return 0, nil
 }
 
-func parseRepoInstallSpec(repo, pathArg string) (*PluginConfig, error) {
-	m := repoPattern.FindStringSubmatch(repo)
-	if len(m) == 0 {
-		return nil, fmt.Errorf("invalid repo spec %q: does not match REPO[@VERSION][:PATH]", repo)
+func parsePluginSpec(spec, pathArg string) (*PluginConfig, error) {
+	var repoSpec, versionSpec, pathSpec string
+	if strings.HasPrefix(spec, ":") {
+		pathSpec = strings.TrimPrefix(spec, ":")
+	} else {
+		m := repoPattern.FindStringSubmatch(spec)
+		if len(m) == 0 {
+			return nil, fmt.Errorf("invalid plugin spec %q: does not match REPO[@VERSION][:PATH]", spec)
+		}
+		repoSpec = m[repoPattern.SubexpIndex("repo")]
+		if v := m[repoPattern.SubexpIndex("version")]; v != "" {
+			versionSpec = "@" + v
+		}
+		pathSpec = m[repoPattern.SubexpIndex("path")]
 	}
-	repoMatch := m[repoPattern.SubexpIndex("repo")]
-	versionMatch := m[repoPattern.SubexpIndex("version")]
-	pathMatch := m[repoPattern.SubexpIndex("path")]
 
-	repoSpec := repoMatch
-
-	versionSpec := ""
-	if versionMatch != "" {
-		versionSpec = "@" + versionMatch
-	}
-
-	pathSpec := pathMatch
 	if pathArg != "" {
 		if pathSpec != "" {
-			return nil, fmt.Errorf("ambiguous path: repo argument specifies %q but --path specifies %q", pathMatch, pathArg)
+			return nil, fmt.Errorf("ambiguous path: positional argument specifies %q but --path flag specifies %q", pathSpec, pathArg)
 		}
 		pathSpec = pathArg
 	}
@@ -690,7 +691,7 @@ func (p *Plugin) commandEnv() []string {
 // be fed to the next plugin in the pipeline, or passed to Bazel if this is the
 // last plugin.
 //
-// See cli/example_plugins/ping_remote/pre_bazel.sh for an example.
+// See cli/example_plugins/ping-remote/pre_bazel.sh for an example.
 func (p *Plugin) PreBazel(args []string) ([]string, error) {
 	// Write args to a file so the plugin can manipulate them.
 	argsFile, err := os.CreateTemp("", "bazelisk-args-*")
@@ -720,11 +721,9 @@ func (p *Plugin) PreBazel(args []string) ([]string, error) {
 		return args, nil
 	}
 	log.Debugf("Running pre-bazel hook for %s/%s", p.config.Repo, p.config.Path)
-	// TODO: if pre_bazel.sh is not executable and does not contain a shebang
-	// line, wrap it with "/usr/bin/env bash"
 	// TODO: support "pre_bazel.<any-extension>" as long as the file is
 	// executable and has a shebang line
-	cmd := exec.Command(scriptPath, argsFile.Name())
+	cmd := exec.Command("/usr/bin/env", "bash", scriptPath, argsFile.Name())
 	// TODO: Prefix output with "output from [plugin]" ?
 	cmd.Dir = path
 	cmd.Stderr = os.Stderr
@@ -749,7 +748,7 @@ func (p *Plugin) PreBazel(args []string) ([]string, error) {
 // Currently the invocation data is fed as plain text via a file. The file path
 // is passed as the first argument.
 //
-// See cli/example_plugins/go_deps/post_bazel.sh for an example.
+// See cli/example_plugins/go-deps/post_bazel.sh for an example.
 func (p *Plugin) PostBazel(bazelOutputPath string) error {
 	path, err := p.Path()
 	if err != nil {
@@ -764,7 +763,7 @@ func (p *Plugin) PostBazel(bazelOutputPath string) error {
 		return nil
 	}
 	log.Debugf("Running post-bazel hook for %s/%s", p.config.Repo, p.config.Path)
-	cmd := exec.Command(scriptPath, bazelOutputPath)
+	cmd := exec.Command("/usr/bin/env", "bash", scriptPath, bazelOutputPath)
 	// TODO: Prefix stderr output with "output from [plugin]" ?
 	cmd.Dir = path
 	cmd.Stderr = os.Stderr
@@ -785,7 +784,7 @@ func (p *Plugin) PostBazel(bazelOutputPath string) error {
 // It returns the original reader if no output handler is configured for this
 // plugin.
 //
-// See cli/example_plugins/go_highlight/handle_bazel_output.sh for an example.
+// See cli/example_plugins/go-highlight/handle_bazel_output.sh for an example.
 func (p *Plugin) Pipe(r io.Reader) (io.Reader, error) {
 	path, err := p.Path()
 	if err != nil {
@@ -799,7 +798,7 @@ func (p *Plugin) Pipe(r io.Reader) (io.Reader, error) {
 	if !exists {
 		return r, nil
 	}
-	cmd := exec.Command(scriptPath)
+	cmd := exec.Command("/usr/bin/env", "bash", scriptPath)
 	pr, pw := io.Pipe()
 	cmd.Dir = path
 	// Write command output to a pty to ensure line buffering.
