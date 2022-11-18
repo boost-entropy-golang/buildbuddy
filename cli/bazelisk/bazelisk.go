@@ -1,7 +1,6 @@
 package bazelisk
 
 import (
-	"context"
 	"io"
 	"os"
 	"path/filepath"
@@ -15,7 +14,6 @@ import (
 	"github.com/buildbuddy-io/buildbuddy/cli/plugin"
 	"github.com/buildbuddy-io/buildbuddy/cli/terminal"
 	"github.com/buildbuddy-io/buildbuddy/cli/workspace"
-	"github.com/buildbuddy-io/buildbuddy/server/util/disk"
 	"github.com/buildbuddy-io/buildbuddy/server/util/status"
 	"github.com/creack/pty"
 )
@@ -197,18 +195,16 @@ func setBazelVersion() error {
 	if err != nil {
 		return err
 	}
-	b, err := disk.ReadFile(context.TODO(), filepath.Join(ws, ".bazelversion"))
-	if err != nil {
-		if !status.IsNotFoundError(err) {
-			return err
-		}
+	parts, err := ParseVersionDotfile(filepath.Join(ws, ".bazelversion"))
+	if err != nil && !os.IsNotExist(err) {
+		return err
 	}
-	parts := strings.Split(string(b), "\n")
-
-	// Bazelisk probably chose us because we were specified first in
-	// .bazelversion. Delete the first line, if it exists.
-	if len(parts) > 0 {
-		parts = parts[1:]
+	// If we appear first in .bazelversion, ignore that version to prevent
+	// bazelisk from invoking us recursively.
+	if IsInvokedByBazelisk() {
+		for len(parts) > 0 && strings.HasPrefix(parts[0], "buildbuddy-io/") {
+			parts = parts[1:]
+		}
 	}
 	// If we couldn't find a non-BB bazel version in .bazelversion at this
 	// point, default to "latest".
@@ -217,4 +213,22 @@ func setBazelVersion() error {
 	}
 
 	return os.Setenv("USE_BAZEL_VERSION", parts[0])
+}
+
+// ParseVersionDotfile returns the non-empty lines from the given .bazelversion
+// path.
+func ParseVersionDotfile(path string) ([]string, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	parts := strings.Split(string(b), "\n")
+	var out []string
+	for _, p := range parts {
+		if p == "" {
+			continue
+		}
+		out = append(out, p)
+	}
+	return out, nil
 }
