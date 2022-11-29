@@ -2,7 +2,7 @@ import React from "react";
 import { PieChart as PieChartIcon } from "lucide-react";
 import { ResponsiveContainer, PieChart, Pie, Cell } from "recharts";
 import format from "../format/format";
-import getColor from "../flame_chart/colors";
+import { getChartColor } from "../util/color";
 
 interface Props {
   durationMap: Map<string, number>;
@@ -60,10 +60,6 @@ export default class InvocationBreakdownCardComponent extends React.Component<Pr
 
     executionData = executionData.sort((a, b) => (b?.value || 0) - (a?.value || 0)).filter((entry) => entry.value > 0);
 
-    let executionSum = executionData.reduce((prev, current) => {
-      return { name: "Sum", value: (prev.value || 0) + (current.value || 0) };
-    });
-
     return (
       <div className="card">
         <PieChartIcon className="icon" />
@@ -71,8 +67,8 @@ export default class InvocationBreakdownCardComponent extends React.Component<Pr
           <div className="title">Timing Breakdown</div>
           <div className="details">
             <div className="cache-sections">
-              {renderBreakdown(phaseData)}
-              {renderBreakdown(executionData)}
+              {renderBreakdown(phaseData, "Phase breakdown", "Breakdown of build phases")}
+              {renderBreakdown(executionData, "Execution breakdown", "Breakdown totals across all threads")}
             </div>
           </div>
         </div>
@@ -81,21 +77,21 @@ export default class InvocationBreakdownCardComponent extends React.Component<Pr
   }
 }
 
-function renderBreakdown(data: Datum[]) {
+function renderBreakdown(data: Datum[], title: string, subtitle: string) {
   let sum = data.reduce((prev, current) => {
     return { name: "Sum", value: prev.value + current.value };
   });
 
   return (
     <div className="cache-section">
-      <div className="cache-title">Phase breakdown</div>
-      <div className="cache-subtitle">Breakdown of build phases</div>
+      <div className="cache-title">{title}</div>
+      <div className="cache-subtitle">{subtitle}</div>
       <div className="cache-chart">
         <ResponsiveContainer width={100} height={100}>
           <PieChart>
             <Pie data={data} dataKey="value" outerRadius={40} innerRadius={20}>
-              {data.map((entry, index) => (
-                <Cell key={`cell-${index}`} fill={getColor(entry.name)} />
+              {data.map((_, index) => (
+                <Cell key={`cell-${index}`} fill={getChartColor(index)} />
               ))}
             </Pie>
           </PieChart>
@@ -105,7 +101,7 @@ function renderBreakdown(data: Datum[]) {
             <div className="cache-chart-label">
               <span
                 className="color-swatch cache-hit-color-swatch"
-                style={{ backgroundColor: getColor(entry.name) }}></span>
+                style={{ backgroundColor: getChartColor(index) }}></span>
               <span className="cache-stat">
                 <span className="cache-stat-duration">{format.durationUsec(entry.value)}</span>{" "}
                 <span className="cache-stat-description">
