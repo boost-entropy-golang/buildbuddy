@@ -462,6 +462,14 @@ func (p *PebbleCache) batchEditAtime(batch *pebble.Batch, fileMetadataKey []byte
 	if err != nil {
 		return err
 	}
+
+	fileRecord := fileMetadata.GetFileRecord()
+	if fileRecord.GetCompressor() == repb.Compressor_IDENTITY &&
+		fileRecord.GetIsolation().GetCacheType() == resource.CacheType_CAS &&
+		fileMetadata.GetStoredSizeBytes() != fileRecord.GetDigest().GetSizeBytes() {
+		log.Infof("Pebble write metadata size mismatch, batchEditAtime: %v", fileMetadata)
+	}
+
 	return batch.Set(fileMetadataKey, protoBytes, nil /*ignored write options*/)
 }
 
@@ -588,7 +596,7 @@ func (p *PebbleCache) deleteOrphanedFiles(quitChan chan struct{}) error {
 			// Remove the second to last element which is the 4-char hash prefix.
 			parts = append(parts[:prefixIndex], parts[prefixIndex+1:]...)
 			fileMetadataKey := []byte(strings.Join(parts, sep))
-			if _, err := lookupFileMetadata(iter, fileMetadataKey); status.IsNotFoundError(err) {
+			if _, err := lookupFileMetadata(p.env.GetServerContext(), iter, fileMetadataKey); status.IsNotFoundError(err) {
 				if *orphanDeleteDryRun {
 					fi, err := d.Info()
 					if err != nil {
@@ -661,7 +669,7 @@ func (p *PebbleCache) scanForBrokenFiles(quitChan chan struct{}) error {
 		blobDir = p.blobDir(pathHasDupPartitionID, fileMetadata.GetFileRecord().GetIsolation().GetPartitionId())
 		_, err := p.fileStorer.NewReader(p.env.GetServerContext(), blobDir, fileMetadata.GetStorageMetadata(), 0, 0)
 		if err != nil {
-			p.handleMetadataMismatch(err, fileMetadataKey, fileMetadata)
+			p.handleMetadataMismatch(p.env.GetServerContext(), err, fileMetadataKey, fileMetadata)
 			mismatchCount += 1
 		}
 	}
@@ -690,6 +698,14 @@ func (p *PebbleCache) MigrateFromDiskDir(diskDir string) error {
 			return err
 		}
 		inserted += 1
+
+		fileRecord := fileMetadata.GetFileRecord()
+		if fileRecord.GetCompressor() == repb.Compressor_IDENTITY &&
+			fileRecord.GetIsolation().GetCacheType() == resource.CacheType_CAS &&
+			fileMetadata.GetStoredSizeBytes() != fileRecord.GetDigest().GetSizeBytes() {
+			log.Infof("Pebble write metadata size mismatch, MigrateFromDiskDir: %v", fileMetadata)
+		}
+
 		return batch.Set(fileMetadataKey, protoBytes, nil /*ignored write options*/)
 	})
 	if err != nil {
@@ -819,11 +835,19 @@ func (p *PebbleCache) blobDir(shouldIncludePartition bool, partID string) string
 	return filePath
 }
 
-func lookupFileMetadata(iter *pebble.Iterator, fileMetadataKey []byte) (*rfpb.FileMetadata, error) {
+func lookupFileMetadata(ctx context.Context, iter *pebble.Iterator, fileMetadataKey []byte) (*rfpb.FileMetadata, error) {
 	fileMetadata := &rfpb.FileMetadata{}
 	if err := pebbleutil.LookupProto(iter, fileMetadataKey, fileMetadata); err != nil {
 		return nil, err
 	}
+
+	fileRecord := fileMetadata.GetFileRecord()
+	if fileRecord.GetCompressor() == repb.Compressor_IDENTITY &&
+		fileRecord.GetIsolation().GetCacheType() == resource.CacheType_CAS &&
+		fileMetadata.GetStoredSizeBytes() != fileRecord.GetDigest().GetSizeBytes() {
+		log.CtxInfof(ctx, "Pebble lookup metadata size mismatch: %v", fileMetadata)
+	}
+
 	return fileMetadata, nil
 }
 
@@ -836,16 +860,24 @@ func readFileMetadata(reader pebble.Reader, fileMetadataKey []byte) (*rfpb.FileM
 	if err := proto.Unmarshal(buf, fileMetadata); err != nil {
 		return nil, err
 	}
+
+	fileRecord := fileMetadata.GetFileRecord()
+	if fileRecord.GetCompressor() == repb.Compressor_IDENTITY &&
+		fileRecord.GetIsolation().GetCacheType() == resource.CacheType_CAS &&
+		fileMetadata.GetStoredSizeBytes() != fileRecord.GetDigest().GetSizeBytes() {
+		log.Infof("Pebble read metadata size mismatch: %v", fileMetadata)
+	}
+
 	return fileMetadata, nil
 }
 
-func (p *PebbleCache) handleMetadataMismatch(err error, fileMetadataKey []byte, fileMetadata *rfpb.FileMetadata) {
+func (p *PebbleCache) handleMetadataMismatch(ctx context.Context, err error, fileMetadataKey []byte, fileMetadata *rfpb.FileMetadata) {
 	if !status.IsNotFoundError(err) && !os.IsNotExist(err) {
 		return
 	}
 	if fileMetadata.GetStorageMetadata().GetFileMetadata() != nil {
 		log.Warningf("Metadata record %q was found but file (%+v) not found on disk: %s", fileMetadataKey, fileMetadata, err)
-		if err := p.deleteMetadataOnly(fileMetadataKey); err != nil {
+		if err := p.deleteMetadataOnly(ctx, fileMetadataKey); err != nil {
 			log.Warningf("Error deleting metadata: %s", err)
 		}
 	}
@@ -892,13 +924,9 @@ func (p *PebbleCache) Metadata(ctx context.Context, r *resource.ResourceName) (*
 	if err != nil {
 		return nil, err
 	}
-	md, err := lookupFileMetadata(iter, fileMetadataKey)
+	md, err := lookupFileMetadata(ctx, iter, fileMetadataKey)
 	if err != nil {
 		return nil, err
-	}
-
-	if md.GetStoredSizeBytes() != md.GetFileRecord().GetDigest().GetSizeBytes() {
-		log.CtxInfof(ctx, "Pebble metadata size mismatch: %v", md)
 	}
 
 	return &interfaces.CacheMetadata{
@@ -981,7 +1009,7 @@ func (p *PebbleCache) GetMulti(ctx context.Context, resources []*resource.Resour
 		blobDir := p.blobDir(!p.isolateByGroupIDs, partitionID)
 		rc, err := p.fileStorer.NewReader(ctx, blobDir, fileMetadata.GetStorageMetadata(), 0, 0)
 		if err != nil {
-			p.handleMetadataMismatch(err, fileMetadataKey, fileMetadata)
+			p.handleMetadataMismatch(ctx, err, fileMetadataKey, fileMetadata)
 			continue
 		}
 		sendAtimeUpdate(p.accesses, fileMetadataKey, fileMetadata, p.atimeUpdateThreshold, p.atimeBufferSize)
@@ -1059,7 +1087,7 @@ func sendAtimeUpdate(accesses chan<- *accessTimeUpdate, fileMetadataKey []byte, 
 	}
 }
 
-func (p *PebbleCache) deleteMetadataOnly(fileMetadataKey []byte) error {
+func (p *PebbleCache) deleteMetadataOnly(ctx context.Context, fileMetadataKey []byte) error {
 	db, err := p.leaser.DB()
 	if err != nil {
 		return err
@@ -1070,7 +1098,7 @@ func (p *PebbleCache) deleteMetadataOnly(fileMetadataKey []byte) error {
 	defer iter.Close()
 
 	// First, lookup the FileMetadata. If it's not found, we don't have the file.
-	fileMetadata, err := lookupFileMetadata(iter, fileMetadataKey)
+	fileMetadata, err := lookupFileMetadata(ctx, iter, fileMetadataKey)
 	if err != nil {
 		return err
 	}
@@ -1097,7 +1125,7 @@ func (p *PebbleCache) deleteRecord(ctx context.Context, fileRecord *rfpb.FileRec
 	if err != nil {
 		return err
 	}
-	fileMetadata, err := lookupFileMetadata(iter, fileMetadataKey)
+	fileMetadata, err := lookupFileMetadata(ctx, iter, fileMetadataKey)
 	if err != nil {
 		return err
 	}
@@ -1148,7 +1176,7 @@ func (p *PebbleCache) Reader(ctx context.Context, r *resource.ResourceName, offs
 	log.Debugf("Attempting pebble reader %s", string(fileMetadataKey))
 
 	// First, lookup the FileMetadata. If it's not found, we don't have the file.
-	fileMetadata, err := lookupFileMetadata(iter, fileMetadataKey)
+	fileMetadata, err := lookupFileMetadata(ctx, iter, fileMetadataKey)
 	if err != nil {
 		return nil, err
 	}
@@ -1159,7 +1187,7 @@ func (p *PebbleCache) Reader(ctx context.Context, r *resource.ResourceName, offs
 	if err == nil {
 		sendAtimeUpdate(p.accesses, fileMetadataKey, fileMetadata, p.atimeUpdateThreshold, p.atimeBufferSize)
 	} else if status.IsNotFoundError(err) || os.IsNotExist(err) {
-		p.handleMetadataMismatch(err, fileMetadataKey, fileMetadata)
+		p.handleMetadataMismatch(ctx, err, fileMetadataKey, fileMetadata)
 	}
 
 	if err != nil {
@@ -1321,12 +1349,21 @@ func (p *PebbleCache) Writer(ctx context.Context, r *resource.ResourceName) (int
 		if err != nil {
 			return err
 		}
+
+		fr := md.GetFileRecord()
+		if fr.GetCompressor() == repb.Compressor_IDENTITY &&
+			fr.GetIsolation().GetCacheType() == resource.CacheType_CAS &&
+			md.GetStoredSizeBytes() != fr.GetDigest().GetSizeBytes() {
+			log.Infof("Pebble write metadata size mismatch, writer: %v", md)
+		}
+
 		err = db.Set(fileMetadataKey, protoBytes, &pebble.WriteOptions{Sync: false})
 		if err == nil {
 			partitionID := fileRecord.GetIsolation().GetPartitionId()
 			p.sendSizeUpdate(partitionID, fileMetadataKey, bytesWritten)
 			metrics.DiskCacheAddedFileSizeBytes.Observe(float64(bytesWritten))
 		}
+
 		return err
 	}
 

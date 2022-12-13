@@ -59,6 +59,7 @@ import (
 
 var firecrackerMountWorkspaceFile = flag.Bool("executor.firecracker_mount_workspace_file", false, "Enables mounting workspace filesystem to improve performance of copying action outputs.")
 var firecrackerCgroupVersion = flag.String("executor.firecracker_cgroup_version", "1", "Specifies the cgroup version for firecracker to use.")
+var dieOnFirecrackerFailure = flag.Bool("executor.die_on_firecracker_failure", false, "Makes the host executor process die if any command orchestrating or running Firecracker fails. Useful for capturing failures preemptively. WARNING: using this option MAY leave the host machine in an unhealthy state on Firecracker failure; some post-hoc cleanup may be necessary.")
 
 const (
 	// How long to wait for the VMM to listen on the firecracker socket.
@@ -586,7 +587,7 @@ func (c *FirecrackerContainer) LoadSnapshot(ctx context.Context, workspaceDirOve
 
 	var netNS string
 	if c.constants.EnableNetworking {
-		netNS = "/var/run/netns/" + c.id
+		netNS = networking.NetNamespacePath(c.id)
 	}
 
 	var stdout io.Writer = c.vmLog
@@ -746,7 +747,11 @@ func (c *FirecrackerContainer) hotSwapWorkspace(ctx context.Context, execClient 
 }
 
 func nonCmdExit(err error) *interfaces.CommandResult {
-	log.Errorf("nonCmdExit returning error: %s", err)
+	if *dieOnFirecrackerFailure {
+		log.Fatalf("dying on firecracker error: %s", err)
+	} else {
+		log.Errorf("nonCmdExit returning error: %s", err)
+	}
 	return &interfaces.CommandResult{
 		Error:    err,
 		ExitCode: -2,
@@ -804,7 +809,7 @@ func (c *FirecrackerContainer) getConfig(ctx context.Context, containerFS, scrat
 
 	if c.constants.EnableNetworking {
 		bootArgs += " " + machineIPBootArgs
-		netNS = "/var/run/netns/" + c.id
+		netNS = networking.NetNamespacePath(c.id)
 	}
 
 	// End the kernel args, before passing some more args to init.
