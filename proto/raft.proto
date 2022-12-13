@@ -77,8 +77,15 @@ message FileMetadata {
 
 message PartitionMetadata {
   int64 size_bytes = 1;
+  // CAS count and AC count are not populated by Raft cache.
   int64 cas_count = 2;
   int64 ac_count = 3;
+  int64 total_count = 4;
+  string partition_id = 5;
+}
+
+message PartitionMetadatas {
+  repeated PartitionMetadata metadata = 1;
 }
 
 message FileDeleteRequest {
@@ -357,16 +364,6 @@ message StoreUsage {
   int64 raft_propose_qps = 5;
   int64 total_bytes_used = 6;
   int64 total_bytes_free = 7;
-}
-
-message NodeUsage {
-  NodeDescriptor node = 1;
-
-  int64 num_replicas = 2;
-  int64 disk_bytes_total = 3;
-  int64 disk_bytes_used = 4;
-
-  repeated ReplicaUsage replica_usage = 5;
 }
 
 message NodeDescriptor {

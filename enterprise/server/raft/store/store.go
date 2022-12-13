@@ -69,8 +69,9 @@ var (
 )
 
 type Store struct {
-	rootDir  string
-	grpcAddr string
+	rootDir    string
+	grpcAddr   string
+	partitions []disk.Partition
 
 	nodeHost      *dragonboat.NodeHost
 	gossipManager *gossip.GossipManager
@@ -98,10 +99,11 @@ type Store struct {
 	quitChan   chan struct{}
 }
 
-func New(rootDir string, nodeHost *dragonboat.NodeHost, gossipManager *gossip.GossipManager, sender *sender.Sender, registry registry.NodeRegistry, apiClient *client.APIClient) *Store {
+func New(rootDir string, nodeHost *dragonboat.NodeHost, gossipManager *gossip.GossipManager, sender *sender.Sender, registry registry.NodeRegistry, apiClient *client.APIClient, partitions []disk.Partition) *Store {
 	s := &Store{
 		rootDir:       rootDir,
 		nodeHost:      nodeHost,
+		partitions:    partitions,
 		gossipManager: gossipManager,
 		sender:        sender,
 		registry:      registry,
@@ -131,7 +133,7 @@ func New(rootDir string, nodeHost *dragonboat.NodeHost, gossipManager *gossip.Go
 	listener.DefaultListener().RegisterLeaderUpdatedCB(&s.leaderUpdatedCB)
 	statusz.AddSection("raft_store", "Store", s)
 
-	go s.broadcast()
+	go s.updateTags()
 
 	return s
 }
@@ -272,6 +274,8 @@ func (s *Store) Start(grpcAddress string) error {
 }
 
 func (s *Store) Stop(ctx context.Context) error {
+	s.dropLeadershipForShutdown()
+
 	close(s.quitChan)
 	if err := s.eg.Wait(); err != nil {
 		return err
@@ -295,6 +299,38 @@ func (s *Store) lookupRange(clusterID uint64) *rfpb.RangeDescriptor {
 		}
 	}
 	return nil
+}
+
+func (s *Store) dropLeadershipForShutdown() {
+	nodeHostInfo := s.nodeHost.GetNodeHostInfo(dragonboat.NodeHostInfoOption{
+		SkipLogInfo: true,
+	})
+	if nodeHostInfo == nil {
+		return
+	}
+	eg := errgroup.Group{}
+	for _, clusterInfo := range nodeHostInfo.ClusterInfoList {
+		if !clusterInfo.IsLeader {
+			continue
+		}
+
+		// Pick the first node in the map that isn't us. Map ordering is
+		// random; which is a good thing, it means we're randomly picking
+		// another node in the cluster and requesting they take the lead.
+		for nodeID := range clusterInfo.Nodes {
+			if nodeID == clusterInfo.NodeID {
+				continue
+			}
+			eg.Go(func() error {
+				if err := s.nodeHost.RequestLeaderTransfer(clusterInfo.ClusterID, nodeID); err != nil {
+					log.Warningf("Error transferring leadership: %s", err)
+				}
+				return nil
+			})
+			break
+		}
+	}
+	eg.Wait()
 }
 
 func (s *Store) maybeAcquireRangeLease(rd *rfpb.RangeDescriptor) {
@@ -394,7 +430,7 @@ func (s *Store) AddRange(rd *rfpb.RangeDescriptor, r *replica.Replica) {
 
 	// Start goroutines for these so that Adding ranges is quick.
 	go s.maybeAcquireRangeLease(rd)
-	go s.broadcast()
+	go s.updateTags()
 }
 
 func (s *Store) RemoveRange(rd *rfpb.RangeDescriptor, r *replica.Replica) {
@@ -417,7 +453,7 @@ func (s *Store) RemoveRange(rd *rfpb.RangeDescriptor, r *replica.Replica) {
 
 	// Start goroutines for these so that Removing ranges is quick.
 	go s.releaseRangeLease(rd.GetRangeId())
-	go s.broadcast()
+	go s.updateTags()
 }
 
 // validatedRange verifies that the header is valid and the client is using
@@ -482,7 +518,7 @@ func (s *Store) LeasedRange(header *rfpb.Header) (*replica.Replica, error) {
 }
 
 func (s *Store) ReplicaFactoryFn(clusterID, nodeID uint64) dbsm.IOnDiskStateMachine {
-	return replica.New(s.rootDir, clusterID, nodeID, s)
+	return replica.New(s.rootDir, clusterID, nodeID, s, s.partitions)
 }
 
 func (s *Store) Sender() *sender.Sender {
@@ -842,61 +878,6 @@ func (s *Store) updateTags() error {
 	storeTags[constants.StoreUsageTag] = base64.StdEncoding.EncodeToString(buf)
 	err = s.gossipManager.SetTags(storeTags)
 	return err
-}
-
-func (s *Store) broadcast() error {
-	go s.updateTags()
-
-	ctx := context.Background()
-	rsp, err := s.ListCluster(ctx, &rfpb.ListClusterRequest{})
-	if err != nil {
-		return err
-	}
-
-	// Need to be very careful about what is broadcast here because the max
-	// allowed UserEvent size is 9K, and broadcasting too much could cause
-	// slow rebalancing etc.
-
-	// A max ReplicaUsage should be around 8 bytes * 3 = 24 bytes. So 375
-	// replica usages should fit in a single gossip message. Use 350 as the
-	// target size so there is room for the NHID and a small margin of
-	// safety.
-	batchSize := 350
-	numReplicas := len(rsp.GetRangeReplicas())
-	gossiped := false
-	for start := 0; start < numReplicas; start += batchSize {
-		nu := &rfpb.NodeUsage{Node: rsp.GetNode()}
-		end := start + batchSize
-		if end > numReplicas {
-			end = numReplicas
-		}
-		for _, rr := range rsp.GetRangeReplicas()[start:end] {
-			nu.ReplicaUsage = append(nu.ReplicaUsage, rr.GetReplicaUsage())
-		}
-		buf, err := proto.Marshal(nu)
-		if err != nil {
-			return err
-		}
-		if err := s.gossipManager.SendUserEvent(constants.NodeUsageEvent, buf, false /*=coalesce*/); err != nil {
-			return err
-		}
-		gossiped = true
-	}
-
-	// If a node does not yet have any replicas, the loop above will not
-	// have gossiped anything. In that case, gossip an "empty" usage event
-	// now.
-	if !gossiped {
-		nu := &rfpb.NodeUsage{Node: rsp.GetNode()}
-		buf, err := proto.Marshal(nu)
-		if err != nil {
-			return err
-		}
-		if err := s.gossipManager.SendUserEvent(constants.NodeUsageEvent, buf, false /*=coalesce*/); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 func (s *Store) NodeDescriptor() *rfpb.NodeDescriptor {
