@@ -1,8 +1,6 @@
 package constants
 
 import (
-	"math"
-
 	"github.com/buildbuddy-io/buildbuddy/enterprise/server/raft/keys"
 )
 
@@ -18,6 +16,7 @@ const (
 	RegistryUpdateEvent       = "registry_update_event"
 	RegistryQueryEvent        = "registry_query_event"
 	AutoBringupEvent          = "auto_bringup_event"
+	NodePartitionUsageEvent   = "node_partition_usage_event"
 	PlacementDriverQueryEvent = "placement_driver_query_event"
 )
 
@@ -45,9 +44,6 @@ const (
 	InitialClusterID = 1
 	InitialNodeID    = 1
 	InitialRangeID   = 1
-
-	MinByte = 0
-	MaxByte = math.MaxUint8
 
 	UnsplittableMaxByte = systemMaxByte
 )

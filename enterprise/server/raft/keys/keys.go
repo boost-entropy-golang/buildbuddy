@@ -2,9 +2,15 @@ package keys
 
 import (
 	"bytes"
+	"math"
 )
 
 type Key []byte
+
+var (
+	MinByte Key = []byte{0}
+	MaxByte Key = []byte{math.MaxUint8}
+)
 
 func MakeKey(keys ...[]byte) []byte {
 	return bytes.Join(keys, nil)
@@ -30,4 +36,10 @@ func IsLocalKey(key Key) bool {
 		return false
 	}
 	return key[0] == '\x01'
+}
+
+// Range returns a pair of keys that represent the upper and lower bounds of a
+// range identified by the given key prefix.
+func Range(key []byte) ([]byte, []byte) {
+	return MakeKey(key, MinByte), MakeKey(key, MaxByte)
 }
