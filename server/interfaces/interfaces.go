@@ -29,6 +29,7 @@ import (
 	rnpb "github.com/buildbuddy-io/buildbuddy/proto/runner"
 	scpb "github.com/buildbuddy-io/buildbuddy/proto/scheduler"
 	skpb "github.com/buildbuddy-io/buildbuddy/proto/secrets"
+	sipb "github.com/buildbuddy-io/buildbuddy/proto/stored_invocation"
 	telpb "github.com/buildbuddy-io/buildbuddy/proto/telemetry"
 	usagepb "github.com/buildbuddy-io/buildbuddy/proto/usage"
 	wfpb "github.com/buildbuddy-io/buildbuddy/proto/workflow"
@@ -267,7 +268,7 @@ type OLAPDBHandle interface {
 	DB(ctx context.Context) *gorm.DB
 	DateFromUsecTimestamp(fieldName string, timezoneOffsetMinutes int32) string
 	FlushInvocationStats(ctx context.Context, ti *tables.Invocation) error
-	FlushExecutionStats(ctx context.Context, ti *tables.Invocation, executions []*repb.StoredExecution) error
+	FlushExecutionStats(ctx context.Context, inv *sipb.StoredInvocation, executions []*repb.StoredExecution) error
 }
 
 type InvocationDB interface {
@@ -509,7 +510,7 @@ type SchedulerService interface {
 	EnqueueTaskReservation(ctx context.Context, req *scpb.EnqueueTaskReservationRequest) (*scpb.EnqueueTaskReservationResponse, error)
 	ReEnqueueTask(ctx context.Context, req *scpb.ReEnqueueTaskRequest) (*scpb.ReEnqueueTaskResponse, error)
 	GetExecutionNodes(ctx context.Context, req *scpb.GetExecutionNodesRequest) (*scpb.GetExecutionNodesResponse, error)
-	GetPoolInfo(ctx context.Context, os, requestedPool string, useSelfHosted bool) (*PoolInfo, error)
+	GetPoolInfo(ctx context.Context, os, requestedPool, workflowID string, useSelfHosted bool) (*PoolInfo, error)
 }
 
 // PoolInfo holds high level metadata for an executor pool.
@@ -946,4 +947,6 @@ type ExecutionCollector interface {
 	// available starting from the start index.
 	ListRange(ctx context.Context, iid string, start, stop int64) ([]*repb.StoredExecution, error)
 	Delete(ctx context.Context, iid string) error
+	AddInvocation(ctx context.Context, inv *sipb.StoredInvocation) error
+	GetInvocation(ctx context.Context, iid string) (*sipb.StoredInvocation, error)
 }

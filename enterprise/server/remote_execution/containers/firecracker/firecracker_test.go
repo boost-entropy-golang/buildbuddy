@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"syscall"
 	"testing"
 	"time"
@@ -339,6 +340,12 @@ func TestFirecrackerFileMapping(t *testing.T) {
 	if res.Error != nil {
 		t.Fatalf("error: %s", res.Error)
 	}
+
+	// Check that the result has usage stats, but don't perform equality checks
+	// on them.
+	assert.True(res.UsageStats != nil)
+	res.UsageStats = nil
+
 	assert.Equal(t, expectedResult, res)
 
 	for _, fullPath := range files {
@@ -529,7 +536,7 @@ func TestFirecrackerNonRoot(t *testing.T) {
 	require.NoError(t, res.Error)
 	require.Empty(t, string(res.Stderr))
 	require.Equal(t, 0, res.ExitCode)
-	require.Equal(t, "uid=65534(nobody) gid=65534(nobody)\n", string(res.Stdout))
+	require.Regexp(t, regexp.MustCompile("uid=[0-9]+\\(nobody\\) gid=[0-9]+\\(nobody\\)"), string(res.Stdout))
 }
 
 func TestFirecrackerRunNOPWithZeroDisk(t *testing.T) {
