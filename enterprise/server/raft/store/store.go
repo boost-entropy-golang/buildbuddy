@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math"
 	"math/rand"
 	"net"
 	"os"
@@ -69,16 +70,23 @@ const (
 	// considered to be full and eviction will kick in.
 	evictionCutoffThreshold = .90
 
-	// How often nodes wil gossip about their partition usage.
-	nodePartitionUsageGossipInterval = 15 * time.Second
+	// How often stores wil check whether to gossip usage data if it is
+	// sufficiently different from the last broadcast.
+	storePartitionUsageCheckInterval = 15 * time.Second
 
-	// How old node partition usage data can be before we consider it invalid.
-	nodePartitionStalenessLimit = 30 * time.Second
+	// How often stores can go without broadcasting usage information.
+	// Usage data will be gossiped after this time if no updated were triggered
+	// based on data changes.
+	storePartitionUsageMaxAge = 15 * time.Minute
+
+	// How old store partition usage data can be before we consider it invalid.
+	storePartitionStalenessLimit = storePartitionUsageMaxAge * 2
 )
 
 var (
-	enableSplittingReplicas = flag.Bool("cache.raft.enable_splitting_replicas", true, "If set, allow splitting oversize replicas")
-	replicaSplitSizeBytes   = flag.Int64("cache.raft.replica_split_size_bytes", 2e7, "Split replicas after they reach this size")
+	enableSplittingReplicas            = flag.Bool("cache.raft.enable_splitting_replicas", true, "If set, allow splitting oversize replicas")
+	replicaSplitSizeBytes              = flag.Int64("cache.raft.replica_split_size_bytes", 2e7, "Split replicas after they reach this size")
+	partitionUsageDeltaGossipThreshold = flag.Int("cache.raft.partition_usage_delta_bytes_threshold", 100e6, "Gossip partition usage information if it has changed by more than this amount since the last gossip.")
 )
 
 type nodePartitionUsage struct {
@@ -120,6 +128,7 @@ func (pu *partitionUsage) GlobalSizeBytes() int64 {
 
 func (pu *partitionUsage) RemoteUpdate(nhid string, update *rfpb.PartitionMetadata) {
 	pu.mu.Lock()
+	defer pu.mu.Unlock()
 	n, ok := pu.nodes[nhid]
 	if !ok {
 		n = &nodePartitionUsage{}
@@ -130,38 +139,56 @@ func (pu *partitionUsage) RemoteUpdate(nhid string, update *rfpb.PartitionMetada
 
 	// Prune stale data.
 	for id, n := range pu.nodes {
-		if time.Since(n.lastUpdate) > nodePartitionStalenessLimit {
+		if time.Since(n.lastUpdate) > storePartitionStalenessLimit {
 			delete(pu.nodes, id)
 		}
 	}
-	pu.mu.Unlock()
 }
 
-func (pu *partitionUsage) evict(ctx context.Context, key *ReplicaSample) (skip bool, err error) {
+func (pu *partitionUsage) evict(ctx context.Context, sample *approxlru.Sample[*ReplicaSample]) (skip bool, err error) {
 	deleteReq := rbuilder.NewBatchBuilder().Add(&rfpb.FileDeleteRequest{
-		FileRecord: key.metadata.GetFileRecord(),
+		FileRecord: sample.Key.fileRecord,
 	})
-	rsp, err := client.SyncProposeLocalBatch(ctx, pu.store.nodeHost, key.header.GetReplica().GetClusterId(), deleteReq)
+	rsp, err := client.SyncProposeLocalBatch(ctx, pu.store.nodeHost, sample.Key.header.GetReplica().GetClusterId(), deleteReq)
 	if err != nil {
 		return false, status.InternalErrorf("could not propose eviction: %s", err)
 	}
 	if err := rsp.AnyError(); err != nil {
 		if status.IsNotFoundError(err) || status.IsOutOfRangeError(err) {
-			log.Infof("Skipping eviction for %q: %s", key, err)
+			log.Infof("Skipping eviction for %q: %s", sample.Key, err)
 			return true, nil
 		}
 		return false, status.InternalErrorf("eviction request failed: %s", rsp.AnyError())
 	}
 
+	ageUsec := float64(time.Since(sample.Timestamp).Microseconds())
+	metrics.RaftEvictionAgeUsec.With(prometheus.Labels{metrics.PartitionID: pu.id}).Observe(ageUsec)
+
+	globalSizeBytes := pu.GlobalSizeBytes()
+
 	pu.mu.Lock()
-	u, ok := pu.replicas[key.header.GetRangeId()]
+	defer pu.mu.Unlock()
+	// Update local replica information to reflect the eviction. Don't need
+	// to wait for a proactive update from the replica.
+	u, ok := pu.replicas[sample.Key.header.GetRangeId()]
 	if ok {
-		u.SizeBytes -= key.metadata.GetStoredSizeBytes()
+		u.SizeBytes -= sample.SizeBytes
 		u.TotalCount--
 	} else {
-		log.Warningf("eviction succeeded but range %d wasn't found", key.header.GetRangeId())
+		log.Warningf("eviction succeeded but range %d wasn't found", sample.Key.header.GetRangeId())
 	}
-	pu.mu.Unlock()
+
+	// Assume eviction on all stores is happening at a similar rate as on the
+	// current store and update the usage information speculatively since we
+	// don't know when we'll receive the next usage update from remote stores.
+	// When we do receive updates from other stores they will overwrite our
+	// speculative numbers.
+	for _, npu := range pu.nodes {
+		npu.sizeBytes -= int64(float64(sample.SizeBytes) * float64(globalSizeBytes) / float64(npu.sizeBytes))
+		if npu.sizeBytes < 0 {
+			npu.sizeBytes = 0
+		}
+	}
 
 	return false, nil
 }
@@ -191,13 +218,7 @@ func (pu *partitionUsage) sample(ctx context.Context, n int) ([]*approxlru.Sampl
 				if err != nil {
 					return nil, status.InternalErrorf("could not sample partition %q: %s", pu.id, err)
 				}
-				for _, s := range ps {
-					samples = append(samples, &approxlru.Sample[*ReplicaSample]{
-						Key:       s,
-						SizeBytes: s.metadata.GetStoredSizeBytes(),
-						Timestamp: time.UnixMicro(s.metadata.GetLastAccessUsec()),
-					})
-				}
+				samples = append(samples, ps...)
 				break
 			}
 		}
@@ -206,7 +227,7 @@ func (pu *partitionUsage) sample(ctx context.Context, n int) ([]*approxlru.Sampl
 }
 
 func (pu *partitionUsage) refresh(ctx context.Context, key *ReplicaSample) (skip bool, timestamp time.Time, err error) {
-	rsp, err := pu.store.Metadata(ctx, &rfpb.MetadataRequest{Header: key.header, FileRecord: key.metadata.GetFileRecord()})
+	rsp, err := pu.store.Metadata(ctx, &rfpb.MetadataRequest{Header: key.header, FileRecord: key.fileRecord})
 	if err != nil {
 		if status.IsNotFoundError(err) || status.IsOutOfRangeError(err) {
 			log.Infof("Skipping refresh for %q: %s", key, err)
@@ -223,10 +244,11 @@ type usageTracker struct {
 	gossipManager *gossip.GossipManager
 	partitions    []disk.Partition
 
-	quitChan    chan struct{}
-	mu          sync.Mutex
-	byRange     map[uint64]*rfpb.ReplicaUsage
-	byPartition map[string]*partitionUsage
+	quitChan      chan struct{}
+	mu            sync.Mutex
+	byRange       map[uint64]*rfpb.ReplicaUsage
+	byPartition   map[string]*partitionUsage
+	lastBroadcast map[string]*rfpb.PartitionMetadata
 }
 
 func newUsageTracker(store *Store, gossipManager *gossip.GossipManager, partitions []disk.Partition) (*usageTracker, error) {
@@ -237,6 +259,7 @@ func newUsageTracker(store *Store, gossipManager *gossip.GossipManager, partitio
 		quitChan:      make(chan struct{}),
 		byRange:       make(map[uint64]*rfpb.ReplicaUsage),
 		byPartition:   make(map[string]*partitionUsage),
+		lastBroadcast: make(map[string]*rfpb.PartitionMetadata),
 	}
 
 	for _, p := range partitions {
@@ -250,8 +273,8 @@ func newUsageTracker(store *Store, gossipManager *gossip.GossipManager, partitio
 		maxSizeBytes := int64(evictionCutoffThreshold * float64(p.MaxSizeBytes))
 		l, err := approxlru.New(&approxlru.Opts[*ReplicaSample]{
 			MaxSizeBytes: maxSizeBytes,
-			OnEvict: func(ctx context.Context, key *ReplicaSample) (skip bool, err error) {
-				return u.evict(ctx, key)
+			OnEvict: func(ctx context.Context, sample *approxlru.Sample[*ReplicaSample]) (skip bool, err error) {
+				return u.evict(ctx, sample)
 			},
 			OnSample: func(ctx context.Context, n int) ([]*approxlru.Sample[*ReplicaSample], error) {
 				return u.sample(ctx, n)
@@ -291,19 +314,41 @@ func (ut *usageTracker) Statusz(ctx context.Context) string {
 		}
 
 		globalSizeBytes := u.GlobalSizeBytes()
-		for _, nu := range u.nodes {
-			globalSizeBytes += nu.sizeBytes
-		}
-		percentFull := float64(globalSizeBytes) / float64(p.MaxSizeBytes)
+		percentFull := (float64(globalSizeBytes) / float64(p.MaxSizeBytes)) * 100
 
 		buf += fmt.Sprintf("\t\tCapacity: %s / %s (%2.2f%% full)\n", units.BytesSize(float64(globalSizeBytes)), units.BytesSize(float64(p.MaxSizeBytes)), percentFull)
 		buf += "\t\tLocal Ranges:\n"
+
 		u.mu.Lock()
-		for rid, pu := range u.replicas {
+		// Show ranges in a consistent order so that they don't jump around when
+		// refreshing the statusz page.
+		var rids []uint64
+		for rid := range u.replicas {
+			rids = append(rids, rid)
+		}
+		sort.Slice(rids, func(i, j int) bool { return rids[i] < rids[j] })
+
+		for _, rid := range rids {
+			pu, ok := u.replicas[rid]
+			if !ok {
+				continue
+			}
 			buf += fmt.Sprintf("\t\t\t%d: %s, %d records\n", rid, units.BytesSize(float64(pu.GetSizeBytes())), pu.GetTotalCount())
 		}
+
+		// Show nodes in a consistent order so that they don't jump around when
+		// refreshing the statusz page.
+		var nhids []string
+		for nhid := range u.nodes {
+			nhids = append(nhids, nhid)
+		}
+		sort.Strings(nhids)
 		buf += "\t\tGlobal Usage:\n"
-		for nhid, nu := range u.nodes {
+		for _, nhid := range nhids {
+			nu, ok := u.nodes[nhid]
+			if !ok {
+				continue
+			}
 			buf += fmt.Sprintf("\t\t\t%s: %s\n", nhid, units.BytesSize(float64(nu.sizeBytes)))
 		}
 		u.mu.Unlock()
@@ -331,8 +376,8 @@ func (ut *usageTracker) OnEvent(updateType serf.EventType, event serf.Event) {
 	ut.RemoteUpdate(nu)
 }
 
-// RemoteUpdate processes a usage update broadcast by Raft nodes.
-// Note that this also includes data broadcast by the local node.
+// RemoteUpdate processes a usage update broadcast by Raft stores.
+// Note that this also includes data broadcast by the local store.
 func (ut *usageTracker) RemoteUpdate(usage *rfpb.NodePartitionUsage) {
 	ut.mu.Lock()
 	defer ut.mu.Unlock()
@@ -408,6 +453,11 @@ func (ut *usageTracker) RangeUsages() []*rfpb.ReplicaUsage {
 }
 
 func (ut *usageTracker) computeUsage() *rfpb.NodePartitionUsage {
+	usages := ut.store.RefreshReplicaUsages()
+	for _, u := range usages {
+		ut.LocalUpdate(u.GetRangeId(), u)
+	}
+
 	ut.mu.Lock()
 	defer ut.mu.Unlock()
 	nu := &rfpb.NodePartitionUsage{
@@ -432,21 +482,47 @@ func (ut *usageTracker) computeUsage() *rfpb.NodePartitionUsage {
 }
 
 func (ut *usageTracker) broadcastLoop() {
+	idleTimer := time.NewTimer(storePartitionUsageMaxAge)
+
 	for {
-		if err := ut.broadcast(); err != nil {
-			log.Warningf("could not gossip node partition usage info: %s", err)
-		}
 		select {
 		case <-ut.quitChan:
 			return
-		case <-time.After(nodePartitionUsageGossipInterval):
-			break
+		case <-time.After(storePartitionUsageCheckInterval):
+			if !idleTimer.Stop() {
+				<-idleTimer.C
+			}
+			idleTimer.Reset(storePartitionUsageMaxAge)
+			if err := ut.broadcast(false /*=force*/); err != nil {
+				log.Warningf("could not gossip node partition usage info: %s", err)
+			}
+		case <-idleTimer.C:
+			if err := ut.broadcast(true /*=force*/); err != nil {
+				log.Warningf("could not gossip node partition usage info: %s", err)
+			}
 		}
 	}
 }
 
-func (ut *usageTracker) broadcast() error {
+func (ut *usageTracker) broadcast(force bool) error {
 	usage := ut.computeUsage()
+
+	// If not forced, check whether there's enough changes to force a broadcast.
+	if !force {
+		significantChange := false
+		ut.mu.Lock()
+		for _, u := range usage.GetPartitionUsage() {
+			lb, ok := ut.lastBroadcast[u.GetPartitionId()]
+			if !ok || math.Abs(float64(u.GetSizeBytes()-lb.GetSizeBytes())) > float64(*partitionUsageDeltaGossipThreshold) {
+				significantChange = true
+				break
+			}
+		}
+		ut.mu.Unlock()
+		if !significantChange {
+			return nil
+		}
+	}
 
 	buf, err := proto.Marshal(usage)
 	if err != nil {
@@ -455,6 +531,12 @@ func (ut *usageTracker) broadcast() error {
 
 	if err := ut.gossipManager.SendUserEvent(constants.NodePartitionUsageEvent, buf, false /*coalesce*/); err != nil {
 		return err
+	}
+
+	ut.mu.Lock()
+	defer ut.mu.Unlock()
+	for _, u := range usage.GetPartitionUsage() {
+		ut.lastBroadcast[u.GetPartitionId()] = u
 	}
 
 	return nil
@@ -592,12 +674,6 @@ func (s *Store) NotifyUsage(usage *rfpb.ReplicaUsage) {
 	if usage.GetEstimatedDiskBytesUsed() > *replicaSplitSizeBytes {
 		s.RequestSplit(clusterID)
 	}
-
-	rd := s.lookupRange(clusterID)
-	if rd == nil {
-		return
-	}
-	s.usages.LocalUpdate(rd.GetRangeId(), usage)
 }
 
 func (s *Store) RequestSplit(clusterID uint64) {
@@ -864,9 +940,9 @@ func (s *Store) RemoveRange(rd *rfpb.RangeDescriptor, r *replica.Replica) {
 }
 
 type ReplicaSample struct {
-	header   *rfpb.Header
-	key      string
-	metadata *rfpb.FileMetadata
+	header     *rfpb.Header
+	key        string
+	fileRecord *rfpb.FileRecord
 }
 
 func (rs *ReplicaSample) ID() string {
@@ -874,10 +950,10 @@ func (rs *ReplicaSample) ID() string {
 }
 
 func (rs *ReplicaSample) String() string {
-	return fmt.Sprintf("sample {hdr %+v, key %s, size %d, last access %s}", rs.header, rs.key, rs.metadata.GetStoredSizeBytes(), time.UnixMicro(rs.metadata.GetLastAccessUsec()))
+	return fmt.Sprintf("hdr: %+v, key: %s", rs.header, rs.key)
 }
 
-func (s *Store) Sample(ctx context.Context, rangeID uint64, partition string, n int) ([]*ReplicaSample, error) {
+func (s *Store) Sample(ctx context.Context, rangeID uint64, partition string, n int) ([]*approxlru.Sample[*ReplicaSample], error) {
 	r, rd, err := s.replicaForRange(rangeID)
 	if err != nil {
 		return nil, err
@@ -887,20 +963,25 @@ func (s *Store) Sample(ctx context.Context, rangeID uint64, partition string, n 
 		return nil, err
 	}
 
-	var rs []*ReplicaSample
+	var rs []*approxlru.Sample[*ReplicaSample]
 	for _, samp := range samples {
 		key, err := s.fileStorer.FileMetadataKey(samp.GetFileRecord())
 		if err != nil {
 			return nil, err
 		}
-		rs = append(rs, &ReplicaSample{
+		sampleKey := &ReplicaSample{
 			header: &rfpb.Header{
 				Replica:    rd.GetReplicas()[0],
 				RangeId:    rd.GetRangeId(),
 				Generation: rd.GetGeneration(),
 			},
-			key:      string(key),
-			metadata: samp,
+			key:        string(key),
+			fileRecord: samp.GetFileRecord(),
+		}
+		rs = append(rs, &approxlru.Sample[*ReplicaSample]{
+			Key:       sampleKey,
+			SizeBytes: samp.GetStoredSizeBytes(),
+			Timestamp: time.UnixMicro(samp.GetLastAccessUsec()),
 		})
 	}
 	return rs, nil
@@ -1333,6 +1414,31 @@ func (s *Store) Usage() *rfpb.StoreUsage {
 		su.TotalBytesUsed += ru.GetEstimatedDiskBytesUsed()
 	}
 	return su
+}
+
+func (s *Store) RefreshReplicaUsages() []*rfpb.ReplicaUsage {
+	s.rangeMu.RLock()
+	openRanges := make([]*rfpb.RangeDescriptor, 0, len(s.openRanges))
+	for _, rd := range s.openRanges {
+		openRanges = append(openRanges, rd)
+	}
+	s.rangeMu.RUnlock()
+
+	var usages []*rfpb.ReplicaUsage
+	for _, rd := range openRanges {
+		r, err := s.GetReplica(rd.GetRangeId())
+		if err != nil {
+			log.Warningf("could not get replica %d to refresh usage: %s", rd.GetRangeId(), err)
+			continue
+		}
+		u, err := r.Usage()
+		if err != nil {
+			log.Warningf("could not refresh usage for replica %d: %s", rd.GetRangeId(), err)
+			continue
+		}
+		usages = append(usages, u)
+	}
+	return usages
 }
 
 func (s *Store) updateTags() error {

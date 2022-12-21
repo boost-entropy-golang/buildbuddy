@@ -398,6 +398,10 @@ func (mc *MigrationCache) Delete(ctx context.Context, r *resource.ResourceName) 
 type doubleReader struct {
 	src  io.ReadCloser
 	dest io.ReadCloser
+
+	r             *resource.ResourceName
+	bytesReadSrc  int
+	bytesReadDest int
 }
 
 func (d *doubleReader) Read(p []byte) (n int, err error) {
@@ -407,16 +411,21 @@ func (d *doubleReader) Read(p []byte) (n int, err error) {
 	if d.dest != nil {
 		eg.Go(func() error {
 			pCopy := make([]byte, len(p))
-			_, dstErr = d.dest.Read(pCopy)
+			var dstN int
+			dstN, dstErr = d.dest.Read(pCopy)
+			d.bytesReadDest += dstN
 			return nil
 		})
 	}
 
 	srcN, srcErr := d.src.Read(p)
+	d.bytesReadSrc += srcN
 
 	eg.Wait()
-	if dstErr != nil && dstErr != srcErr {
-		log.Warningf("Migration read err, src err: %s, dest err: %s", srcErr, dstErr)
+	// Don't log on EOF errors when reading chunks, because the readers from different caches
+	// could be reading at different rates. Only log on Close() if the total number of bytes read differs
+	if dstErr != nil && dstErr != srcErr && dstErr != io.EOF {
+		log.Warningf("Migration %v read err, src err: %v, dest err: %s", d.r, srcErr, dstErr)
 	}
 
 	return srcN, srcErr
@@ -425,6 +434,10 @@ func (d *doubleReader) Read(p []byte) (n int, err error) {
 func (d *doubleReader) Close() error {
 	eg := &errgroup.Group{}
 	if d.dest != nil {
+		if d.bytesReadDest != d.bytesReadSrc {
+			log.Warningf("Migration %v read err, src read %d bytes, dest read %d bytes", d.r, d.bytesReadSrc, d.bytesReadDest)
+		}
+
 		eg.Go(func() error {
 			dstErr := d.dest.Close()
 			if dstErr != nil {
@@ -486,6 +499,7 @@ func (mc *MigrationCache) Reader(ctx context.Context, r *resource.ResourceName, 
 	return &doubleReader{
 		src:  srcReader,
 		dest: destReader,
+		r:    r,
 	}, nil
 }
 

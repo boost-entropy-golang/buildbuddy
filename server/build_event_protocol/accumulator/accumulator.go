@@ -1,15 +1,19 @@
 package accumulator
 
 import (
+	"context"
 	"strings"
 	"time"
 
 	"github.com/buildbuddy-io/buildbuddy/proto/build_event_stream"
 	"github.com/buildbuddy-io/buildbuddy/proto/command_line"
+	"github.com/buildbuddy-io/buildbuddy/server/build_event_protocol/event_parser"
 	"github.com/buildbuddy-io/buildbuddy/server/build_event_protocol/invocation_format"
-
-	gitutil "github.com/buildbuddy-io/buildbuddy/server/util/git"
+	"github.com/buildbuddy-io/buildbuddy/server/util/log"
 	"github.com/buildbuddy-io/buildbuddy/server/util/timeutil"
+
+	inpb "github.com/buildbuddy-io/buildbuddy/proto/invocation"
+	gitutil "github.com/buildbuddy-io/buildbuddy/server/util/git"
 )
 
 const (
@@ -35,6 +39,15 @@ var (
 )
 
 type Accumulator interface {
+	// Invocation returns the accumulated invocation proto. Not all fields may
+	// be populated yet if the build is in progress. Only the "summary" fields
+	// such as command, pattern, etc. will be set. Fields that scale with the
+	// number of events received (such as the Events list or console buffer) are
+	// not present.
+	Invocation() *inpb.Invocation
+
+	// TODO(bduffany): Remove these methods in favor of reading them directly
+	// from the Invocation() proto fields.
 	InvocationID() string
 	StartTime() time.Time
 	RepoURL() string
@@ -62,22 +75,30 @@ type Accumulator interface {
 // in full (that data lives in blobstore).
 type BEValues struct {
 	valuesMap               map[string]string
-	invocationID            string
 	sawWorkspaceStatusEvent bool
 	sawBuildMetadataEvent   bool
 	buildStartTime          time.Time
 	exitCode                *string
+
+	// TODO(bduffany): Migrate all parser functionality directly into the
+	// accumulator. The parser is a separate entity only for historical reasons.
+	parser *event_parser.StreamingEventParser
 }
 
-func NewBEValues(invocationID string) *BEValues {
+func NewBEValues(invocation *inpb.Invocation) *BEValues {
 	return &BEValues{
-		invocationID:            invocationID,
-		valuesMap:               make(map[string]string, 0),
-		sawWorkspaceStatusEvent: false,
+		valuesMap: make(map[string]string, 0),
+		parser:    event_parser.NewStreamingEventParser(invocation),
 	}
 }
 
+func (v *BEValues) Invocation() *inpb.Invocation {
+	return v.parser.GetInvocation()
+}
+
 func (v *BEValues) AddEvent(event *build_event_stream.BuildEvent) {
+	v.parser.ParseEvent(event)
+
 	switch p := event.Payload.(type) {
 	case *build_event_stream.BuildEvent_Started:
 		v.handleStartedEvent(event)
@@ -95,8 +116,31 @@ func (v *BEValues) AddEvent(event *build_event_stream.BuildEvent) {
 		v.handleFinishedEvent(p.Finished)
 	}
 }
+func (v *BEValues) Finalize(ctx context.Context) {
+	invocation := v.Invocation()
+	invocation.InvocationStatus = inpb.Invocation_DISCONNECTED_INVOCATION_STATUS
+	if v.BuildFinished() {
+		invocation.InvocationStatus = inpb.Invocation_COMPLETE_INVOCATION_STATUS
+	}
+
+	// Do some logging so that we can understand whether the invocation fields
+	// observed by BuildStatusReporter / TargetTracker differ from the fields
+	// that we store in the DB. (This code is part of a refactor that aims
+	// to consolidate EventParser and Accumulator).
+	// TODO(bduffany): Decide how to reconcile any differences logged here, and
+	// remove this logging.
+	if v.RepoURL() != invocation.GetRepoUrl() {
+		log.CtxInfof(ctx, "Accumulator: repo_url mismatch: %q != %q", v.RepoURL(), invocation.GetRepoUrl())
+	}
+	if v.CommitSHA() != invocation.GetCommitSha() {
+		log.CtxInfof(ctx, "Accumulator: commit_sha mismatch: %q != %q", v.CommitSHA(), invocation.GetCommitSha())
+	}
+	if v.Role() != invocation.GetRole() {
+		log.CtxInfof(ctx, "Accumulator: role mismatch: %q != %q", v.Role(), invocation.GetRole())
+	}
+}
 func (v *BEValues) InvocationID() string {
-	return v.invocationID
+	return v.Invocation().GetInvocationId()
 }
 func (v *BEValues) StartTime() time.Time {
 	return v.buildStartTime
