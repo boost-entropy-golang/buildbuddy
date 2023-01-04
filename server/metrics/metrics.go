@@ -387,6 +387,17 @@ var (
 		CacheNameLabel,
 	})
 
+	DiskCacheEvictionAgeUsec = promauto.NewHistogramVec(prometheus.HistogramOpts{
+		Namespace: bbNamespace,
+		Subsystem: "remote_cache",
+		Name:      "disk_cache_eviction_age_usec",
+		Buckets:   durationUsecBuckets(1*time.Hour, 30*24*time.Hour, 2),
+		Help:      "Age of items evicted from the cache, in **microseconds**.",
+	}, []string{
+		PartitionID,
+		CacheNameLabel,
+	})
+
 	DiskCacheNumEvictions = promauto.NewCounterVec(prometheus.CounterOpts{
 		Namespace: bbNamespace,
 		Subsystem: "remote_cache",
@@ -435,14 +446,6 @@ var (
 		Help:      "Number of writes for digests that already exist.",
 	}, []string{
 		CacheNameLabel,
-	})
-
-	DiskCacheUsecSinceLastAccess = promauto.NewHistogram(prometheus.HistogramOpts{
-		Namespace: bbNamespace,
-		Subsystem: "remote_cache",
-		Name:      "disk_cache_usec_since_last_access",
-		Help:      "Time since last digest access, in **microseconds**.",
-		Buckets:   durationUsecBuckets(1*time.Microsecond, 30*day, 10),
 	})
 
 	DiskCacheAddedFileSizeBytes = promauto.NewHistogramVec(prometheus.HistogramOpts{
@@ -494,6 +497,15 @@ var (
 		Subsystem: "remote_cache",
 		Name:      "migration_not_found_error_count",
 		Help:      "Number of not found errors from the destination cache during a cache migration.",
+	}, []string{
+		CacheRequestType,
+	})
+
+	MigrationDoubleReadHitCount = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: bbNamespace,
+		Subsystem: "remote_cache",
+		Name:      "migration_double_read_hit_count",
+		Help:      "Number of double reads where the source and destination caches hold the same digests during a cache migration.",
 	}, []string{
 		CacheRequestType,
 	})
