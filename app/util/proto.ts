@@ -12,7 +12,7 @@ export function dateToTimestamp(date: Date): google_timestamp.protobuf.Timestamp
 
 /** Converts a proto timestamp to a local date. */
 export function timestampToDate(timestamp: google_timestamp.protobuf.ITimestamp): Date {
-  const timestampMillis = Math.floor(((timestamp.seconds as any) + timestamp.nanos / 1e9) * 1e3);
+  const timestampMillis = Math.floor((Number(timestamp.seconds) + Number(timestamp.nanos) / 1e9) * 1e3);
   return new Date(timestampMillis);
 }
 
@@ -25,6 +25,11 @@ export function durationToMillis(duration: google_duration.protobuf.IDuration): 
 /** Converts a number of milliseconds to a proto duration. */
 export function millisToDuration(ms: number): google_duration.protobuf.IDuration {
   const seconds = ms / 1e3;
+  return secondsToDuration(seconds);
+}
+
+/** Converts a number of seconds to a proto duration. */
+export function secondsToDuration(seconds: number): google_duration.protobuf.IDuration {
   return { seconds: Math.floor(seconds) as any, nanos: (seconds - Math.floor(seconds)) * 1e9 };
 }
 

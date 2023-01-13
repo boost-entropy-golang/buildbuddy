@@ -140,10 +140,10 @@ func (sf *storeFactory) NewStore(t *testing.T) (*TestingStore, *dragonboat.NodeH
 	gm.AddListener(rc)
 	ts.Sender = sender.New(rc, reg, apiClient)
 	reg.AddNode(nodeHost.ID(), ts.RaftAddress, ts.GRPCAddress)
-	s, err := store.New(ts.RootDir, nodeHost, gm, ts.Sender, reg, apiClient, []disk.Partition{})
+	s, err := store.New(ts.RootDir, nodeHost, gm, ts.Sender, reg, apiClient, ts.GRPCAddress, []disk.Partition{})
 	require.NoError(t, err)
 	require.NotNil(t, s)
-	s.Start(ts.GRPCAddress)
+	s.Start()
 	ts.Store = s
 	return ts, nodeHost
 }
@@ -278,7 +278,6 @@ func writeRecord(ctx context.Context, t *testing.T, ts *TestingStore, groupID st
 	}
 
 	fs := filestore.New(filestore.Opts{
-		IsolateByGroupIDs:           true,
 		PrioritizeHashInMetadataKey: true,
 	})
 	fileMetadataKey := metadataKey(t, fr)
@@ -318,7 +317,6 @@ func writeRecord(ctx context.Context, t *testing.T, ts *TestingStore, groupID st
 
 func metadataKey(t *testing.T, fr *rfpb.FileRecord) []byte {
 	fs := filestore.New(filestore.Opts{
-		IsolateByGroupIDs:           true,
 		PrioritizeHashInMetadataKey: true,
 	})
 	fk, err := fs.FileMetadataKey(fr)

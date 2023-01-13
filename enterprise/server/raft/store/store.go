@@ -290,6 +290,7 @@ func newUsageTracker(store *Store, gossipManager *gossip.GossipManager, partitio
 		if err != nil {
 			return nil, err
 		}
+		l.Start()
 		u.lru = l
 	}
 
@@ -577,9 +578,10 @@ type Store struct {
 	quitChan   chan struct{}
 }
 
-func New(rootDir string, nodeHost *dragonboat.NodeHost, gossipManager *gossip.GossipManager, sender *sender.Sender, registry registry.NodeRegistry, apiClient *client.APIClient, partitions []disk.Partition) (*Store, error) {
+func New(rootDir string, nodeHost *dragonboat.NodeHost, gossipManager *gossip.GossipManager, sender *sender.Sender, registry registry.NodeRegistry, apiClient *client.APIClient, grpcAddress string, partitions []disk.Partition) (*Store, error) {
 	s := &Store{
 		rootDir:       rootDir,
+		grpcAddr:      grpcAddress,
 		nodeHost:      nodeHost,
 		partitions:    partitions,
 		gossipManager: gossipManager,
@@ -597,7 +599,6 @@ func New(rootDir string, nodeHost *dragonboat.NodeHost, gossipManager *gossip.Go
 
 		metaRangeData: "",
 		fileStorer: filestore.New(filestore.Opts{
-			IsolateByGroupIDs:           true,
 			PrioritizeHashInMetadataKey: true,
 		}),
 		splitMu:    sync.Mutex{},
@@ -723,7 +724,7 @@ func (s *Store) handleSplits(quitChan <-chan struct{}) error {
 	}
 }
 
-func (s *Store) Start(grpcAddress string) error {
+func (s *Store) Start() error {
 	s.quitChan = make(chan struct{}, 0)
 
 	// A grpcServer is run which is responsible for presenting a meta API
@@ -734,14 +735,13 @@ func (s *Store) Start(grpcAddress string) error {
 	grpc_prometheus.Register(s.grpcServer)
 	rfspb.RegisterApiServer(s.grpcServer, s)
 
-	lis, err := net.Listen("tcp", grpcAddress)
+	lis, err := net.Listen("tcp", s.grpcAddr)
 	if err != nil {
 		return err
 	}
 	go func() {
 		s.grpcServer.Serve(lis)
 	}()
-	s.grpcAddr = grpcAddress
 
 	s.eg.Go(func() error {
 		return s.handleSplits(s.quitChan)
