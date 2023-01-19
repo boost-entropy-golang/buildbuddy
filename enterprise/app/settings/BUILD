@@ -7,6 +7,7 @@ exports_files(["settings.css"])
 ts_library(
     name = "settings",
     srcs = glob(["*.tsx"]),
+    strict = True,
     deps = [
         "//app/alert",
         "//app/auth",
@@ -25,6 +26,7 @@ ts_library(
         "//enterprise/app/org",
         "//enterprise/app/quota",
         "//enterprise/app/secrets",
+        "//proto:github_ts_proto",
         "@npm//@types/react",
         "@npm//lucide-react",
         "@npm//react",
