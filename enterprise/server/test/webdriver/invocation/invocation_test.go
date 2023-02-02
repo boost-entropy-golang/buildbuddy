@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/buildbuddy-io/buildbuddy/enterprise/server/testutil/webdriver_target"
+	"github.com/buildbuddy-io/buildbuddy/enterprise/server/testutil/buildbuddy_enterprise"
 	"github.com/buildbuddy-io/buildbuddy/server/testutil/testbazel"
 	"github.com/buildbuddy-io/buildbuddy/server/testutil/webtester"
 	"github.com/stretchr/testify/assert"
@@ -12,8 +12,8 @@ import (
 )
 
 func TestAuthenticatedInvocation_CacheEnabled(t *testing.T) {
-	target := webdriver_target.Setup(t)
 	wt := webtester.New(t)
+	target := buildbuddy_enterprise.SetupWebTarget(t)
 
 	workspacePath := testbazel.MakeTempWorkspace(t, map[string]string{
 		"WORKSPACE": "",
@@ -27,19 +27,21 @@ func TestAuthenticatedInvocation_CacheEnabled(t *testing.T) {
 		"--remote_upload_local_results=1",
 	})
 
-	webtester.LoginSSO(wt, target.AppURL(), target.SSOSlug())
+	webtester.Login(wt, target)
 
 	// Get the build flags needed for BuildBuddy, including API key, bes results url, bes backend, and remote cache
-	buildbuddyBuildFlags := webtester.GetBazelBuildFlags(wt, target.AppURL(), webtester.WithEnableCache)
+	buildbuddyBuildFlags := webtester.GetBazelBuildFlags(wt, target.HTTPURL(), webtester.WithEnableCache)
 	t.Log(buildbuddyBuildFlags)
 	buildArgs = append(buildArgs, buildbuddyBuildFlags...)
 
+	// To test that the cache section includes writes, don't use the remote cache for the build
+	noRemoteCacheBuildArgs := append(buildArgs, "--noremote_accept_cached")
 	testbazel.Clean(context.Background(), t, workspacePath)
-	result := testbazel.Invoke(context.Background(), t, workspacePath, "build", buildArgs...)
+	result := testbazel.Invoke(context.Background(), t, workspacePath, "build", noRemoteCacheBuildArgs...)
 	require.NotEmpty(t, result.InvocationID)
 
 	// Make sure we can view the invocation while logged in
-	wt.Get(target.AppURL() + "/invocation/" + result.InvocationID)
+	wt.Get(target.HTTPURL() + "/invocation/" + result.InvocationID)
 
 	details := wt.FindByDebugID("invocation-details").Text()
 	assert.Contains(t, details, "Succeeded")
@@ -52,7 +54,6 @@ func TestAuthenticatedInvocation_CacheEnabled(t *testing.T) {
 	wt.FindByDebugID("cache-sections")
 	wt.FindByDebugID("filter-cache-requests").SendKeys("All")
 	cacheRequestsCard := wt.FindByDebugID("cache-results-table").Text()
-	assert.Contains(t, cacheRequestsCard, "Miss")
 	assert.Contains(t, cacheRequestsCard, "Write")
 	assert.NotContains(t, cacheRequestsCard, "Hit")
 
@@ -61,7 +62,7 @@ func TestAuthenticatedInvocation_CacheEnabled(t *testing.T) {
 	result = testbazel.Invoke(context.Background(), t, workspacePath, "build", buildArgs...)
 	require.NotEmpty(t, result.InvocationID)
 
-	wt.Get(target.AppURL() + "/invocation/" + result.InvocationID)
+	wt.Get(target.HTTPURL() + "/invocation/" + result.InvocationID)
 
 	details = wt.FindByDebugID("invocation-details").Text()
 	assert.Contains(t, details, "Succeeded")
@@ -100,7 +101,7 @@ func TestAuthenticatedInvocation_CacheEnabled(t *testing.T) {
 
 	webtester.Logout(wt)
 
-	wt.Get(target.AppURL() + "/invocation/" + result.InvocationID)
+	wt.Get(target.HTTPURL() + "/invocation/" + result.InvocationID)
 
 	wt.FindByDebugID("login-button")
 
