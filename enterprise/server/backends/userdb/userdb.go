@@ -169,15 +169,17 @@ func (d *UserDB) GetAPIKeys(ctx context.Context, groupID string, checkVisibility
 		return nil, status.InvalidArgumentError("Group ID cannot be empty.")
 	}
 
-	u, err := perms.AuthenticatedUser(ctx, d.env)
-	if err != nil {
-		return nil, err
-	}
-
 	q := query_builder.NewQuery(`SELECT api_key_id, value, label, perms, capabilities, visible_to_developers FROM APIKeys`)
 	q.AddWhereClause("group_id = ?", groupID)
-	if err := authutil.AuthorizeGroupRole(u, groupID, role.Admin); err != nil && checkVisibility {
-		q.AddWhereClause("visible_to_developers = ?", true)
+
+	if checkVisibility {
+		u, err := perms.AuthenticatedUser(ctx, d.env)
+		if err != nil {
+			return nil, err
+		}
+		if err := authutil.AuthorizeGroupRole(u, groupID, role.Admin); err != nil {
+			q.AddWhereClause("visible_to_developers = ?", true)
+		}
 	}
 	q.SetOrderBy("label", true /*ascending*/)
 	queryStr, args := q.Build()
@@ -422,7 +424,8 @@ func (d *UserDB) InsertOrUpdateGroup(ctx context.Context, g *tables.Group) (stri
 				name = ?,
 				url_identifier = ?,
 				owned_domain = ?,
-				sharing_enabled = ?, 
+				sharing_enabled = ?,
+				user_owned_keys_enabled = ?,
 				use_group_owned_executors = ?,
 				suggestion_preference = ?
 			WHERE group_id = ?`,
@@ -430,6 +433,7 @@ func (d *UserDB) InsertOrUpdateGroup(ctx context.Context, g *tables.Group) (stri
 			g.URLIdentifier,
 			g.OwnedDomain,
 			g.SharingEnabled,
+			g.UserOwnedKeysEnabled,
 			g.UseGroupOwnedExecutors,
 			g.SuggestionPreference,
 			g.GroupID)
@@ -794,6 +798,7 @@ func (d *UserDB) GetUser(ctx context.Context) (*tables.User, error) {
 				g.owned_domain,
 				g.github_token,
 				g.sharing_enabled,
+				g.user_owned_keys_enabled,
 				g.use_group_owned_executors,
 				g.saml_idp_metadata_url,
 				g.suggestion_preference,
@@ -819,6 +824,7 @@ func (d *UserDB) GetUser(ctx context.Context) (*tables.User, error) {
 				&gr.Group.OwnedDomain,
 				&gr.Group.GithubToken,
 				&gr.Group.SharingEnabled,
+				&gr.Group.UserOwnedKeysEnabled,
 				&gr.Group.UseGroupOwnedExecutors,
 				&gr.Group.SamlIdpMetadataUrl,
 				&gr.Group.SuggestionPreference,

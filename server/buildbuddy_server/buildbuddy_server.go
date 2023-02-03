@@ -47,6 +47,7 @@ import (
 	rnpb "github.com/buildbuddy-io/buildbuddy/proto/runner"
 	scpb "github.com/buildbuddy-io/buildbuddy/proto/scheduler"
 	skpb "github.com/buildbuddy-io/buildbuddy/proto/secrets"
+	stpb "github.com/buildbuddy-io/buildbuddy/proto/stats"
 	trpb "github.com/buildbuddy-io/buildbuddy/proto/target"
 	usagepb "github.com/buildbuddy-io/buildbuddy/proto/usage"
 	uspb "github.com/buildbuddy-io/buildbuddy/proto/user"
@@ -199,6 +200,7 @@ func makeGroups(groupRoles []*tables.GroupRole) []*grpb.Group {
 			GithubLinked:           githubToken != "",
 			UrlIdentifier:          urlIdentifier,
 			SharingEnabled:         g.SharingEnabled,
+			UserOwnedKeysEnabled:   g.UserOwnedKeysEnabled,
 			UseGroupOwnedExecutors: g.UseGroupOwnedExecutors != nil && *g.UseGroupOwnedExecutors,
 			SuggestionPreference:   g.SuggestionPreference,
 		})
@@ -357,6 +359,7 @@ func (s *BuildBuddyServer) CreateGroup(ctx context.Context, req *grpb.CreateGrou
 		Name:                   groupName,
 		OwnedDomain:            groupOwnedDomain,
 		SharingEnabled:         req.GetSharingEnabled(),
+		UserOwnedKeysEnabled:   req.GetUserOwnedKeysEnabled(),
 		UseGroupOwnedExecutors: &useGroupOwnedExecutors,
 	}
 	urlIdentifier := strings.TrimSpace(req.GetUrlIdentifier())
@@ -421,6 +424,7 @@ func (s *BuildBuddyServer) UpdateGroup(ctx context.Context, req *grpb.UpdateGrou
 	}
 	group.SharingEnabled = req.GetSharingEnabled()
 	useGroupOwnedExecutors := req.GetUseGroupOwnedExecutors()
+	group.UserOwnedKeysEnabled = req.GetUserOwnedKeysEnabled()
 	group.UseGroupOwnedExecutors = &useGroupOwnedExecutors
 	group.SuggestionPreference = req.GetSuggestionPreference()
 	if group.SuggestionPreference == grpb.SuggestionPreference_UNKNOWN_SUGGESTION_PREFERENCE {
@@ -738,10 +742,18 @@ func (s *BuildBuddyServer) GetInvocationStat(ctx context.Context, req *inpb.GetI
 	return nil, status.UnimplementedError("Not implemented")
 }
 
-func (s *BuildBuddyServer) GetTrend(ctx context.Context, req *inpb.GetTrendRequest) (*inpb.GetTrendResponse, error) {
+func (s *BuildBuddyServer) GetTrend(ctx context.Context, req *stpb.GetTrendRequest) (*stpb.GetTrendResponse, error) {
 	if iss := s.env.GetInvocationStatService(); iss != nil {
 		return iss.GetTrend(ctx, req)
 	}
+	return nil, status.UnimplementedError("Not implemented")
+}
+
+func (s *BuildBuddyServer) GetStatHeatmap(ctx context.Context, req *stpb.GetStatHeatmapRequest) (*stpb.GetStatHeatmapResponse, error) {
+	return nil, status.UnimplementedError("Not implemented")
+}
+
+func (s *BuildBuddyServer) GetStatDrilldown(ctx context.Context, req *stpb.GetStatDrilldownRequest) (*stpb.GetStatDrilldownResponse, error) {
 	return nil, status.UnimplementedError("Not implemented")
 }
 
