@@ -106,7 +106,7 @@ const (
 	JanitorCheckPeriod = 1 * time.Second
 	megabyte           = 1e6
 
-	defaultPartitionID           = "default"
+	DefaultPartitionID           = "default"
 	partitionDirectoryPrefix     = "PT"
 	partitionMetadataFlushPeriod = 5 * time.Second
 	metricsRefreshPeriod         = 30 * time.Second
@@ -292,7 +292,7 @@ func SetOptionDefaults(opts *Options) {
 func ensureDefaultPartitionExists(opts *Options) {
 	foundDefaultPartition := false
 	for _, part := range opts.Partitions {
-		if part.ID == defaultPartitionID {
+		if part.ID == DefaultPartitionID {
 			foundDefaultPartition = true
 		}
 	}
@@ -300,7 +300,7 @@ func ensureDefaultPartitionExists(opts *Options) {
 		return
 	}
 	opts.Partitions = append(opts.Partitions, disk.Partition{
-		ID:           defaultPartitionID,
+		ID:           DefaultPartitionID,
 		MaxSizeBytes: opts.MaxSizeBytes,
 	})
 }
@@ -373,7 +373,7 @@ func NewPebbleCache(env environment.Env, opts *Options) (*PebbleCache, error) {
 		i := i
 		part := part
 		eg.Go(func() error {
-			blobDir := pc.blobDir(part.ID)
+			blobDir := pc.blobDir()
 			if err := disk.EnsureDirectoryExists(blobDir); err != nil {
 				return err
 			}
@@ -584,70 +584,68 @@ func (p *PebbleCache) deleteOrphanedFiles(quitChan chan struct{}) error {
 	defer iter.Close()
 
 	orphanCount := 0
-	for _, part := range p.partitions {
-		walkFn := func(path string, d fs.DirEntry, err error) error {
-			if err != nil {
-				return err
-			}
-			if d.IsDir() {
-				return nil
-			}
-
-			// Check if we're shutting down; exit if so.
-			select {
-			case <-quitChan:
-				return status.CanceledErrorf("cache shutting down")
-			default:
-			}
-
-			blobDir := p.blobDir(part.ID)
-
-			relPath, err := filepath.Rel(blobDir, path)
-			if err != nil {
-				return err
-			}
-			parts := strings.Split(relPath, sep)
-			if len(parts) < 3 {
-				log.Warningf("Skipping orphaned file: %q", path)
-				return nil
-			}
-			prefixIndex := len(parts) - 2
-			// Remove the second to last element which is the 4-char hash prefix.
-			parts = append(parts[:prefixIndex], parts[prefixIndex+1:]...)
-
-			var key filestore.PebbleKey
-			if _, err := key.FromBytes([]byte(strings.Join(parts, sep))); err != nil {
-				return err
-			}
-
-			unlockFn := p.locker.RLock(key.LockID())
-			_, err = p.lookupFileMetadata(p.env.GetServerContext(), iter, key)
-			unlockFn()
-
-			if status.IsNotFoundError(err) {
-				if *orphanDeleteDryRun {
-					fi, err := d.Info()
-					if err != nil {
-						return err
-					}
-					log.Infof("Would delete orphaned file: %s (last modified: %s) which is not in cache", path, fi.ModTime())
-				} else {
-					if err := os.Remove(path); err == nil {
-						log.Infof("Removed orphaned file: %q", path)
-					}
-				}
-				orphanCount += 1
-			}
-
-			if orphanCount%1000 == 0 && orphanCount != 0 {
-				log.Infof("Removed %d orphans", orphanCount)
-			}
+	walkFn := func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
 			return nil
 		}
-		blobDir := p.blobDir(part.ID)
-		if err := filepath.WalkDir(blobDir, walkFn); err != nil {
-			alert.UnexpectedEvent("pebble_cache_error_deleting_orphans", "err: %s", err)
+
+		// Check if we're shutting down; exit if so.
+		select {
+		case <-quitChan:
+			return status.CanceledErrorf("cache shutting down")
+		default:
 		}
+
+		blobDir := p.blobDir()
+
+		relPath, err := filepath.Rel(blobDir, path)
+		if err != nil {
+			return err
+		}
+		parts := strings.Split(relPath, sep)
+		if len(parts) < 3 {
+			log.Warningf("Skipping orphaned file: %q", path)
+			return nil
+		}
+		prefixIndex := len(parts) - 2
+		// Remove the second to last element which is the 4-char hash prefix.
+		parts = append(parts[:prefixIndex], parts[prefixIndex+1:]...)
+
+		var key filestore.PebbleKey
+		if _, err := key.FromBytes([]byte(strings.Join(parts, sep))); err != nil {
+			return err
+		}
+
+		unlockFn := p.locker.RLock(key.LockID())
+		_, err = p.lookupFileMetadata(p.env.GetServerContext(), iter, key)
+		unlockFn()
+
+		if status.IsNotFoundError(err) {
+			if *orphanDeleteDryRun {
+				fi, err := d.Info()
+				if err != nil {
+					return err
+				}
+				log.Infof("Would delete orphaned file: %s (last modified: %s) which is not in cache", path, fi.ModTime())
+			} else {
+				if err := os.Remove(path); err == nil {
+					log.Infof("Removed orphaned file: %q", path)
+				}
+			}
+			orphanCount += 1
+		}
+
+		if orphanCount%1000 == 0 && orphanCount != 0 {
+			log.Infof("Removed %d orphans", orphanCount)
+		}
+		return nil
+	}
+	blobDir := p.blobDir()
+	if err := filepath.WalkDir(blobDir, walkFn); err != nil {
+		alert.UnexpectedEvent("pebble_cache_error_deleting_orphans", "err: %s", err)
 	}
 	log.Infof("Pebble Cache: deleteOrphanedFiles removed %d files", orphanCount)
 	close(p.orphanedFilesDone)
@@ -766,7 +764,7 @@ func (p *PebbleCache) backgroundRepairIteration(quitChan chan struct{}, opts *re
 
 		removedEntry := false
 		if opts.deleteEntriesWithMissingFiles {
-			blobDir = p.blobDir(fileMetadata.GetFileRecord().GetIsolation().GetPartitionId())
+			blobDir = p.blobDir()
 			_, err := p.fileStorer.NewReader(p.env.GetServerContext(), blobDir, fileMetadata.GetStorageMetadata(), 0, 0)
 			if err != nil {
 				_ = modLim.Wait(p.env.GetServerContext())
@@ -853,21 +851,26 @@ func (p *PebbleCache) Statusz(ctx context.Context) string {
 	return buf
 }
 
-func (p *PebbleCache) lookupGroupAndPartitionID(ctx context.Context, remoteInstanceName string) (string, string, error) {
+func (p *PebbleCache) userGroupID(ctx context.Context) string {
 	auth := p.env.GetAuthenticator()
 	if auth == nil {
-		return interfaces.AuthAnonymousUser, defaultPartitionID, nil
+		return interfaces.AuthAnonymousUser
 	}
 	user, err := auth.AuthenticatedUser(ctx)
 	if err != nil {
-		return interfaces.AuthAnonymousUser, defaultPartitionID, nil
+		return interfaces.AuthAnonymousUser
 	}
+	return user.GetGroupID()
+}
+
+func (p *PebbleCache) lookupGroupAndPartitionID(ctx context.Context, remoteInstanceName string) (string, string, error) {
+	groupID := p.userGroupID(ctx)
 	for _, pm := range p.partitionMappings {
-		if pm.GroupID == user.GetGroupID() && strings.HasPrefix(remoteInstanceName, pm.Prefix) {
-			return user.GetGroupID(), pm.PartitionID, nil
+		if pm.GroupID == groupID && strings.HasPrefix(remoteInstanceName, pm.Prefix) {
+			return groupID, pm.PartitionID, nil
 		}
 	}
-	return user.GetGroupID(), defaultPartitionID, nil
+	return groupID, DefaultPartitionID, nil
 }
 
 func (p *PebbleCache) makeFileRecord(ctx context.Context, r *resource.ResourceName) (*rfpb.FileRecord, error) {
@@ -894,7 +897,7 @@ func (p *PebbleCache) makeFileRecord(ctx context.Context, r *resource.ResourceNa
 }
 
 // blobDir returns a directory path under the root directory where blobs can be stored.
-func (p *PebbleCache) blobDir(partID string) string {
+func (p *PebbleCache) blobDir() string {
 	filePath := filepath.Join(p.rootDirectory, "blobs")
 	return filePath
 }
@@ -1233,7 +1236,7 @@ func (p *PebbleCache) deleteFileAndMetadata(ctx context.Context, key filestore.P
 	partitionID := md.GetFileRecord().GetIsolation().GetPartitionId()
 	switch {
 	case storageMetadata.GetFileMetadata() != nil:
-		fp := p.fileStorer.FilePath(p.blobDir(partitionID), storageMetadata.GetFileMetadata())
+		fp := p.fileStorer.FilePath(p.blobDir(), storageMetadata.GetFileMetadata())
 		if err := disk.DeleteFile(ctx, fp); err != nil {
 			return err
 		}
@@ -1439,8 +1442,7 @@ func (p *PebbleCache) Writer(ctx context.Context, r *resource.ResourceName) (int
 	if r.GetDigest().GetSizeBytes() < p.maxInlineFileSizeBytes {
 		wcm = p.fileStorer.InlineWriter(ctx, r.GetDigest().GetSizeBytes())
 	} else {
-		partitionID := fileRecord.GetIsolation().GetPartitionId()
-		blobDir := p.blobDir(partitionID)
+		blobDir := p.blobDir()
 		fw, err := p.fileStorer.FileWriter(ctx, blobDir, fileRecord)
 		if err != nil {
 			return nil, err
@@ -2115,8 +2117,7 @@ type readCloser struct {
 }
 
 func (p *PebbleCache) readerForCompressionType(ctx context.Context, resource *resource.ResourceName, key filestore.PebbleKey, fileMetadata *rfpb.FileMetadata, uncompressedOffset int64, uncompressedLimit int64) (io.ReadCloser, error) {
-	partitionID := fileMetadata.GetFileRecord().GetIsolation().GetPartitionId()
-	blobDir := p.blobDir(partitionID)
+	blobDir := p.blobDir()
 	requestedCompression := resource.GetCompressor()
 	cachedCompression := fileMetadata.GetFileRecord().GetCompressor()
 

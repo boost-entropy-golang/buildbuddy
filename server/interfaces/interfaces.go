@@ -322,7 +322,6 @@ type UserDB interface {
 	// to impersonate. It requires that the authenticated user has impersonation
 	// permissions and is requesting to impersonate a group.
 	GetImpersonatedUser(ctx context.Context) (*tables.User, error)
-	DeleteUser(ctx context.Context, userID string) error
 	FillCounts(ctx context.Context, stat *telpb.TelemetryStat) error
 
 	// Creates the DEFAULT group, for on-prem usage where there is only
@@ -337,8 +336,6 @@ type UserDB interface {
 	InsertOrUpdateGroup(ctx context.Context, g *tables.Group) (string, error)
 	GetGroupByID(ctx context.Context, groupID string) (*tables.Group, error)
 	GetGroupByURLIdentifier(ctx context.Context, urlIdentifier string) (*tables.Group, error)
-	GetAuthGroup(ctx context.Context) (*tables.Group, error)
-	DeleteGroup(ctx context.Context, groupID string) error
 	AddUserToGroup(ctx context.Context, userID string, groupID string) error
 	RequestToJoinGroup(ctx context.Context, userID string, groupID string) error
 	GetGroupUsers(ctx context.Context, groupID string, statuses []grpb.GroupMembershipStatus) ([]*grpb.GetGroupUsersResponse_GroupUser, error)
@@ -400,6 +397,8 @@ type Webhook interface {
 type InvocationStatService interface {
 	GetInvocationStat(ctx context.Context, req *inpb.GetInvocationStatRequest) (*inpb.GetInvocationStatResponse, error)
 	GetTrend(ctx context.Context, req *stpb.GetTrendRequest) (*stpb.GetTrendResponse, error)
+	GetStatHeatmap(ctx context.Context, req *stpb.GetStatHeatmapRequest) (*stpb.GetStatHeatmapResponse, error)
+	GetStatDrilldown(ctx context.Context, req *stpb.GetStatDrilldownRequest) (*stpb.GetStatDrilldownResponse, error)
 }
 
 // Allows searching invocations.
