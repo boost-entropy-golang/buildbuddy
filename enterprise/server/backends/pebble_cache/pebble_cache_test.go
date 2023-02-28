@@ -232,7 +232,7 @@ func TestIsolation(t *testing.T) {
 			}
 
 			// Compute a digest for the bytes returned.
-			d2, err := digest.Compute(bytes.NewReader(rbuf))
+			d2, err := digest.Compute(bytes.NewReader(rbuf), repb.DigestFunction_SHA256)
 			if err != nil {
 				t.Fatalf("Error computing digest: %s", err.Error())
 			}
@@ -284,10 +284,75 @@ func TestGetSet(t *testing.T) {
 		}
 
 		// Compute a digest for the bytes returned.
-		d2, err := digest.Compute(bytes.NewReader(rbuf))
+		d2, err := digest.Compute(bytes.NewReader(rbuf), repb.DigestFunction_SHA256)
 		if d.GetHash() != d2.GetHash() {
 			t.Fatalf("Returned digest %q did not match set value: %q", d2.GetHash(), d.GetHash())
 		}
+	}
+}
+
+func TestDupeWrites(t *testing.T) {
+	te := testenv.GetTestEnv(t)
+	te.SetAuthenticator(testauth.NewTestAuthenticator(emptyUserMap))
+	ctx := getAnonContext(t, te)
+
+	maxSizeBytes := int64(1_000_000_000) // 1GB
+	pc, err := pebble_cache.NewPebbleCache(te, &pebble_cache.Options{
+		RootDirectory:          testfs.MakeTempDir(t),
+		MaxSizeBytes:           maxSizeBytes,
+		MaxInlineFileSizeBytes: 100,
+	})
+	require.NoError(t, err)
+	err = pc.Start()
+	require.NoError(t, err)
+	defer pc.Stop()
+
+	var tests = []struct {
+		name      string
+		size      int64
+		cacheType resource.CacheType
+	}{
+		{"cas_inline", 1, resource.CacheType_CAS},
+		{"cas_extern", 1000, resource.CacheType_CAS},
+		{"ac_inline", 1, resource.CacheType_AC},
+		{"ac_extern", 1000, resource.CacheType_AC},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			d, buf := testdigest.NewRandomDigestBuf(t, test.size)
+			r := &resource.ResourceName{Digest: d, CacheType: test.cacheType}
+
+			w1, err := pc.Writer(ctx, r)
+			require.NoError(t, err)
+			_, err = w1.Write(buf)
+			require.NoError(t, err)
+
+			w2, err := pc.Writer(ctx, r)
+			require.NoError(t, err)
+			_, err = w2.Write(buf)
+			require.NoError(t, err)
+
+			err = w1.Commit()
+			require.NoError(t, err)
+			err = w1.Close()
+			require.NoError(t, err)
+
+			err = w2.Commit()
+			require.NoError(t, err)
+			err = w2.Close()
+			require.NoError(t, err)
+
+			// Verify we can read the data back after dupe writes are done.
+			rbuf, err := pc.Get(ctx, r)
+			require.NoError(t, err)
+
+			// Compute a digest for the bytes returned.
+			d2, err := digest.Compute(bytes.NewReader(rbuf), repb.DigestFunction_SHA256)
+			if d.GetHash() != d2.GetHash() {
+				t.Fatalf("Returned digest %q did not match set value: %q", d2.GetHash(), d.GetHash())
+			}
+		})
 	}
 }
 
@@ -768,7 +833,7 @@ func TestMultiGetSet(t *testing.T) {
 		if !ok {
 			t.Fatalf("Multi-get failed to return expected digest: %q", d.GetHash())
 		}
-		d2, err := digest.Compute(bytes.NewReader(rbuf))
+		d2, err := digest.Compute(bytes.NewReader(rbuf), repb.DigestFunction_SHA256)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -881,10 +946,10 @@ func TestCompression(t *testing.T) {
 	compressedInlineBuf := compression.CompressZstd(nil, inlineBlob)
 
 	// Note: Digest is of uncompressed contents
-	d, err := digest.Compute(bytes.NewReader(blob))
+	d, err := digest.Compute(bytes.NewReader(blob), repb.DigestFunction_SHA256)
 	require.NoError(t, err)
 
-	inlineD, err := digest.Compute(bytes.NewReader(inlineBlob))
+	inlineD, err := digest.Compute(bytes.NewReader(inlineBlob), repb.DigestFunction_SHA256)
 	require.NoError(t, err)
 
 	compressedRN := &resource.ResourceName{
@@ -1047,7 +1112,7 @@ func TestCompression_BufferPoolReuse(t *testing.T) {
 		blob := compressibleBlobOfSize(100)
 
 		// Note: Digest is of uncompressed contents
-		d, err := digest.Compute(bytes.NewReader(blob))
+		d, err := digest.Compute(bytes.NewReader(blob), repb.DigestFunction_SHA256)
 		require.NoError(t, err)
 		decompressedRN := &resource.ResourceName{
 			Digest:     d,
@@ -1105,7 +1170,7 @@ func TestCompression_ParallelRequests(t *testing.T) {
 			blob := compressibleBlobOfSize(10000)
 
 			// Note: Digest is of uncompressed contents
-			d, err := digest.Compute(bytes.NewReader(blob))
+			d, err := digest.Compute(bytes.NewReader(blob), repb.DigestFunction_SHA256)
 			require.NoError(t, err)
 			decompressedRN := &resource.ResourceName{
 				Digest:     d,
@@ -1157,7 +1222,7 @@ func TestCompression_NoEarlyEviction(t *testing.T) {
 		require.Less(t, len(compressed), len(blob))
 		totalSizeCompresedData += len(compressed)
 
-		d, err := digest.Compute(bytes.NewReader(blob))
+		d, err := digest.Compute(bytes.NewReader(blob), repb.DigestFunction_SHA256)
 		require.NoError(t, err)
 		digestBlobs[d] = blob
 	}
@@ -1210,7 +1275,7 @@ func TestCompressionOffset(t *testing.T) {
 	compressedBuf := compression.CompressZstd(nil, blob)
 
 	// Note: Digest is of uncompressed contents
-	d, err := digest.Compute(bytes.NewReader(blob))
+	d, err := digest.Compute(bytes.NewReader(blob), repb.DigestFunction_SHA256)
 	require.NoError(t, err)
 
 	compressedRN := &resource.ResourceName{
@@ -1522,7 +1587,7 @@ func TestStartupScan(t *testing.T) {
 		require.NoError(t, err)
 
 		// Compute a digest for the bytes returned.
-		d2, err := digest.Compute(bytes.NewReader(rbuf))
+		d2, err := digest.Compute(bytes.NewReader(rbuf), repb.DigestFunction_SHA256)
 		if d.GetHash() != d2.GetHash() {
 			t.Fatalf("Returned digest %q did not match set value: %q", d2.GetHash(), d.GetHash())
 		}
@@ -1790,7 +1855,7 @@ func TestMigrateVersions(t *testing.T) {
 			require.NoError(t, err)
 
 			// Compute a digest for the bytes returned.
-			d2, err := digest.Compute(bytes.NewReader(rbuf))
+			d2, err := digest.Compute(bytes.NewReader(rbuf), repb.DigestFunction_SHA256)
 			if d.GetHash() != d2.GetHash() {
 				t.Fatalf("Returned digest %q did not match set value: %q", d2.GetHash(), d.GetHash())
 			}
