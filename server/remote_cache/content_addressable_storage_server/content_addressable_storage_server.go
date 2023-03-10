@@ -11,7 +11,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/buildbuddy-io/buildbuddy/proto/resource"
 	"github.com/buildbuddy-io/buildbuddy/server/environment"
 	"github.com/buildbuddy-io/buildbuddy/server/interfaces"
 	"github.com/buildbuddy-io/buildbuddy/server/remote_cache/digest"
@@ -28,6 +27,7 @@ import (
 
 	akpb "github.com/buildbuddy-io/buildbuddy/proto/api_key"
 	repb "github.com/buildbuddy-io/buildbuddy/proto/remote_execution"
+	rspb "github.com/buildbuddy-io/buildbuddy/proto/resource"
 	remote_cache_config "github.com/buildbuddy-io/buildbuddy/server/remote_cache/config"
 	statuspb "google.golang.org/genproto/googleapis/rpc/status"
 	gstatus "google.golang.org/grpc/status"
@@ -91,12 +91,12 @@ func (s *ContentAddressableStorageServer) FindMissingBlobs(ctx context.Context, 
 	if err != nil {
 		return nil, err
 	}
-	digestsToLookup := make([]*resource.ResourceName, 0, len(req.GetBlobDigests()))
+	digestsToLookup := make([]*rspb.ResourceName, 0, len(req.GetBlobDigests()))
 	for _, d := range req.GetBlobDigests() {
 		if digest.IsEmpty(d) || d.GetHash() == digest.EmptyHash {
 			continue
 		}
-		rn := digest.NewCASResourceName(d, req.GetInstanceName()).ToProto()
+		rn := digest.NewResourceName(d, req.GetInstanceName(), rspb.CacheType_CAS).ToProto()
 		digestsToLookup = append(digestsToLookup, rn)
 	}
 	missing, err := s.cache.FindMissing(ctx, digestsToLookup)
@@ -158,7 +158,7 @@ func (s *ContentAddressableStorageServer) BatchUpdateBlobs(ctx context.Context, 
 	rsp.Responses = make([]*repb.BatchUpdateBlobsResponse_Response, 0, len(req.Requests))
 
 	ht := hit_tracker.NewHitTracker(ctx, s.env, false)
-	kvs := make(map[*resource.ResourceName][]byte, len(req.Requests))
+	kvs := make(map[*rspb.ResourceName][]byte, len(req.Requests))
 	for _, uploadRequest := range req.Requests {
 		uploadDigest := uploadRequest.GetDigest()
 		_, err := digest.Validate(uploadDigest)
@@ -222,7 +222,7 @@ func (s *ContentAddressableStorageServer) BatchUpdateBlobs(ctx context.Context, 
 			continue
 		}
 
-		rn := digest.NewCASResourceName(uploadDigest, req.GetInstanceName())
+		rn := digest.NewResourceName(uploadDigest, req.GetInstanceName(), rspb.CacheType_CAS)
 		// If cache doesn't support compression type, store decompressed data
 		dataToCache := decompressedData
 		if s.cache.SupportsCompressor(uploadRequest.GetCompressor()) {
@@ -284,7 +284,7 @@ func (s *ContentAddressableStorageServer) BatchReadBlobs(ctx context.Context, re
 	closeTrackerData := make([]downloadTrackerData, 0, len(req.Digests))
 	ht := hit_tracker.NewHitTracker(ctx, s.env, false)
 
-	cacheRequest := make([]*resource.ResourceName, 0, len(req.Digests))
+	cacheRequest := make([]*rspb.ResourceName, 0, len(req.Digests))
 	rsp.Responses = make([]*repb.BatchReadBlobsResponse_Response, 0, len(req.Digests))
 	clientAcceptsZstd := remote_cache_config.ZstdTranscodingEnabled() && clientAcceptsCompressor(req.AcceptableCompressors, repb.Compressor_ZSTD)
 	readZstd := clientAcceptsZstd && s.cache.SupportsCompressor(repb.Compressor_ZSTD)
@@ -300,7 +300,7 @@ func (s *ContentAddressableStorageServer) BatchReadBlobs(ctx context.Context, re
 		})
 
 		if !digest.IsEmpty(readDigest) {
-			rn := digest.NewCASResourceName(readDigest, req.GetInstanceName())
+			rn := digest.NewResourceName(readDigest, req.GetInstanceName(), rspb.CacheType_CAS)
 			if readZstd {
 				rn.SetCompressor(repb.Compressor_ZSTD)
 			}
@@ -473,7 +473,7 @@ func (d *dirStack) SerializeToToken() (string, error) {
 	return token, nil
 }
 
-func (s *ContentAddressableStorageServer) fetchDir(ctx context.Context, dirName *resource.ResourceName) (*repb.Directory, error) {
+func (s *ContentAddressableStorageServer) fetchDir(ctx context.Context, dirName *rspb.ResourceName) (*repb.Directory, error) {
 	_, err := digest.Validate(dirName.GetDigest())
 	if err != nil {
 		return nil, err
@@ -501,13 +501,13 @@ func (s *ContentAddressableStorageServer) fetchDirectory(ctx context.Context, re
 	if len(dir.Directories) == 0 {
 		return nil, nil
 	}
-	subdirDigests := make([]*resource.ResourceName, 0, len(dir.Directories))
+	subdirDigests := make([]*rspb.ResourceName, 0, len(dir.Directories))
 	for _, dirNode := range dir.Directories {
 		d := dirNode.GetDigest()
 		if digest.IsEmpty(d) {
 			continue
 		}
-		rn := digest.NewCASResourceName(d, remoteInstanceName).ToProto()
+		rn := digest.NewResourceName(d, remoteInstanceName, rspb.CacheType_CAS).ToProto()
 		subdirDigests = append(subdirDigests, rn)
 	}
 	rspMap, err := s.cache.GetMulti(ctx, subdirDigests)
@@ -574,7 +574,7 @@ func (s *ContentAddressableStorageServer) GetTree(req *repb.GetTreeRequest, stre
 	if err != nil {
 		return err
 	}
-	rootDirRN := digest.NewCASResourceName(req.GetRootDigest(), req.GetInstanceName()).ToProto()
+	rootDirRN := digest.NewResourceName(req.GetRootDigest(), req.GetInstanceName(), rspb.CacheType_CAS).ToProto()
 	rootDir, err := s.fetchDir(ctx, rootDirRN)
 	if err != nil {
 		return err
@@ -618,7 +618,7 @@ func (s *ContentAddressableStorageServer) GetTree(req *repb.GetTreeRequest, stre
 			return nil, err
 		}
 		if *enableTreeCaching {
-			treeCacheRN := digest.NewACResourceName(treeCacheDigest, req.GetInstanceName()).ToProto()
+			treeCacheRN := digest.NewResourceName(treeCacheDigest, req.GetInstanceName(), rspb.CacheType_AC).ToProto()
 			if blob, err := s.cache.Get(ctx, treeCacheRN); err == nil {
 				treeCache := &repb.TreeCache{}
 				if err := proto.Unmarshal(blob, treeCache); err == nil {
@@ -672,7 +672,7 @@ func (s *ContentAddressableStorageServer) GetTree(req *repb.GetTreeRequest, stre
 				if err != nil {
 					return nil, err
 				}
-				treeCacheRN := digest.NewACResourceName(treeCacheDigest, req.GetInstanceName()).ToProto()
+				treeCacheRN := digest.NewResourceName(treeCacheDigest, req.GetInstanceName(), rspb.CacheType_AC).ToProto()
 				if err := s.cache.Set(ctx, treeCacheRN, buf); err != nil {
 					log.Warningf("Error setting treeCache blob: %s", err)
 				}

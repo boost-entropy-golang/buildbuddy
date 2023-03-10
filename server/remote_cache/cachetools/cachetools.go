@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"sync"
 
-	"github.com/buildbuddy-io/buildbuddy/proto/resource"
 	"github.com/buildbuddy-io/buildbuddy/server/environment"
 	"github.com/buildbuddy-io/buildbuddy/server/interfaces"
 	"github.com/buildbuddy-io/buildbuddy/server/remote_cache/digest"
@@ -23,6 +22,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	repb "github.com/buildbuddy-io/buildbuddy/proto/remote_execution"
+	rspb "github.com/buildbuddy-io/buildbuddy/proto/resource"
 	bspb "google.golang.org/genproto/googleapis/bytestream"
 	gcodes "google.golang.org/grpc/codes"
 	gstatus "google.golang.org/grpc/status"
@@ -111,7 +111,7 @@ func ComputeDigest(in io.ReadSeeker, instanceName string) (*digest.ResourceName,
 	if err != nil {
 		return nil, err
 	}
-	return digest.NewResourceName(d, instanceName), nil
+	return digest.NewGenericResourceName(d, instanceName), nil
 }
 
 func ComputeFileDigest(fullFilePath, instanceName string) (*digest.ResourceName, error) {
@@ -269,7 +269,7 @@ func GetActionAndCommand(ctx context.Context, bsClient bspb.ByteStreamClient, ac
 		return nil, nil, status.WrapErrorf(err, "could not fetch action")
 	}
 	cmd := &repb.Command{}
-	if err := GetBlobAsProto(ctx, bsClient, digest.NewResourceName(action.GetCommandDigest(), actionDigest.GetInstanceName()), cmd); err != nil {
+	if err := GetBlobAsProto(ctx, bsClient, digest.NewGenericResourceName(action.GetCommandDigest(), actionDigest.GetInstanceName()), cmd); err != nil {
 		return nil, nil, status.WrapErrorf(err, "could not fetch command")
 	}
 	return action, cmd, nil
@@ -287,16 +287,16 @@ func readProtoFromCache(ctx context.Context, cache interfaces.Cache, r *digest.R
 }
 
 func ReadProtoFromCAS(ctx context.Context, cache interfaces.Cache, d *digest.ResourceName, out proto.Message) error {
-	casRN := digest.NewCASResourceName(d.GetDigest(), d.GetInstanceName())
+	casRN := digest.NewResourceName(d.GetDigest(), d.GetInstanceName(), rspb.CacheType_CAS)
 	return readProtoFromCache(ctx, cache, casRN, out)
 }
 
 func ReadProtoFromAC(ctx context.Context, cache interfaces.Cache, d *digest.ResourceName, out proto.Message) error {
-	acRN := digest.NewACResourceName(d.GetDigest(), d.GetInstanceName())
+	acRN := digest.NewResourceName(d.GetDigest(), d.GetInstanceName(), rspb.CacheType_AC)
 	return readProtoFromCache(ctx, cache, acRN, out)
 }
 
-func UploadBytesToCache(ctx context.Context, cache interfaces.Cache, cacheType resource.CacheType, remoteInstanceName string, in io.ReadSeeker) (*repb.Digest, error) {
+func UploadBytesToCache(ctx context.Context, cache interfaces.Cache, cacheType rspb.CacheType, remoteInstanceName string, in io.ReadSeeker) (*repb.Digest, error) {
 	d, err := digest.Compute(in, repb.DigestFunction_SHA256)
 	if err != nil {
 		return nil, err
@@ -308,7 +308,7 @@ func UploadBytesToCache(ctx context.Context, cache interfaces.Cache, cacheType r
 	if _, err := in.Seek(0, io.SeekStart); err != nil {
 		return nil, err
 	}
-	resourceName := digest.NewCacheResourceName(d, remoteInstanceName, cacheType).ToProto()
+	resourceName := digest.NewResourceName(d, remoteInstanceName, cacheType).ToProto()
 	wc, err := cache.Writer(ctx, resourceName)
 	if err != nil {
 		return nil, err
@@ -322,10 +322,10 @@ func UploadBytesToCache(ctx context.Context, cache interfaces.Cache, cacheType r
 }
 
 func UploadBytesToCAS(ctx context.Context, cache interfaces.Cache, instanceName string, in io.ReadSeeker) (*repb.Digest, error) {
-	return UploadBytesToCache(ctx, cache, resource.CacheType_CAS, instanceName, in)
+	return UploadBytesToCache(ctx, cache, rspb.CacheType_CAS, instanceName, in)
 }
 
-func uploadProtoToCache(ctx context.Context, cache interfaces.Cache, cacheType resource.CacheType, instanceName string, in proto.Message) (*repb.Digest, error) {
+func uploadProtoToCache(ctx context.Context, cache interfaces.Cache, cacheType rspb.CacheType, instanceName string, in proto.Message) (*repb.Digest, error) {
 	data, err := proto.Marshal(in)
 	if err != nil {
 		return nil, err
@@ -336,11 +336,11 @@ func uploadProtoToCache(ctx context.Context, cache interfaces.Cache, cacheType r
 
 func UploadBlobToCAS(ctx context.Context, cache interfaces.Cache, instanceName string, blob []byte) (*repb.Digest, error) {
 	reader := bytes.NewReader(blob)
-	return UploadBytesToCache(ctx, cache, resource.CacheType_CAS, instanceName, reader)
+	return UploadBytesToCache(ctx, cache, rspb.CacheType_CAS, instanceName, reader)
 }
 
 func UploadProtoToCAS(ctx context.Context, cache interfaces.Cache, instanceName string, in proto.Message) (*repb.Digest, error) {
-	return uploadProtoToCache(ctx, cache, resource.CacheType_CAS, instanceName, in)
+	return uploadProtoToCache(ctx, cache, rspb.CacheType_CAS, instanceName, in)
 }
 
 func SupportsCompression(ctx context.Context, capabilitiesClient repb.CapabilitiesClient) (bool, error) {
@@ -442,7 +442,7 @@ func (ul *BatchCASUploader) Upload(d *repb.Digest, rsc io.ReadSeekCloser) error 
 	}
 
 	if d.GetSizeBytes() > gRPCMaxSize {
-		resourceName := digest.NewResourceName(d, ul.instanceName)
+		resourceName := digest.NewGenericResourceName(d, ul.instanceName)
 		resourceName.SetCompressor(compressor)
 
 		byteStreamClient := ul.env.GetByteStreamClient()
@@ -646,7 +646,7 @@ func uploadDir(ul *BatchCASUploader, dirPath string, visited []*repb.Directory) 
 }
 
 func UploadProtoToAC(ctx context.Context, cache interfaces.Cache, instanceName string, in proto.Message) (*repb.Digest, error) {
-	return uploadProtoToCache(ctx, cache, resource.CacheType_AC, instanceName, in)
+	return uploadProtoToCache(ctx, cache, rspb.CacheType_AC, instanceName, in)
 }
 
 func isExecutable(info os.FileInfo) bool {

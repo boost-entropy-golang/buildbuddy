@@ -1,6 +1,7 @@
 import React from "react";
 import Long from "long";
 
+import format from "../../../app/format/format";
 import rpcService from "../../../app/service/rpc_service";
 import capabilities from "../../../app/capabilities/capabilities";
 import Spinner from "../../../app/components/spinner/spinner";
@@ -43,14 +44,60 @@ const METRIC_OPTIONS: MetricOption[] = [
     metric: stat_filter.Metric.create({ invocation: stat_filter.InvocationMetricType.DURATION_USEC_INVOCATION_METRIC }),
   },
   {
+    name: "Cache download size",
+    metric: stat_filter.Metric.create({
+      invocation: stat_filter.InvocationMetricType.CAS_CACHE_DOWNLOAD_SIZE_INVOCATION_METRIC,
+    }),
+  },
+  {
+    name: "Cache download speed",
+    metric: stat_filter.Metric.create({
+      invocation: stat_filter.InvocationMetricType.CAS_CACHE_DOWNLOAD_SPEED_INVOCATION_METRIC,
+    }),
+  },
+  {
+    name: "Cache upload size",
+    metric: stat_filter.Metric.create({
+      invocation: stat_filter.InvocationMetricType.CAS_CACHE_UPLOAD_SIZE_INVOCATION_METRIC,
+    }),
+  },
+  {
+    name: "Cache upload speed",
+    metric: stat_filter.Metric.create({
+      invocation: stat_filter.InvocationMetricType.CAS_CACHE_UPLOAD_SPEED_INVOCATION_METRIC,
+    }),
+  },
+  {
     name: "CAS cache misses",
     metric: stat_filter.Metric.create({
       invocation: stat_filter.InvocationMetricType.CAS_CACHE_MISSES_INVOCATION_METRIC,
     }),
   },
   {
-    name: "Queue time",
+    name: "Execution queue time",
     metric: stat_filter.Metric.create({ execution: stat_filter.ExecutionMetricType.QUEUE_TIME_USEC_EXECUTION_METRIC }),
+  },
+  {
+    name: "Execution input download time",
+    metric: stat_filter.Metric.create({
+      execution: stat_filter.ExecutionMetricType.INPUT_DOWNLOAD_TIME_EXECUTION_METRIC,
+    }),
+  },
+  {
+    name: "Execution action execution time",
+    metric: stat_filter.Metric.create({
+      execution: stat_filter.ExecutionMetricType.REAL_EXECUTION_TIME_EXECUTION_METRIC,
+    }),
+  },
+  {
+    name: "Execution output upload time",
+    metric: stat_filter.Metric.create({
+      execution: stat_filter.ExecutionMetricType.OUTPUT_UPLOAD_TIME_EXECUTION_METRIC,
+    }),
+  },
+  {
+    name: "Executor peak memory usage",
+    metric: stat_filter.Metric.create({ execution: stat_filter.ExecutionMetricType.PEAK_MEMORY_EXECUTION_METRIC }),
   },
 ];
 
@@ -82,7 +129,12 @@ export default class DrilldownPageComponent extends React.Component<Props, State
     if (isExecutionMetric(this.selectedMetric.metric)) {
       switch (this.selectedMetric.metric.execution) {
         case stat_filter.ExecutionMetricType.QUEUE_TIME_USEC_EXECUTION_METRIC:
+        case stat_filter.ExecutionMetricType.INPUT_DOWNLOAD_TIME_EXECUTION_METRIC:
+        case stat_filter.ExecutionMetricType.REAL_EXECUTION_TIME_EXECUTION_METRIC:
+        case stat_filter.ExecutionMetricType.OUTPUT_UPLOAD_TIME_EXECUTION_METRIC:
           return (v / 1000000).toFixed(2) + "s";
+        case stat_filter.ExecutionMetricType.PEAK_MEMORY_EXECUTION_METRIC:
+          return format.bytes(v);
         default:
           return v.toString();
       }
@@ -90,6 +142,12 @@ export default class DrilldownPageComponent extends React.Component<Props, State
       switch (this.selectedMetric.metric.invocation) {
         case stat_filter.InvocationMetricType.DURATION_USEC_INVOCATION_METRIC:
           return (v / 1000000).toFixed(2) + "s";
+        case stat_filter.InvocationMetricType.CAS_CACHE_DOWNLOAD_SPEED_INVOCATION_METRIC:
+        case stat_filter.InvocationMetricType.CAS_CACHE_UPLOAD_SPEED_INVOCATION_METRIC:
+          return format.bitsPerSecond(8 * v);
+        case stat_filter.InvocationMetricType.CAS_CACHE_DOWNLOAD_SIZE_INVOCATION_METRIC:
+        case stat_filter.InvocationMetricType.CAS_CACHE_UPLOAD_SIZE_INVOCATION_METRIC:
+          return format.bytes(v);
         case stat_filter.InvocationMetricType.CAS_CACHE_MISSES_INVOCATION_METRIC:
         default:
           return v.toString();
@@ -130,7 +188,7 @@ export default class DrilldownPageComponent extends React.Component<Props, State
       branchName: filterParams.branch,
       commitSha: filterParams.commit,
       command: filterParams.command,
-
+      pattern: filterParams.pattern,
       role: filterParams.role,
       updatedBefore: filterParams.updatedBefore,
       updatedAfter: filterParams.updatedAfter,
@@ -152,7 +210,7 @@ export default class DrilldownPageComponent extends React.Component<Props, State
     if (!this.props.user?.selectedGroup || isExecutionMetric(this.selectedMetric.metric)) {
       return;
     }
-    this.setState({ loadingInvocations: true, invocationsFailed: false });
+    this.setState({ loadingInvocations: true, invocationsFailed: false, invocationsData: undefined });
     const filterParams = getProtoFilterParams(this.props.search);
     let request = new invocation.SearchInvocationRequest({
       query: new invocation.InvocationQuery({
@@ -162,6 +220,7 @@ export default class DrilldownPageComponent extends React.Component<Props, State
         branchName: filterParams.branch,
         commitSha: filterParams.commit,
         command: filterParams.command,
+        pattern: filterParams.pattern,
         minimumDuration: filterParams.minimumDuration,
         maximumDuration: filterParams.maximumDuration,
         groupId: this.props.user.selectedGroup.id,
@@ -203,6 +262,7 @@ export default class DrilldownPageComponent extends React.Component<Props, State
       branchName: filterParams.branch,
       commitSha: filterParams.commit,
       command: filterParams.command,
+      pattern: filterParams.pattern,
       role: filterParams.role,
       updatedBefore: filterParams.updatedBefore,
       updatedAfter: filterParams.updatedAfter,
@@ -266,6 +326,11 @@ export default class DrilldownPageComponent extends React.Component<Props, State
         return;
       case invocation.AggType.BRANCH_AGGREGATION_TYPE:
         router.setQueryParam("branch", e.activeLabel);
+        return;
+      case invocation.AggType.PATTERN_AGGREGATION_TYPE:
+        if (capabilities.config.patternFilterEnabled) {
+          router.setQueryParam("pattern", e.activeLabel);
+        }
         return;
       case invocation.AggType.GROUP_ID_AGGREGATION_TYPE:
       case invocation.AggType.DATE_AGGREGATION_TYPE:
@@ -403,39 +468,45 @@ export default class DrilldownPageComponent extends React.Component<Props, State
                     <div className="container nopadding-dense">
                       {!this.state.loadingDrilldowns &&
                         this.state.drilldownData &&
-                        this.state.drilldownData.chart.map((chart) => (
-                          <div className="drilldown-page-dd-chart">
-                            <div className="drilldown-page-dd-chart-title">
-                              {this.formatAggType(chart.drilldownDimension)}
-                            </div>
-                            <BarChart
-                              width={300}
-                              height={200}
-                              data={chart.entry}
-                              onClick={this.handleBarClick.bind(this, chart.drilldownDimension)}>
-                              <CartesianGrid strokeDasharray="3 3" />
-                              <XAxis interval="preserveStart" dataKey={(entry: stats.DrilldownEntry) => entry.label} />
-                              <Tooltip
-                                content={this.renderCustomTooltip.bind(
-                                  this,
-                                  this.formatAggType(chart.drilldownDimension)
-                                )}
-                              />
-                              <Bar
-                                dataKey={(entry: stats.DrilldownEntry) =>
-                                  +entry.baseValue / +(this.state.drilldownData?.totalInBase || 1)
-                                }
-                                fill="#8884d8"
-                              />
-                              <Bar
-                                dataKey={(entry: stats.DrilldownEntry) =>
-                                  +entry.selectionValue / +(this.state.drilldownData?.totalInSelection || 1)
-                                }
-                                fill="#82ca9d"
-                              />
-                            </BarChart>
-                          </div>
-                        ))}
+                        this.state.drilldownData.chart.map(
+                          (chart) =>
+                            chart.entry.length > 1 && (
+                              <div className="drilldown-page-dd-chart">
+                                <div className="drilldown-page-dd-chart-title">
+                                  {this.formatAggType(chart.drilldownDimension)}
+                                </div>
+                                <BarChart
+                                  width={300}
+                                  height={200}
+                                  data={chart.entry}
+                                  onClick={this.handleBarClick.bind(this, chart.drilldownDimension)}>
+                                  <CartesianGrid strokeDasharray="3 3" />
+                                  <XAxis
+                                    interval="preserveStart"
+                                    dataKey={(entry: stats.DrilldownEntry) => entry.label}
+                                  />
+                                  <Tooltip
+                                    content={this.renderCustomTooltip.bind(
+                                      this,
+                                      this.formatAggType(chart.drilldownDimension)
+                                    )}
+                                  />
+                                  <Bar
+                                    dataKey={(entry: stats.DrilldownEntry) =>
+                                      +entry.baseValue / +(this.state.drilldownData?.totalInBase || 1)
+                                    }
+                                    fill="#8884d8"
+                                  />
+                                  <Bar
+                                    dataKey={(entry: stats.DrilldownEntry) =>
+                                      +entry.selectionValue / +(this.state.drilldownData?.totalInSelection || 1)
+                                    }
+                                    fill="#82ca9d"
+                                  />
+                                </BarChart>
+                              </div>
+                            )
+                        )}
                     </div>
                   )}
                 </div>
