@@ -20,6 +20,7 @@ import (
 	"github.com/buildbuddy-io/buildbuddy/server/util/grpc_client"
 	"github.com/buildbuddy-io/buildbuddy/server/util/healthcheck"
 	"github.com/buildbuddy-io/buildbuddy/server/util/log"
+	"github.com/buildbuddy-io/buildbuddy/server/util/status"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/protobuf/encoding/prototext"
 
@@ -79,6 +80,18 @@ func parseSnapshotID(in string) *repb.Digest {
 	}
 }
 
+func getActionAndCommand(ctx context.Context, bsClient bspb.ByteStreamClient, actionDigest *digest.ResourceName) (*repb.Action, *repb.Command, error) {
+	action := &repb.Action{}
+	if err := cachetools.GetBlobAsProto(ctx, bsClient, actionDigest, action); err != nil {
+		return nil, nil, status.WrapErrorf(err, "could not fetch action")
+	}
+	cmd := &repb.Command{}
+	if err := cachetools.GetBlobAsProto(ctx, bsClient, digest.NewResourceName(action.GetCommandDigest(), actionDigest.GetInstanceName(), rspb.CacheType_CAS), cmd); err != nil {
+		return nil, nil, status.WrapErrorf(err, "could not fetch command")
+	}
+	return action, cmd, nil
+}
+
 func main() {
 	flag.Parse()
 
@@ -120,7 +133,7 @@ func main() {
 	var c *firecracker.FirecrackerContainer
 	auth := container.NewImageCacheAuthenticator(container.ImageCacheAuthenticatorOpts{})
 	if *snapshotID != "" {
-		c, err = firecracker.NewContainer(env, auth, opts)
+		c, err = firecracker.NewContainer(ctx, env, auth, opts)
 		if err != nil {
 			log.Fatalf("Error creating container: %s", err)
 		}
@@ -128,7 +141,7 @@ func main() {
 			log.Fatalf("Error loading snapshot: %s", err)
 		}
 	} else {
-		c, err = firecracker.NewContainer(env, auth, opts)
+		c, err = firecracker.NewContainer(ctx, env, auth, opts)
 		if err != nil {
 			log.Fatalf("Error creating container: %s", err)
 		}
@@ -156,14 +169,19 @@ func main() {
 	}()
 
 	if *actionDigest != "" {
-		d, err := digest.Parse(*actionDigest)
+		actionInstanceDigest, err := digest.ParseDownloadResourceName(*actionDigest)
 		if err != nil {
 			log.Fatalf("Error parsing action digest %q: %s", *actionDigest, err)
 		}
 
-		actionInstanceDigest := digest.NewResourceName(d, *remoteInstanceName, rspb.CacheType_CAS)
+		// For backwards compatibility with the existing behavior of this code:
+		// If the parsed remote_instance_name is empty, and the flag instance
+		// name is set; override the instance name of `rn`.
+		if actionInstanceDigest.GetInstanceName() == "" && *remoteInstanceName != "" {
+			actionInstanceDigest = digest.NewResourceName(actionInstanceDigest.GetDigest(), *remoteInstanceName, actionInstanceDigest.GetCacheType())
+		}
 
-		action, cmd, err := cachetools.GetActionAndCommand(ctx, env.GetByteStreamClient(), actionInstanceDigest)
+		action, cmd, err := getActionAndCommand(ctx, env.GetByteStreamClient(), actionInstanceDigest)
 		if err != nil {
 			log.Fatal(err.Error())
 		}
