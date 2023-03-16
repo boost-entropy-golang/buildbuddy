@@ -70,17 +70,35 @@ go_binary(
     embed = [":executor_lib"],
 )
 
+# Executor expects "firecracker" and "jailer" binaries in $PATH,
+# and they can't be symlinks (otherwise the VM will not start).
+# Rename the firecracker/jailer binaries so that we can place
+# those into /usr/bin as regular files.
+
+genrule(
+    name = "firecracker_rename",
+    srcs = ["@com_github_firecracker_microvm_firecracker-v1.1.1-x86_64//:firecracker-v1.1.1-x86_64"],
+    outs = ["firecracker"],
+    cmd = "cp $(SRCS) $@",
+)
+
+genrule(
+    name = "jailer_rename",
+    srcs = ["@com_github_firecracker_microvm_firecracker-v1.1.1-x86_64//:jailer-v1.1.1-x86_64"],
+    outs = ["jailer"],
+    cmd = "cp $(SRCS) $@",
+)
+
 container_layer(
     name = "executor_tools",
     directory = "/usr/bin",
     files = [
-        "@com_github_containerd_stargz_snapshotter-v0.11.4-linux-amd64//:stargz-store",
-        "@com_github_firecracker_microvm_firecracker-v1.1.1-x86_64//:firecracker-v1.1.1-x86_64",
-        "@com_github_firecracker_microvm_firecracker-v1.1.1-x86_64//:jailer-v1.1.1-x86_64",
+        ":firecracker",
+        ":jailer",
+        "@com_github_iain_macdonald_soci_snapshotter-soci-store-v0.1-linux-amd64//file:soci-store-v0.1-linux-amd64",
     ],
     symlinks = {
-        "/usr/bin/firecracker": "/usr/bin/firecracker-v1.1.1-x86_64",
-        "/usr/bin/jailer": "/usr/bin/jailer-v1.1.1-x86_64",
+        "/usr/bin/soci-store": "/usr/bin/soci-store-v0.1-linux-amd64",
     },
 )
 
@@ -97,6 +115,8 @@ container_image(
 
 # Build a docker image similar to the go_binary above, but use the "go_image"
 # rule from @io_bazel_rules_docker instead, which creates a docker image.
+#
+# This target can be run locally with enterprise/tools/run_executor_image.sh
 go_image(
     name = "executor_image",
     base = ":base_image",
