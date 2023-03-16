@@ -1009,7 +1009,7 @@ func uploadRunfiles(ctx context.Context, workspaceRoot, runfilesDir string) ([]*
 	missingDigests := rsp.GetMissingBlobDigests()
 
 	eg, ctx := errgroup.WithContext(ctx)
-	u := cachetools.NewBatchCASUploader(ctx, env, *remoteInstanceName)
+	u := cachetools.NewBatchCASUploader(ctx, env, *remoteInstanceName, repb.DigestFunction_SHA256)
 
 	for _, d := range missingDigests {
 		runfilePath, ok := fileDigestMap[digest.NewKey(d)]
@@ -1038,7 +1038,7 @@ func uploadRunfiles(ctx context.Context, workspaceRoot, runfilesDir string) ([]*
 		placePath := placePath
 		realPath := realPath
 		eg.Go(func() error {
-			_, td, err := cachetools.UploadDirectoryToCAS(ctx, env, *remoteInstanceName, realPath)
+			_, td, err := cachetools.UploadDirectoryToCAS(ctx, env, *remoteInstanceName, repb.DigestFunction_SHA256, realPath)
 			if err != nil {
 				return err
 			}
@@ -1579,6 +1579,7 @@ func writeBazelrc(path, invocationID string) error {
 	}...)
 	if *cacheBackend != "" {
 		lines = append(lines, "build:buildbuddy_remote_cache --remote_cache="+*cacheBackend)
+		lines = append(lines, "build:buildbuddy_experimental_remote_downloader --experimental_remote_downloader="+*cacheBackend)
 	}
 	if *rbeBackend != "" {
 		lines = append(lines, "build:buildbuddy_remote_executor --remote_executor="+*rbeBackend)
