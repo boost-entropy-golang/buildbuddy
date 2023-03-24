@@ -58,6 +58,7 @@
 
 .heatmap-svg {
   user-select: none;
+  cursor: pointer;
 }
 
 .heatmap-zoom {
@@ -81,11 +82,11 @@
 }
 
 .drilldown-page-tooltip-base {
-  color: #8884d8;
+  color: #8782bc;
 }
 
 .drilldown-page-tooltip-selected {
-  color: #82ca9d;
+  color: #4daf62;
 }
 
 .drilldown-page-zoom-summary {

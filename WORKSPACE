@@ -135,6 +135,8 @@ http_archive(
 
 http_archive(
     name = "com_google_protobuf",
+    patch_args = ["-p1"],
+    patches = ["//buildpatches:protobuf.patch"],
     sha256 = "2118051b4fb3814d59d258533a4e35452934b1ddb41230261c9543384cbb4dfc",
     strip_prefix = "protobuf-3.22.2",
     urls = ["https://github.com/protocolbuffers/protobuf/archive/v3.22.2.tar.gz"],
@@ -290,6 +292,7 @@ dockerfile_image(
 )
 
 # BuildBuddy Toolchain
+# Keep up-to-date with docs/rbe-setup.md and docs/rbe-github-actions.md
 
 http_archive(
     name = "io_buildbuddy_buildbuddy_toolchain",
