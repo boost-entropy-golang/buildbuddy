@@ -463,8 +463,7 @@ type WorkflowService interface {
 }
 
 type GitHubApp interface {
-	// TODO(bduffany): Add webhook handler, install handler, repo management
-	// API, installation management API.
+	// TODO(bduffany): Add webhook handler and repo management API
 
 	LinkGitHubAppInstallation(context.Context, *ghpb.LinkAppInstallationRequest) (*ghpb.LinkAppInstallationResponse, error)
 	GetGitHubAppInstallations(context.Context, *ghpb.GetAppInstallationsRequest) (*ghpb.GetAppInstallationsResponse, error)
@@ -1048,4 +1047,18 @@ type ExecutionCollector interface {
 // SuggestionService enables fetching of suggestions.
 type SuggestionService interface {
 	GetSuggestion(ctx context.Context, req *supb.GetSuggestionRequest) (*supb.GetSuggestionResponse, error)
+}
+
+type Encryptor interface {
+	CommittedWriteCloser
+	Metadata() *rfpb.EncryptionMetadata
+}
+
+type Decryptor interface {
+	io.ReadCloser
+}
+
+type Crypter interface {
+	NewEncryptor(ctx context.Context, d *repb.Digest, w CommittedWriteCloser) (Encryptor, error)
+	NewDecryptor(ctx context.Context, d *repb.Digest, r io.ReadCloser, em *rfpb.EncryptionMetadata) (Decryptor, error)
 }

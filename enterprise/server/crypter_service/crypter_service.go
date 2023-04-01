@@ -1,19 +1,26 @@
 package crypter_service
 
 import (
+	"context"
 	"crypto/cipher"
 	"crypto/rand"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
 
 	"github.com/buildbuddy-io/buildbuddy/server/environment"
 	"github.com/buildbuddy-io/buildbuddy/server/interfaces"
+	"github.com/buildbuddy-io/buildbuddy/server/remote_cache/digest"
 	"github.com/buildbuddy-io/buildbuddy/server/tables"
 	"github.com/buildbuddy-io/buildbuddy/server/util/status"
 	"golang.org/x/crypto/chacha20poly1305"
 	"golang.org/x/crypto/hkdf"
+	"gorm.io/gorm"
+
+	rfpb "github.com/buildbuddy-io/buildbuddy/proto/raft"
+	repb "github.com/buildbuddy-io/buildbuddy/proto/remote_execution"
 )
 
 const (
@@ -25,11 +32,15 @@ const (
 )
 
 // TODO(vadim): pool buffers to reduce allocations
-// TODO(vadim): include file digest in authentication header
 type Crypter struct {
 	auth interfaces.Authenticator
 	dbh  interfaces.DBHandle
 	kms  interfaces.KMS
+}
+
+func Register(env environment.Env) error {
+	env.SetCrypter(New(env))
+	return nil
 }
 
 func New(env environment.Env) *Crypter {
@@ -43,6 +54,7 @@ func New(env environment.Env) *Crypter {
 type Encryptor struct {
 	key          *tables.EncryptionKeyVersion
 	ciph         cipher.AEAD
+	digest       *repb.Digest
 	groupID      string
 	w            interfaces.CommittedWriteCloser
 	wroteHeader  bool
@@ -59,8 +71,8 @@ type Encryptor struct {
 	bufCap int
 }
 
-func makeChunkAuthHeader(chunkIndex uint32, groupID string) []byte {
-	return []byte(strings.Join([]string{fmt.Sprint(chunkIndex), groupID}, ","))
+func makeChunkAuthHeader(chunkIndex uint32, d *repb.Digest, groupID string) []byte {
+	return []byte(strings.Join([]string{fmt.Sprint(chunkIndex), digest.String(d), groupID}, ","))
 }
 
 func (e *Encryptor) flushBlock() error {
@@ -76,13 +88,20 @@ func (e *Encryptor) flushBlock() error {
 	}
 
 	e.chunkCounter++
-	chunkAuth := makeChunkAuthHeader(e.chunkCounter, e.groupID)
+	chunkAuth := makeChunkAuthHeader(e.chunkCounter, e.digest, e.groupID)
 	ct := e.ciph.Seal(e.buf[:0], e.nonceBuf, e.buf[:e.bufIdx], chunkAuth)
 	if _, err := e.w.Write(ct); err != nil {
 		return err
 	}
 	e.bufIdx = 0
 	return nil
+}
+
+func (e *Encryptor) Metadata() *rfpb.EncryptionMetadata {
+	return &rfpb.EncryptionMetadata{
+		EncryptionKeyId: e.key.EncryptionKeyID,
+		Version:         int64(e.key.Version),
+	}
 }
 
 func (e *Encryptor) Write(p []byte) (n int, err error) {
@@ -128,6 +147,7 @@ func (e *Encryptor) Close() error {
 
 type Decryptor struct {
 	ciph            cipher.AEAD
+	digest          *repb.Digest
 	groupID         string
 	r               io.ReadCloser
 	headerValidated bool
@@ -171,7 +191,7 @@ func (d *Decryptor) Read(p []byte) (n int, err error) {
 		}
 
 		d.chunkCounter++
-		chunkAuth := makeChunkAuthHeader(d.chunkCounter, d.groupID)
+		chunkAuth := makeChunkAuthHeader(d.chunkCounter, d.digest, d.groupID)
 		nonce := d.buf[:nonceSize]
 		ciphertext := d.buf[nonceSize:n]
 
@@ -237,7 +257,7 @@ func (c *Crypter) getCipher(key *tables.EncryptionKeyVersion) (cipher.AEAD, erro
 	return e, nil
 }
 
-func (c *Crypter) newEncryptorWithKey(w interfaces.CommittedWriteCloser, groupID string, key *tables.EncryptionKeyVersion, chunkSize int) (*Encryptor, error) {
+func (c *Crypter) newEncryptorWithKey(digest *repb.Digest, w interfaces.CommittedWriteCloser, groupID string, key *tables.EncryptionKeyVersion, chunkSize int) (*Encryptor, error) {
 	ciph, err := c.getCipher(key)
 	if err != nil {
 		return nil, err
@@ -245,6 +265,7 @@ func (c *Crypter) newEncryptorWithKey(w interfaces.CommittedWriteCloser, groupID
 	return &Encryptor{
 		key:      key,
 		ciph:     ciph,
+		digest:   digest,
 		groupID:  groupID,
 		w:        w,
 		nonceBuf: make([]byte, nonceSize),
@@ -255,15 +276,57 @@ func (c *Crypter) newEncryptorWithKey(w interfaces.CommittedWriteCloser, groupID
 	}, nil
 }
 
-func (c *Crypter) newDecryptorWithKey(r io.ReadCloser, groupID string, key *tables.EncryptionKeyVersion, chunkSize int) (*Decryptor, error) {
+func (c *Crypter) NewEncryptor(ctx context.Context, digest *repb.Digest, w interfaces.CommittedWriteCloser) (interfaces.Encryptor, error) {
+	u, err := c.auth.AuthenticatedUser(ctx)
+	if err != nil {
+		return nil, err
+	}
+	ekv := &tables.EncryptionKeyVersion{}
+	query := `
+		SELECT * FROM EncryptionKeyVersions ekv
+		JOIN EncryptionKeys ek ON ekv.encryption_key_id = ek.encryption_key_id
+		WHERE ek.group_id = ?
+	`
+	if err := c.dbh.DB(ctx).Raw(query, u.GetGroupID()).Take(ekv).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, status.NotFoundError("no encryption key available")
+		}
+		return nil, err
+	}
+	return c.newEncryptorWithKey(digest, w, u.GetGroupID(), ekv, plainTextChunkSize)
+}
+
+func (c *Crypter) newDecryptorWithKey(digest *repb.Digest, r io.ReadCloser, groupID string, key *tables.EncryptionKeyVersion, chunkSize int) (*Decryptor, error) {
 	ciph, err := c.getCipher(key)
 	if err != nil {
 		return nil, err
 	}
 	return &Decryptor{
 		ciph:    ciph,
+		digest:  digest,
 		groupID: groupID,
 		r:       r,
 		buf:     make([]byte, chunkSize+encryptedChunkOverhead),
 	}, nil
+}
+
+func (c *Crypter) NewDecryptor(ctx context.Context, digest *repb.Digest, r io.ReadCloser, em *rfpb.EncryptionMetadata) (interfaces.Decryptor, error) {
+	u, err := c.auth.AuthenticatedUser(ctx)
+	if err != nil {
+		return nil, err
+	}
+	ekv := &tables.EncryptionKeyVersion{}
+	query := `
+		SELECT * FROM EncryptionKeyVersions ekv
+		JOIN EncryptionKeys ek ON ekv.encryption_key_id = ek.encryption_key_id
+		WHERE ek.group_id = ? 
+        AND ekv.encryption_key_id = ? AND ekv.version = ?
+	`
+	if err := c.dbh.DB(ctx).Raw(query, u.GetGroupID(), em.GetEncryptionKeyId(), em.GetVersion()).Take(ekv).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, status.NotFoundError("no encryption key available")
+		}
+		return nil, err
+	}
+	return c.newDecryptorWithKey(digest, r, u.GetGroupID(), ekv, plainTextChunkSize)
 }
