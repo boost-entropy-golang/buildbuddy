@@ -718,6 +718,16 @@ func (p *PebbleCache) migrateData(quitChan chan struct{}) error {
 			if err != nil {
 				return err
 			}
+			// Don't do anything if the key is already gone, it could have been
+			// already deleted by eviction.
+			_, closer, err := db.Get(iter.Key())
+			if err == pebble.ErrNotFound {
+				return nil
+			}
+			if err != nil {
+				return status.UnknownErrorf("could not read key to be migrated: %s", err)
+			}
+			_ = closer.Close()
 			if err := db.Set(keyBytes, valBytes, pebble.NoSync); err != nil {
 				return status.UnknownErrorf("could not write migrated key: %s", err)
 			}
@@ -2238,7 +2248,9 @@ func (e *partitionEvictor) refresh(ctx context.Context, key *evictionKey) (bool,
 
 	md, err := readFileMetadata(db, key.bytes)
 	if err != nil {
-		log.Warningf("could not refresh atime for %q: %s", key.String(), err)
+		if !status.IsNotFoundError(err) {
+			log.Warningf("could not refresh atime for %q: %s", key.String(), err)
+		}
 		return true, time.Time{}, nil
 	}
 	atime := time.UnixMicro(md.GetLastAccessUsec())
