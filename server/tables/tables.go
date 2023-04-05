@@ -208,6 +208,8 @@ type Group struct {
 	// executors.
 	UseGroupOwnedExecutors *bool `gorm:"type:tinyint(1)"`
 
+	CacheEncryptionEnabled bool `gorm:"not null;default:0;type:bool"`
+
 	// The SAML IDP Metadata URL for this group.
 	SamlIdpMetadataUrl *string
 
