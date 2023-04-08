@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -136,7 +137,7 @@ func legacyClientSecret() string {
 }
 
 func IsLegacyOAuthAppEnabled() bool {
-	if *clientID == "" && legacyClientSecret() == "" && *accessToken == "" {
+	if *clientID == "" || legacyClientSecret() == "" {
 		return false
 	}
 	return true
@@ -393,7 +394,7 @@ func (c *GithubClient) CreateStatus(ctx context.Context, ownerRepo string, commi
 
 	var err error
 	c.tokenLookup.Do(func() {
-		err = c.populateTokenIfNecessary(ctx)
+		err = c.populateTokenIfNecessary(ctx, ownerRepo)
 	})
 	if err != nil {
 		return nil
@@ -431,13 +432,38 @@ func (c *GithubClient) CreateStatus(ctx context.Context, ownerRepo string, commi
 	return nil
 }
 
-func (c *GithubClient) populateTokenIfNecessary(ctx context.Context) error {
-	if c.githubToken != "" || !IsLegacyOAuthAppEnabled() {
+func (c *GithubClient) getAppInstallationToken(ctx context.Context, ownerRepo string) (string, error) {
+	app := c.env.GetGitHubApp()
+	if app == nil {
+		return "", nil
+	}
+	parts := strings.Split(ownerRepo, "/")
+	if len(parts) != 2 {
+		return "", status.InvalidArgumentErrorf("invalid owner/repo %q", ownerRepo)
+	}
+	return app.GetInstallationToken(ctx, parts[0])
+}
+
+func (c *GithubClient) populateTokenIfNecessary(ctx context.Context, ownerRepo string) error {
+	if c.githubToken != "" {
+		return nil
+	}
+
+	installationToken, err := c.getAppInstallationToken(ctx, ownerRepo)
+	if err != nil {
+		log.Debug("Failed to look up app installation token; falling back to legacy OAuth lookup.")
+	}
+	if installationToken != "" {
+		c.githubToken = installationToken
 		return nil
 	}
 
 	if *accessToken != "" {
 		c.githubToken = *accessToken
+		return nil
+	}
+
+	if !IsLegacyOAuthAppEnabled() {
 		return nil
 	}
 
