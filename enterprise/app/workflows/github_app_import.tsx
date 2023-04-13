@@ -161,7 +161,7 @@ export default class GitHubAppImport extends React.Component<GitHubAppImportProp
       .linkGitHubRepo(linkRequest)
       .then(() => {
         alertService.success("Successfully linked " + repoUrl);
-        this.fetch();
+        router.navigateTo("/workflows/");
       })
       .catch((e) => errorService.handleError(e))
       .finally(() => this.setState({ linkRequest: null, linkLoading: false }));
@@ -231,7 +231,7 @@ export default class GitHubAppImport extends React.Component<GitHubAppImportProp
         )}
         <div className="create-other-container">
           <a className="create-other clickable" href={this.appInstallURL()}>
-            Configure BuildBuddy app on GitHub <ExternalLink className="icon" />
+            Don't see a repo in this list? Configure repo permissions <ExternalLink className="icon" />
           </a>
         </div>
       </>
