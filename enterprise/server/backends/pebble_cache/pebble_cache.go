@@ -670,7 +670,6 @@ func (p *PebbleCache) migrateData(quitChan chan struct{}) error {
 			return nil
 		default:
 		}
-		_ = limiter.Wait(p.env.GetServerContext())
 
 		if time.Since(lastStatusUpdate) > 10*time.Second {
 			log.Infof("Pebble Cache: data migration progress: saw %d keys, migrated %d to version: %d in %s. Current key: %q", keysSeen, keysMigrated, maxVersion, time.Since(migrationStart), string(iter.Key()))
@@ -712,6 +711,8 @@ func (p *PebbleCache) migrateData(quitChan chan struct{}) error {
 		if version < minVersion {
 			minVersion = version
 		}
+
+		_ = limiter.Wait(p.env.GetServerContext())
 
 		moveKey := func() error {
 			keyBytes, err := key.Bytes(version)
@@ -2473,9 +2474,15 @@ func (p *PebbleCache) reader(ctx context.Context, resource *rspb.ResourceName, k
 		return nil, status.FailedPreconditionError("passthrough compression does not support offset/limit")
 	}
 
-	shouldDecrypt, err := p.encryptionEnabled(ctx, fileMetadata.GetFileRecord().GetIsolation().GetPartitionId())
-	if err != nil {
-		return nil, err
+	shouldDecrypt := fileMetadata.EncryptionMetadata != nil
+	if shouldDecrypt {
+		encryptionEnabled, err := p.encryptionEnabled(ctx, fileMetadata.GetFileRecord().GetIsolation().GetPartitionId())
+		if err != nil {
+			return nil, err
+		}
+		if !encryptionEnabled {
+			return nil, status.NotFoundErrorf("decryption key not available")
+		}
 	}
 
 	// If the data is stored uncompressed/unencrypted, we can use the offset/limit directly
