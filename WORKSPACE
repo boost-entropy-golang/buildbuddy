@@ -259,9 +259,9 @@ load("@io_bazel_rules_docker//container:container.bzl", "container_pull")
 
 container_pull(
     name = "buildbuddy_go_image_base",
-    digest = "sha256:34e96e21516698913035a62ef1ce484d91184de8a44209a33c7e134547e20dee",
+    digest = "sha256:3172df37ef8caa768ce74ebbc7f0e2b6a2641d3b35d18659d36f3815e30fe620",
     registry = "gcr.io",
-    repository = "distroless/base-debian11",
+    repository = "distroless/cc-debian11",
 )
 
 # Base image that can be used to build images that are capable of running the Bazel binary.
@@ -332,8 +332,8 @@ http_archive(
 # protoc-gen-protobufjs (for .proto to .js codegen)
 http_archive(
     name = "com_github_buildbuddy_io_protoc_gen_protobufjs",
-    sha256 = "387929c3d9606c51f68f9e729107ba211684d8a024b92b532fe42f0c7af9fb6b",
-    urls = ["https://github.com/buildbuddy-io/protoc-gen-protobufjs/releases/download/v0.0.7/protoc-gen-protobufjs-v0.0.7.tar.gz"],
+    sha256 = "9a43cb8f5353fa6e0858aa694d34e55e395c64703a7370cc116bd4501c46b622",
+    urls = ["https://github.com/buildbuddy-io/protoc-gen-protobufjs/releases/download/v0.0.8/protoc-gen-protobufjs-v0.0.8.tar.gz"],
 )
 
 # esbuild (for bundling JS)
