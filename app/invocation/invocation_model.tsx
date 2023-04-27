@@ -163,6 +163,11 @@ export default class InvocationModel {
         if (buildEvent.unstructuredCommandLine) {
           model.unstructuredCommandLine = buildEvent.unstructuredCommandLine as build_event_stream.UnstructuredCommandLine;
         }
+        if (buildEvent.buildMetadata) {
+          for (const [key, value] of Object.entries(buildEvent.buildMetadata.metadata || {})) {
+            model.buildMetadataMap.set(key, value);
+          }
+        }
       }
     }
     model.rootCauseTargetLabels = new Set(
@@ -277,6 +282,10 @@ export default class InvocationModel {
     return this.invocations.find(() => true)?.invocationId;
   }
 
+  getAttempt() {
+    return this.invocations.find(() => true)?.attempt;
+  }
+
   getHost() {
     return this.invocations.find(() => true)?.host || this.workspaceStatusMap.get("BUILD_HOST") || "Unknown host";
   }
@@ -339,6 +348,16 @@ export default class InvocationModel {
 
   getBranchName() {
     return this.getGithubBranch();
+  }
+
+  getForkRepoURL(): string | undefined {
+    return this.buildMetadataMap.get("FORK_REPO_URL");
+  }
+
+  getPullRequestNumber(): number | undefined {
+    return this.buildMetadataMap.get("PULL_REQUEST_NUMBER")
+      ? Number(this.buildMetadataMap.get("PULL_REQUEST_NUMBER"))
+      : undefined;
   }
 
   getGithubUser() {
