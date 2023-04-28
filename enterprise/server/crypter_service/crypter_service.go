@@ -301,7 +301,7 @@ func (c *keyCache) refreshKey(ctx context.Context, ck cacheKey, cacheError bool)
 		if cacheError {
 			c.cacheAdd(ck, &cacheEntry{
 				err:          lastErr,
-				expiresAfter: time.Now().Add(keyErrCacheTime),
+				expiresAfter: c.clock.Now().Add(keyErrCacheTime),
 			})
 		}
 		return nil, status.UnavailableErrorf("exhausted attempts to refresh key, last error: %s", lastErr)
@@ -371,6 +371,10 @@ type Crypter struct {
 }
 
 func Register(env environment.Env) error {
+	if env.GetKMS() == nil {
+		return nil
+	}
+
 	crypter, err := New(env, clockwork.NewRealClock())
 	if err != nil {
 		return err
