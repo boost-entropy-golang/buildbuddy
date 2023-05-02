@@ -217,6 +217,14 @@ func (m *v1ToV2Migrator) FromVersion() filestore.PebbleKeyVersion {
 func (m *v1ToV2Migrator) ToVersion() filestore.PebbleKeyVersion { return filestore.Version2 }
 func (m *v1ToV2Migrator) Migrate(val []byte) []byte             { return val }
 
+type v2ToV3Migrator struct{}
+
+func (m *v2ToV3Migrator) FromVersion() filestore.PebbleKeyVersion {
+	return filestore.Version2
+}
+func (m *v2ToV3Migrator) ToVersion() filestore.PebbleKeyVersion { return filestore.Version3 }
+func (m *v2ToV3Migrator) Migrate(val []byte) []byte             { return val }
+
 // Register creates a new PebbleCache from the configured flags and sets it in
 // the provided env.
 func Register(env environment.Env) error {
@@ -418,6 +426,10 @@ func NewPebbleCache(env environment.Env, opts *Options) (*PebbleCache, error) {
 		if pc.activeDatabaseVersion() >= filestore.Version2 {
 			// Migrate keys from 1->2.
 			pc.migrators = append(pc.migrators, &v1ToV2Migrator{})
+		}
+		if pc.activeDatabaseVersion() >= filestore.Version3 {
+			// Migrate keys from 2->3.
+			pc.migrators = append(pc.migrators, &v2ToV3Migrator{})
 		}
 	}
 
@@ -1206,6 +1218,20 @@ func (p *PebbleCache) makeFileRecord(ctx context.Context, r *rspb.ResourceName) 
 
 	groupID, partID := p.lookupGroupAndPartitionID(ctx, r.GetInstanceName())
 
+	encryptionEnabled, err := p.encryptionEnabled(ctx, partID)
+	if err != nil {
+		return nil, err
+	}
+
+	var encryption *rfpb.Encryption
+	if encryptionEnabled {
+		ak, err := p.env.GetCrypter().ActiveKey(ctx)
+		if err != nil {
+			return nil, status.UnavailableErrorf("encryption key not available: %s", err)
+		}
+		encryption = &rfpb.Encryption{KeyId: ak.GetEncryptionKeyId()}
+	}
+
 	return &rfpb.FileRecord{
 		Isolation: &rfpb.Isolation{
 			CacheType:          r.GetCacheType(),
@@ -1215,6 +1241,7 @@ func (p *PebbleCache) makeFileRecord(ctx context.Context, r *rspb.ResourceName) 
 		},
 		Digest:     r.GetDigest(),
 		Compressor: r.GetCompressor(),
+		Encryption: encryption,
 	}, nil
 }
 
@@ -1792,7 +1819,7 @@ func (p *PebbleCache) Writer(ctx context.Context, r *rspb.ResourceName) (interfa
 		ewc, err := p.env.GetCrypter().NewEncryptor(ctx, r.GetDigest(), wc)
 		if err != nil {
 			_ = wc.Close()
-			return nil, err
+			return nil, status.UnavailableErrorf("encryptor not available: %s", err)
 		}
 		encryptionMetadata = ewc.Metadata()
 		wc = ewc
@@ -2484,7 +2511,7 @@ func (p *PebbleCache) reader(ctx context.Context, iter *pebble.Iterator, r *rspb
 		if shouldDecrypt {
 			d, err := p.env.GetCrypter().NewDecryptor(ctx, r.GetDigest(), reader, fileMetadata.GetEncryptionMetadata())
 			if err != nil {
-				return nil, err
+				return nil, status.UnavailableErrorf("decryptor not available: %s", err)
 			}
 			reader = d
 		}
