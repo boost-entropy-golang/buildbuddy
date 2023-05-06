@@ -32,10 +32,10 @@ import (
 )
 
 var (
-	readFromOLAPDBEnabled          = flag.Bool("app.enable_read_from_olap_db", false, "If enabled, read from OLAP DB")
-	executionTrendsEnabled         = flag.Bool("app.enable_execution_trends", false, "If enabled, fill execution trend stats in GetTrendResponse")
-	invocationPercentilesEnabled   = flag.Bool("app.enable_invocation_stat_percentiles", false, "If enabled, provide percentile breakdowns for invocation stats in GetTrendResponse")
-	useTimezoneInHeatmapQueries    = flag.Bool("app.use_timezone_in_heatmap_queries", false, "If enabled, use timezone instead of 'timezone offset' to compute day boundaries in heatmap queries.")
+	readFromOLAPDBEnabled          = flag.Bool("app.enable_read_from_olap_db", true, "If enabled, read from OLAP DB")
+	executionTrendsEnabled         = flag.Bool("app.enable_execution_trends", true, "If enabled, fill execution trend stats in GetTrendResponse")
+	invocationPercentilesEnabled   = flag.Bool("app.enable_invocation_stat_percentiles", true, "If enabled, provide percentile breakdowns for invocation stats in GetTrendResponse")
+	useTimezoneInHeatmapQueries    = flag.Bool("app.use_timezone_in_heatmap_queries", true, "If enabled, use timezone instead of 'timezone offset' to compute day boundaries in heatmap queries.")
 	invocationSummaryAvailableUsec = flag.Int64("app.invocation_summary_available_usec", 0, "The timstamp when the invocation summary is available in the DB")
 )
 
@@ -81,11 +81,9 @@ func (i *InvocationStatService) getAggColumn(reqCtx *ctxpb.RequestContext, aggTy
 func (i *InvocationStatService) getTrendBasicQuery(timezoneOffsetMinutes int32) string {
 	q := ""
 	if i.isOLAPDBEnabled() {
-		q = fmt.Sprintf("SELECT %s as name,", i.olapdbh.DateFromUsecTimestamp("updated_at_usec", timezoneOffsetMinutes)) + `
-	    SUM(duration_usec) as total_build_time_usec,`
+		q = fmt.Sprintf("SELECT %s as name,", i.olapdbh.DateFromUsecTimestamp("updated_at_usec", timezoneOffsetMinutes))
 	} else {
-		q = fmt.Sprintf("SELECT %s as name,", i.dbh.DateFromUsecTimestamp("updated_at_usec", timezoneOffsetMinutes)) + `
-	    SUM(CASE WHEN duration_usec > 0 THEN duration_usec END) as total_build_time_usec,`
+		q = fmt.Sprintf("SELECT %s as name,", i.dbh.DateFromUsecTimestamp("updated_at_usec", timezoneOffsetMinutes))
 	}
 
 	// Insert quantiles stuff..
@@ -96,6 +94,7 @@ func (i *InvocationStatService) getTrendBasicQuery(timezoneOffsetMinutes int32) 
 
 	q = q + `
 	    COUNT(1) AS total_num_builds,
+	    SUM(CASE WHEN duration_usec > 0 THEN duration_usec END) as total_build_time_usec,
 	    SUM(CASE WHEN duration_usec > 0 THEN 1 ELSE 0 END) as completed_invocation_count,
 	    COUNT(DISTINCT user) as user_count,
 	    COUNT(DISTINCT commit_sha) as commit_count,
@@ -641,10 +640,13 @@ func (i *InvocationStatService) generateQueryInputs(ctx context.Context, table s
 		MetricArrayStr:         metricArrayStr}, nil
 }
 
-func getWhereClauseForHeatmapQuery(q *stpb.TrendQuery, reqCtx *ctxpb.RequestContext) (string, []interface{}, error) {
+func getWhereClauseForHeatmapQuery(m *sfpb.Metric, q *stpb.TrendQuery, reqCtx *ctxpb.RequestContext) (string, []interface{}, error) {
 	placeholderQuery := query_builder.NewQuery("")
 	if err := addWhereClauses(placeholderQuery, q, reqCtx, 0); err != nil {
 		return "", nil, err
+	}
+	if m.GetInvocation() == sfpb.InvocationMetricType_DURATION_USEC_INVOCATION_METRIC {
+		placeholderQuery.AddWhereClause("duration_usec > 0")
 	}
 	whereString, whereArgs := placeholderQuery.Build()
 	return whereString, whereArgs, nil
@@ -668,7 +670,7 @@ func (i *InvocationStatService) getHeatmapQueryAndBuckets(ctx context.Context, r
 	if err != nil {
 		return nil, err
 	}
-	whereClauseStr, whereClauseArgs, err := getWhereClauseForHeatmapQuery(req.GetQuery(), req.GetRequestContext())
+	whereClauseStr, whereClauseArgs, err := getWhereClauseForHeatmapQuery(req.GetMetric(), req.GetQuery(), req.GetRequestContext())
 	if err != nil {
 		return nil, err
 	}
