@@ -186,7 +186,7 @@ func createKey(t *testing.T, env environment.Env, clock clockwork.Clock, keyID, 
 
 	masterAEAD, err := kmsClient.FetchMasterKey()
 	require.NoError(t, err)
-	encMasterKeyPart, err := masterAEAD.Encrypt(masterKeyPart, nil)
+	encMasterKeyPart, err := masterAEAD.Encrypt(masterKeyPart, []byte(groupID))
 	require.NoError(t, err)
 
 	groupAEAD, err := kmsClient.FetchKey(groupKeyURI)
@@ -723,7 +723,7 @@ func TestConfigAPI(t *testing.T) {
 		RootDirectory: rootDir,
 		Partitions: []disk.Partition{
 			{ID: "default", MaxSizeBytes: cacheSizeBytes},
-			{ID: customPartID, MaxSizeBytes: cacheSizeBytes, EncryptionSupported: true},
+			{ID: customPartID, MaxSizeBytes: cacheSizeBytes},
 		},
 		PartitionMappings: []disk.PartitionMapping{
 			{GroupID: groupID, PartitionID: customPartID},

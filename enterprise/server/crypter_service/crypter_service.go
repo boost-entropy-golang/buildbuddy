@@ -207,7 +207,7 @@ func (c *keyCache) derivedKey(groupID string, key *tables.EncryptionKeyVersion) 
 		return nil, err
 	}
 
-	masterKeyPortion, err := bbmk.Decrypt(key.MasterEncryptedKey, nil)
+	masterKeyPortion, err := bbmk.Decrypt(key.MasterEncryptedKey, []byte(groupID))
 	if err != nil {
 		return nil, err
 	}
@@ -216,12 +216,13 @@ func (c *keyCache) derivedKey(groupID string, key *tables.EncryptionKeyVersion) 
 		return nil, err
 	}
 
-	ckSrc := make([]byte, len(masterKeyPortion)+len(groupKeyPortion))
+	ckSrc := make([]byte, 0, len(masterKeyPortion)+len(groupKeyPortion))
 	ckSrc = append(ckSrc, masterKeyPortion...)
 	ckSrc = append(ckSrc, groupKeyPortion...)
 
+	info := append([]byte{encryptedDataHeaderVersion}, []byte(groupID)...)
 	derivedKey := make([]byte, 32)
-	r := hkdf.Expand(sha256.New, ckSrc, nil)
+	r := hkdf.Expand(sha256.New, ckSrc, info)
 	n, err := r.Read(derivedKey)
 	if err != nil {
 		return nil, err
@@ -441,7 +442,7 @@ type Encryptor struct {
 }
 
 func makeChunkAuthHeader(chunkIndex uint32, d *repb.Digest, groupID string) []byte {
-	return []byte(strings.Join([]string{fmt.Sprint(chunkIndex), digest.String(d), groupID}, ","))
+	return []byte(strings.Join([]string{fmt.Sprint(encryptedDataHeaderVersion), fmt.Sprint(chunkIndex), digest.String(d), groupID}, ","))
 }
 
 func (e *Encryptor) flushBlock() error {
@@ -456,8 +457,8 @@ func (e *Encryptor) flushBlock() error {
 		return err
 	}
 
-	e.chunkCounter++
 	chunkAuth := makeChunkAuthHeader(e.chunkCounter, e.digest, e.groupID)
+	e.chunkCounter++
 	ct := e.ciph.Seal(e.buf[:0], e.nonceBuf, e.buf[:e.bufIdx], chunkAuth)
 	if _, err := e.w.Write(ct); err != nil {
 		return err
@@ -556,8 +557,8 @@ func (d *Decryptor) Read(p []byte) (n int, err error) {
 			return 0, status.InternalError("could not read nonce for chunk")
 		}
 
-		d.chunkCounter++
 		chunkAuth := makeChunkAuthHeader(d.chunkCounter, d.digest, d.groupID)
+		d.chunkCounter++
 		nonce := d.buf[:nonceSize]
 		ciphertext := d.buf[nonceSize:n]
 
@@ -670,7 +671,7 @@ func (c *Crypter) reencryptKey(ctx context.Context, ekv *encryptionKeyVersionWit
 		return err
 	}
 
-	masterKeyPortion, err := bbmk.Decrypt(ekv.MasterEncryptedKey, nil)
+	masterKeyPortion, err := bbmk.Decrypt(ekv.MasterEncryptedKey, []byte(ekv.GroupID))
 	if err != nil {
 		return err
 	}
@@ -678,7 +679,7 @@ func (c *Crypter) reencryptKey(ctx context.Context, ekv *encryptionKeyVersionWit
 	if err != nil {
 		return err
 	}
-	encMasterKeyPortion, err := bbmk.Encrypt(masterKeyPortion, nil)
+	encMasterKeyPortion, err := bbmk.Encrypt(masterKeyPortion, []byte(ekv.GroupID))
 	if err != nil {
 		return err
 	}
@@ -850,6 +851,13 @@ func buildKeyURI(kmsConfig *enpb.KMSConfig) (string, error) {
 		}
 		return fmt.Sprintf("gcp-kms://projects/%s/locations/%s/keyRings/%s/cryptoKeys/%s", gc.GetProject(), gc.GetLocation(), gc.GetKeyRing(), gc.GetKey()), nil
 	}
+	if ac := kmsConfig.GetAwsKmsConfig(); ac != nil {
+		if strings.TrimSpace(ac.GetKeyArn()) == "" {
+			return "", status.InvalidArgumentError("Key ARN is required")
+		}
+		return fmt.Sprintf("aws-kms://%s", ac.GetKeyArn()), nil
+	}
+
 	return "", status.FailedPreconditionError("KMS config is empty")
 }
 
@@ -891,7 +899,7 @@ func (c *Crypter) enableEncryption(ctx context.Context, kmsConfig *enpb.KMSConfi
 		return status.InternalErrorf("could not generate key id: %s", err)
 	}
 
-	encMasterKeyPart, err := masterKeyClient.Encrypt(masterKeyPart, nil)
+	encMasterKeyPart, err := masterKeyClient.Encrypt(masterKeyPart, []byte(u.GetGroupID()))
 	if err != nil {
 		return status.InternalErrorf("could not encrypt master portion of composite key: %s", err)
 	}
@@ -1017,6 +1025,8 @@ func (c *Crypter) GetEncryptionConfig(ctx context.Context, req *enpb.GetEncrypti
 			rsp.SupportedKms = append(rsp.SupportedKms, enpb.KMS_LOCAL_INSECURE)
 		case interfaces.KMSTypeGCP:
 			rsp.SupportedKms = append(rsp.SupportedKms, enpb.KMS_GCP)
+		case interfaces.KMSTypeAWS:
+			rsp.SupportedKms = append(rsp.SupportedKms, enpb.KMS_AWS)
 		default:
 			log.Warningf("unknown KMS type %q", t)
 		}
