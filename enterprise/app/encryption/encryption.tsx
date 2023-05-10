@@ -290,7 +290,7 @@ export default class EncryptionComponent extends React.Component<{}, State> {
                 onChange={this.onAWSARNChange.bind(this)}
                 value={this.state.awsKeyARN}
                 placeholder="e.g. arn:aws:kms:us-east-1:123456789:key/123456"
-                className="aws-arn"
+                className="aws-key-arn"
               />
             </div>
           </>
@@ -302,10 +302,10 @@ export default class EncryptionComponent extends React.Component<{}, State> {
     return (
       <div className="kms-config-row">
         <div>
-          <input type="radio" checked={this.state.selectedKMS == kms} onChange={this.onSelectKMS.bind(this, kms)} />
-        </div>
-        <div>
-          <div className="kms-title">{this.kmsName(kms)}</div>
+          <label className="kms-title">
+            <input type="radio" checked={this.state.selectedKMS == kms} onChange={this.onSelectKMS.bind(this, kms)} />
+            {this.kmsName(kms)}
+          </label>
           {this.state.selectedKMS == kms && <div className="kms-fields">{this.renderKMSFields(kms)}</div>}
         </div>
       </div>
@@ -357,9 +357,9 @@ export default class EncryptionComponent extends React.Component<{}, State> {
         )}
         {!this.state.encryptionEnabled && (
           <div>
-            <p>Customer managed encryption keys are not currently enabled.</p>
+            <p>Customer managed encryption keys are not currently enabled for this organization.</p>
             <p>
-              To enable encryption using customer managed encryption keys, you will need to provide a reference to a key
+              To enable the use of customer managed encryption keys, you will need to provide a reference to a key
               managed by a supported Key Management System.
             </p>
             <form className="kms-form">
