@@ -42,7 +42,7 @@ require (
 	github.com/coreos/go-oidc v2.2.1+incompatible
 	github.com/creack/pty v1.1.17
 	github.com/crewjam/saml v0.4.13
-	github.com/docker/distribution v2.8.1+incompatible
+	github.com/docker/distribution v2.8.2+incompatible
 	github.com/docker/docker v23.0.1+incompatible
 	github.com/docker/go-units v0.5.0
 	github.com/elastic/gosigar v0.11.0
@@ -113,7 +113,7 @@ require (
 	google.golang.org/api v0.108.0
 	google.golang.org/genproto v0.0.0-20230209215440-0dfe4f8abfcc
 	google.golang.org/grpc v1.53.0
-	google.golang.org/protobuf v1.29.0
+	google.golang.org/protobuf v1.30.0
 	gopkg.in/yaml.v2 v2.4.0
 	gopkg.in/yaml.v3 v3.0.1
 	gorm.io/driver/clickhouse v0.4.2

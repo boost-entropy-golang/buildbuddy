@@ -1128,8 +1128,8 @@ def install_buildbuddy_dependencies(workspace_name = "buildbuddy"):
     go_repository(
         name = "com_github_docker_distribution",
         importpath = "github.com/docker/distribution",
-        sum = "h1:Q50tZOPR6T/hjNsyc9g8/syEs6bk8XXApsHjKukMl68=",
-        version = "v2.8.1+incompatible",
+        sum = "h1:T3de5rq0dB1j30rp0sA2rER+m322EBzniBPB6ZIzuh8=",
+        version = "v2.8.2+incompatible",
     )
     go_repository(
         name = "com_github_docker_docker",
@@ -6070,8 +6070,8 @@ def install_buildbuddy_dependencies(workspace_name = "buildbuddy"):
         # build_file_generation = "off",
         # patch_args = ["-p1"],
         # patches = ["@io_bazel_rules_go//third_party:org_golang_google_protobuf-gazelle.patch"],
-        sum = "h1:44S3JjaKmLEE4YIkjzexaP+NzZsudE3Zin5Njn/pYX0=",
-        version = "v1.29.0",
+        sum = "h1:kPPoIgf3TsEvrm0PFe15JQ+570QVxYzEvvHqChK+cng=",
+        version = "v1.30.0",
     )
     go_repository(
         name = "org_golang_x_crypto",
