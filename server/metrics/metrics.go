@@ -175,6 +175,9 @@ const (
 
 	/// Pebble DB operation type.
 	PebbleOperation = "pebble_op"
+
+	// Name of service the health check is running for (Ex "distributed_cache" or "sql_primary").
+	HealthCheckName = "health_check_name"
 )
 
 const (
@@ -1514,6 +1517,15 @@ var (
 		EventName,
 	})
 
+	HealthCheck = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: bbNamespace,
+		Subsystem: "health_check",
+		Name:      "status",
+		Help:      "Health check status.",
+	}, []string{
+		HealthCheckName,
+	})
+
 	RPCsHandledTotalByQuotaKey = promauto.NewCounterVec(prometheus.CounterOpts{
 		Namespace: bbNamespace,
 		Subsystem: "quota",
@@ -1951,7 +1963,7 @@ var (
 	PebbleCachePebbleLevelTablesCompactedCount = promauto.NewCounterVec(prometheus.CounterOpts{
 		Namespace: bbNamespace,
 		Subsystem: "remote_cache",
-		Name:      "pebble_cache_pebble_level_bytes_tables_compacted_count",
+		Name:      "pebble_cache_pebble_level_tables_compacted_count",
 		Help:      "The number of sstables compacted to this level.",
 	}, []string{
 		PebbleLevel,
@@ -1960,7 +1972,7 @@ var (
 	PebbleCachePebbleLevelTablesFlushedCount = promauto.NewCounterVec(prometheus.CounterOpts{
 		Namespace: bbNamespace,
 		Subsystem: "remote_cache",
-		Name:      "pebble_cache_pebble_level_bytes_tables_flushed_count",
+		Name:      "pebble_cache_pebble_level_tables_flushed_count",
 		Help:      "The number of sstables flushed to this level.",
 	}, []string{
 		PebbleLevel,
@@ -1969,7 +1981,7 @@ var (
 	PebbleCachePebbleLevelTablesIngestedCount = promauto.NewCounterVec(prometheus.CounterOpts{
 		Namespace: bbNamespace,
 		Subsystem: "remote_cache",
-		Name:      "pebble_cache_pebble_level_bytes_tables_ingested_count",
+		Name:      "pebble_cache_pebble_level_tables_ingested_count",
 		Help:      "The number of sstables ingested into this level.",
 	}, []string{
 		PebbleLevel,
@@ -1978,7 +1990,7 @@ var (
 	PebbleCachePebbleLevelTablesMovedCount = promauto.NewCounterVec(prometheus.CounterOpts{
 		Namespace: bbNamespace,
 		Subsystem: "remote_cache",
-		Name:      "pebble_cache_pebble_level_bytes_tables_moved_count",
+		Name:      "pebble_cache_pebble_level_tables_moved_count",
 		Help:      "The number of sstables ingested into to this level.",
 	}, []string{
 		PebbleLevel,
