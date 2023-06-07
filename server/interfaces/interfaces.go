@@ -269,7 +269,6 @@ type DBHandle interface {
 	ReadRow(ctx context.Context, out interface{}, where ...interface{}) error
 	UTCMonthFromUsecTimestamp(fieldName string) string
 	DateFromUsecTimestamp(fieldName string, timezoneOffsetMinutes int32) string
-	InsertIgnoreModifier() string
 	SelectForUpdateModifier() string
 	SetNowFunc(now func() time.Time)
 	IsDuplicateKeyError(err error) bool
@@ -1131,4 +1130,9 @@ type Crypter interface {
 // singleflight package.
 type SingleFlightDeduper interface {
 	Do(ctx context.Context, key string, work func() ([]byte, error)) ([]byte, error)
+}
+
+// ConfigSecretProvider provides secrets interpolation into configs.
+type ConfigSecretProvider interface {
+	GetSecret(ctx context.Context, name string) ([]byte, error)
 }
