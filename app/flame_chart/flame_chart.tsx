@@ -17,7 +17,6 @@ import {
   VERTICAL_SCROLLBAR_WIDTH,
   HORIZONTAL_SCROLLBAR_HEIGHT,
   LINE_CHART_BORDER_TOP,
-  TIME_SERIES_HEIGHT,
 } from "./style_constants";
 import capabilities from "../capabilities/capabilities";
 
@@ -433,8 +432,9 @@ export default class FlameChart extends React.Component<FlameChartProps, Profile
               onMouseDown={this.onMouseDown.bind(this)}
               style={{
                 borderBottom: `${LINE_CHART_BORDER_TOP}px solid #9E9E9E`,
-                height: `calc(60% - ${HORIZONTAL_SCROLLBAR_HEIGHT}px`,
+                height: "60%",
                 overflowX: "initial",
+                boxSizing: "border-box",
               }}>
               <div
                 style={{
