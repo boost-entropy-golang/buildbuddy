@@ -139,6 +139,8 @@ var (
 	// Test-only flags
 	fallbackToCleanCheckout = flag.Bool("fallback_to_clean_checkout", true, "Fallback to cloning the repo from scratch if sync fails (for testing purposes only).")
 
+	credentialHelper = flag.Bool("credential_helper", false, "Run in git credential helper mode. For internal usage only.")
+
 	shellCharsRequiringQuote = regexp.MustCompile(`[^\w@%+=:,./-]`)
 )
 
@@ -455,6 +457,9 @@ func main() {
 
 func run() error {
 	flag.Parse()
+	if *credentialHelper {
+		return runCredentialHelper()
+	}
 
 	ws := &workspace{
 		startTime:          time.Now(),
@@ -498,6 +503,14 @@ func run() error {
 			return status.WrapError(err, "set CI=true")
 		}
 	}
+	// Set BUILDBUDDY_CI_RUNNER_ABSPATH so that we can re-invoke ourselves
+	// as the git credential helper reliably, even after chdir.
+	absPath, err := filepath.Abs(os.Args[0])
+	if err != nil {
+		return status.WrapError(err, "compute CI runner binary abspath")
+	}
+	os.Setenv("BUILDBUDDY_CI_RUNNER_ABSPATH", absPath)
+
 	// Bazel needs a HOME dir; ensure that one is set.
 	if err := ensureHomeDir(); err != nil {
 		return status.WrapError(err, "ensure HOME")
@@ -572,37 +585,9 @@ func run() error {
 	if err := buildEventReporter.Start(ws.startTime); err != nil {
 		return status.WrapError(err, "could not publish started event")
 	}
-	if err := ws.setup(ctx); err != nil {
-		_ = buildEventReporter.Stop(noExitCode, failedExitCodeName)
-		return status.WrapError(err, "failed to set up git repo")
-	}
-	cfg, err := readConfig()
+	result, err := ws.RunAction(ctx, buildEventReporter)
 	if err != nil {
 		_ = buildEventReporter.Stop(noExitCode, failedExitCodeName)
-		return status.WrapError(err, "failed to read BuildBuddy config")
-	}
-
-	var action *config.Action
-	if *bazelSubCommand != "" {
-		action = &config.Action{
-			Name: "run",
-			BazelCommands: []string{
-				*bazelSubCommand,
-			},
-		}
-	} else if *actionName != "" {
-		// If a specific action was specified, filter to configured
-		// actions with a matching action name.
-		action, err = findAction(cfg.Actions, *actionName)
-		if err != nil {
-			return err
-		}
-	} else {
-		return status.InvalidArgumentError("One of --action or --bazel_sub_command must be specified.")
-	}
-
-	result, err := ws.RunAction(ctx, action, buildEventReporter)
-	if err != nil {
 		return err
 	}
 	if err := buildEventReporter.Stop(result.exitCode, result.exitCodeName); err != nil {
@@ -624,14 +609,13 @@ func (r *actionResult) Error() string {
 }
 
 // RunAction runs the specified action and streams the progress to the invocation via the buildEventReporter.
-func (ws *workspace) RunAction(ctx context.Context, action *config.Action, buildEventReporter *buildEventReporter) (*actionResult, error) {
+func (ws *workspace) RunAction(ctx context.Context, buildEventReporter *buildEventReporter) (*actionResult, error) {
 	// NB: Anything logged to `ar.log` gets output to both the stdout of this binary
 	// and the logs uploaded to BuildBuddy for this action. Anything that we want
 	// the user to see in the invocation UI needs to go in that log, instead of
 	// the global `log.Print`.
 	ar := &actionRunner{
 		isWorkflow: *workflowID != "",
-		action:     action,
 		reporter:   buildEventReporter,
 		rootDir:    ws.rootDir,
 		hostname:   ws.hostname,
@@ -690,7 +674,6 @@ func (invLog *invocationLog) Printf(format string, vals ...interface{}) {
 // actionRunner runs a single action in the BuildBuddy config.
 type actionRunner struct {
 	isWorkflow bool
-	action     *config.Action
 	reporter   *buildEventReporter
 	rootDir    string
 	username   string
@@ -698,76 +681,9 @@ type actionRunner struct {
 }
 
 func (ar *actionRunner) Run(ctx context.Context, ws *workspace) error {
-	ar.reporter.Printf("Running action %q", ar.action.Name)
-
-	// Only print this to the local logs -- it's mostly useful for development purposes.
-	log.Infof("Invocation URL:  %s", invocationURL(ar.reporter.InvocationID()))
-
 	// NOTE: In this func we return immediately with an error of nil if event publishing fails,
 	// because that error is instead surfaced in the caller func when calling
 	// `buildEventPublisher.Wait()`
-
-	wfc := &bespb.WorkflowConfigured{
-		WorkflowId:         *workflowID,
-		ActionName:         ar.action.Name,
-		ActionTriggerEvent: *triggerEvent,
-		PushedRepoUrl:      *pushedRepoURL,
-		PushedBranch:       *pushedBranch,
-		CommitSha:          *commitSHA,
-		TargetRepoUrl:      *targetRepoURL,
-		TargetBranch:       *targetBranch,
-		Os:                 runtime.GOOS,
-		Arch:               runtime.GOARCH,
-		ContainerImage:     ar.action.ContainerImage,
-	}
-	wfcEvent := &bespb.BuildEvent{
-		Id:      &bespb.BuildEventId{Id: &bespb.BuildEventId_WorkflowConfigured{WorkflowConfigured: &bespb.BuildEventId_WorkflowConfiguredId{}}},
-		Payload: &bespb.BuildEvent_WorkflowConfigured{WorkflowConfigured: wfc},
-	}
-
-	cic := &bespb.ChildInvocationsConfigured{}
-	cicEvent := &bespb.BuildEvent{
-		Id:      &bespb.BuildEventId{Id: &bespb.BuildEventId_ChildInvocationsConfigured{ChildInvocationsConfigured: &bespb.BuildEventId_ChildInvocationsConfiguredId{}}},
-		Payload: &bespb.BuildEvent_ChildInvocationsConfigured{ChildInvocationsConfigured: cic},
-	}
-	// If the triggering commit merges cleanly with the target branch, the runner
-	// will execute the configured bazel commands. Otherwise, the runner will
-	// exit early without running those commands and does not need to create
-	// invocation streams for them.
-	if ws.setupError == nil {
-		for _, bazelCmd := range ar.action.BazelCommands {
-			iid, err := newUUID()
-			if err != nil {
-				return err
-			}
-			wfc.Invocation = append(wfc.Invocation, &bespb.WorkflowConfigured_InvocationMetadata{
-				InvocationId: iid,
-				BazelCommand: bazelCmd,
-			})
-			wfcEvent.Children = append(wfcEvent.Children, &bespb.BuildEventId{
-				Id: &bespb.BuildEventId_WorkflowCommandCompleted{WorkflowCommandCompleted: &bespb.BuildEventId_WorkflowCommandCompletedId{
-					InvocationId: iid,
-				}},
-			})
-			cic.Invocation = append(cic.Invocation, &bespb.ChildInvocationsConfigured_InvocationMetadata{
-				InvocationId: iid,
-				BazelCommand: bazelCmd,
-			})
-			cicEvent.Children = append(cicEvent.Children, &bespb.BuildEventId{
-				Id: &bespb.BuildEventId_ChildInvocationCompleted{ChildInvocationCompleted: &bespb.BuildEventId_ChildInvocationCompletedId{
-					InvocationId: iid,
-				}},
-			})
-		}
-	}
-	if ar.isWorkflow {
-		if err := ar.reporter.Publish(wfcEvent); err != nil {
-			return nil
-		}
-	}
-	if err := ar.reporter.Publish(cicEvent); err != nil {
-		return nil
-	}
 
 	buildMetadata := &bespb.BuildMetadata{
 		Metadata: map[string]string{},
@@ -794,6 +710,79 @@ func (ar *actionRunner) Run(ctx context.Context, ws *workspace) error {
 		Payload: &bespb.BuildEvent_BuildMetadata{BuildMetadata: buildMetadata},
 	}
 	if err := ar.reporter.Publish(buildMetadataEvent); err != nil {
+		return nil
+	}
+
+	// Only print this to the local logs -- it's mostly useful for development purposes.
+	log.Infof("Invocation URL:  %s", invocationURL(ar.reporter.InvocationID()))
+
+	if err := ws.setup(ctx); err != nil {
+		return status.WrapError(err, "failed to set up git repo")
+	}
+	action, err := getActionToRun()
+	if err != nil {
+		return status.WrapError(err, "failed to get action to run")
+	}
+
+	wfc := &bespb.WorkflowConfigured{
+		WorkflowId:         *workflowID,
+		ActionName:         action.Name,
+		ActionTriggerEvent: *triggerEvent,
+		PushedRepoUrl:      *pushedRepoURL,
+		PushedBranch:       *pushedBranch,
+		CommitSha:          *commitSHA,
+		TargetRepoUrl:      *targetRepoURL,
+		TargetBranch:       *targetBranch,
+		Os:                 runtime.GOOS,
+		Arch:               runtime.GOARCH,
+		ContainerImage:     action.ContainerImage,
+	}
+	wfcEvent := &bespb.BuildEvent{
+		Id:      &bespb.BuildEventId{Id: &bespb.BuildEventId_WorkflowConfigured{WorkflowConfigured: &bespb.BuildEventId_WorkflowConfiguredId{}}},
+		Payload: &bespb.BuildEvent_WorkflowConfigured{WorkflowConfigured: wfc},
+	}
+	if ar.isWorkflow {
+		if err := ar.reporter.Publish(wfcEvent); err != nil {
+			return nil
+		}
+	}
+
+	cic := &bespb.ChildInvocationsConfigured{}
+	cicEvent := &bespb.BuildEvent{
+		Id:      &bespb.BuildEventId{Id: &bespb.BuildEventId_ChildInvocationsConfigured{ChildInvocationsConfigured: &bespb.BuildEventId_ChildInvocationsConfiguredId{}}},
+		Payload: &bespb.BuildEvent_ChildInvocationsConfigured{ChildInvocationsConfigured: cic},
+	}
+	// If the triggering commit merges cleanly with the target branch, the runner
+	// will execute the configured bazel commands. Otherwise, the runner will
+	// exit early without running those commands and does not need to create
+	// invocation streams for them.
+	if ws.setupError == nil {
+		for _, bazelCmd := range action.BazelCommands {
+			iid, err := newUUID()
+			if err != nil {
+				return err
+			}
+			wfc.Invocation = append(wfc.Invocation, &bespb.WorkflowConfigured_InvocationMetadata{
+				InvocationId: iid,
+				BazelCommand: bazelCmd,
+			})
+			wfcEvent.Children = append(wfcEvent.Children, &bespb.BuildEventId{
+				Id: &bespb.BuildEventId_WorkflowCommandCompleted{WorkflowCommandCompleted: &bespb.BuildEventId_WorkflowCommandCompletedId{
+					InvocationId: iid,
+				}},
+			})
+			cic.Invocation = append(cic.Invocation, &bespb.ChildInvocationsConfigured_InvocationMetadata{
+				InvocationId: iid,
+				BazelCommand: bazelCmd,
+			})
+			cicEvent.Children = append(cicEvent.Children, &bespb.BuildEventId{
+				Id: &bespb.BuildEventId_ChildInvocationCompleted{ChildInvocationCompleted: &bespb.BuildEventId_ChildInvocationCompletedId{
+					InvocationId: iid,
+				}},
+			})
+		}
+	}
+	if err := ar.reporter.Publish(cicEvent); err != nil {
 		return nil
 	}
 
@@ -824,14 +813,14 @@ func (ar *actionRunner) Run(ctx context.Context, ws *workspace) error {
 		return ws.setupError
 	}
 
-	for i, bazelCmd := range ar.action.BazelCommands {
+	for i, bazelCmd := range action.BazelCommands {
 		cmdStartTime := time.Now()
 
 		if i >= len(wfc.GetInvocation()) {
 			return status.InternalErrorf("No invocation metadata generated for bazel_commands[%d]; this should never happen", i)
 		}
 		iid := wfc.GetInvocation()[i].GetInvocationId()
-		args, err := bazelArgs(ar.rootDir, ar.action.BazelWorkspaceDir, bazelCmd)
+		args, err := bazelArgs(ar.rootDir, action.BazelWorkspaceDir, bazelCmd)
 		if err != nil {
 			return status.InvalidArgumentErrorf("failed to parse bazel command: %s", err)
 		}
@@ -854,7 +843,7 @@ func (ar *actionRunner) Run(ctx context.Context, ws *workspace) error {
 			args = appendBazelSubcommandArgs(args, "--script_path="+runScript)
 		}
 
-		runErr := runCommand(ctx, *bazelCommand, expandEnv(args), ar.action.Env, ar.action.BazelWorkspaceDir, ar.reporter)
+		runErr := runCommand(ctx, *bazelCommand, expandEnv(args), action.Env, action.BazelWorkspaceDir, ar.reporter)
 		exitCode := getExitCode(runErr)
 		if exitCode != noExitCode {
 			ar.reporter.Printf("%s(command exited with code %d)%s\n", ansiGray, exitCode, ansiReset)
@@ -935,6 +924,27 @@ func (ar *actionRunner) Run(ctx context.Context, ws *workspace) error {
 		}
 	}
 	return nil
+}
+
+func getActionToRun() (*config.Action, error) {
+	if *bazelSubCommand != "" {
+		return &config.Action{
+			Name: "run",
+			BazelCommands: []string{
+				*bazelSubCommand,
+			},
+		}, nil
+	}
+	if *actionName != "" {
+		cfg, err := readConfig()
+		if err != nil {
+			return nil, status.WrapError(err, "failed to read BuildBuddy config")
+		}
+		// If a specific action was specified, filter to configured
+		// actions with a matching action name.
+		return findAction(cfg.Actions, *actionName)
+	}
+	return nil, status.InvalidArgumentError("One of --action or --bazel_sub_command must be specified.")
 }
 
 type runInfo struct {
@@ -1479,6 +1489,7 @@ func (ws *workspace) sync(ctx context.Context) error {
 }
 
 func (ws *workspace) config(ctx context.Context) error {
+	// Set up repo-local config.
 	cfg := [][]string{
 		{"user.email", "ci-runner@buildbuddy.io"},
 		{"user.name", "BuildBuddy"},
@@ -1491,6 +1502,18 @@ func (ws *workspace) config(ctx context.Context) error {
 			return err
 		}
 	}
+
+	// Set up global config (~/.gitconfig) but only on Linux for now since Linux
+	// workflows are isolated.
+	// TODO(bduffany): find a solution that works for Mac workflows too.
+	if runtime.GOOS == "linux" {
+		// Credential helper is used for external git deps fetched by bazel so
+		// it needs to be in the global config.
+		if err := configureGlobalCredentialHelper(ctx); err != nil {
+			return err
+		}
+	}
+
 	return nil
 }
 
@@ -1771,5 +1794,50 @@ func getStructuredCommandLine() *clpb.CommandLine {
 				}},
 			},
 		},
+	}
+}
+
+func configureGlobalCredentialHelper(ctx context.Context) error {
+	if !strings.HasPrefix(*targetRepoURL, "https://") {
+		return nil
+	}
+	repoToken := os.Getenv(repoTokenEnvVarName)
+	if repoToken == "" {
+		return nil
+	}
+	u, err := url.Parse(*targetRepoURL)
+	if err != nil {
+		return nil // if URL is unparseable, do nothing
+	}
+	repoHostURL := fmt.Sprintf("https://%s", u.Host)
+	configKey := fmt.Sprintf("credential.%s.helper", repoHostURL)
+	configValue := fmt.Sprintf("!%s --credential_helper", os.Getenv("BUILDBUDDY_CI_RUNNER_ABSPATH"))
+	if _, err := git(ctx, io.Discard, "config", "--global", configKey, configValue); err != nil {
+		return err
+	}
+	return nil
+}
+
+func runCredentialHelper() error {
+	// Do nothing with request details on stdin for now. We only configure the
+	// credential helper for the target repo URL, so the details should always
+	// match the target repo.
+	io.Copy(io.Discard, os.Stdin)
+
+	cmd := flag.Args()[0]
+	switch cmd {
+	case "get":
+		username := os.Getenv(repoUserEnvVarName)
+		if username == "" {
+			// git requires a username from the cred helper but GitHub doesn't
+			// care what the username is (it just looks at the token), so just
+			// set an arbitrary username.
+			username = "x-access-token"
+		}
+		fmt.Printf("username=%s\npassword=%s\n", username, os.Getenv(repoTokenEnvVarName))
+		return nil
+	default:
+		// Do nothing
+		return nil
 	}
 }
