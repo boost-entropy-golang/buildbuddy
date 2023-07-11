@@ -27,7 +27,7 @@ require (
 	github.com/aws/aws-sdk-go v1.43.9
 	github.com/awslabs/soci-snapshotter v0.1.0
 	github.com/bazelbuild/bazel-gazelle v0.29.0
-	github.com/bazelbuild/bazelisk v1.11.0
+	github.com/bazelbuild/bazelisk v1.17.0
 	github.com/bazelbuild/buildtools v0.0.0-20230111132423-06e8e2436a75
 	github.com/bazelbuild/rules_go v0.39.1
 	github.com/bazelbuild/rules_webtesting v0.0.0-20210910170740-6b2ef24cfe95
@@ -41,7 +41,7 @@ require (
 	github.com/cockroachdb/pebble v0.0.0-20220408210401-5591b6b889f9
 	github.com/containerd/containerd v1.6.19
 	github.com/coreos/go-oidc v2.2.1+incompatible
-	github.com/creack/pty v1.1.17
+	github.com/creack/pty v1.1.18
 	github.com/crewjam/saml v0.4.13
 	github.com/docker/distribution v2.8.2+incompatible
 	github.com/docker/docker v23.0.1+incompatible
@@ -146,6 +146,7 @@ require (
 	github.com/asaskevich/govalidator v0.0.0-20210307081110-f21760c49a8d // indirect
 	github.com/beevik/etree v1.1.0 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
+	github.com/bgentry/go-netrc v0.0.0-20140422174119-9fd32a8b3d3d // indirect
 	github.com/blang/semver v3.5.1+incompatible // indirect
 	github.com/bmatcuk/doublestar/v4 v4.6.0 // indirect
 	github.com/census-instrumentation/opencensus-proto v0.4.1 // indirect
