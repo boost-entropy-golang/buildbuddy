@@ -246,8 +246,8 @@ def install_buildbuddy_dependencies(workspace_name = "buildbuddy"):
         name = "com_github_awslabs_soci_snapshotter",
         importpath = "github.com/awslabs/soci-snapshotter",
         replace = "github.com/buildbuddy-io/soci-snapshotter",
-        sum = "h1:GeOlKRZIm2YErgGPAnydPRvtzg2A5IV9Qh+MyM14qYc=",
-        version = "v0.0.1",
+        sum = "h1:1kEJq3IYRa97x+erW+Yjbix6+JzfwmpIOf0YXjL1zIs=",
+        version = "v0.0.4",
     )
 
     go_repository(
@@ -1301,6 +1301,9 @@ def install_buildbuddy_dependencies(workspace_name = "buildbuddy"):
     go_repository(
         name = "com_github_docker_docker",
         importpath = "github.com/docker/docker",
+        # TODO(sluongng): remove this patch once https://github.com/moby/moby/issues/45935 is fixed.
+        patch_args = ["-p1"],
+        patches = ["@{}//buildpatches:docker-host.patch".format(workspace_name)],
         sum = "h1:eATx+oLz9WdNVkQrr0qjQ8HvRJ4bOOxfzEo8R+dA3cg=",
         version = "v24.0.2+incompatible",
     )
@@ -7039,11 +7042,11 @@ def install_buildbuddy_dependencies(workspace_name = "buildbuddy"):
     )
 
     http_file(
-        name = "com_github_buildbuddy_io_soci_snapshotter-soci-store-c1b8cd5a19f8ec80bc0bb488a897d8b00a4a4723-linux-amd64",
-        urls = ["https://storage.googleapis.com/buildbuddy-tools/binaries/soci-snapshotter/soci-store-c1b8cd5a19f8ec80bc0bb488a897d8b00a4a4723-linux-amd64"],
-        sha256 = "da38c7afed40a7a6dc91363003fe18d8f3197f5ddcbcde08fb075fa55aa3037c",
+        name = "com_github_buildbuddy_io_soci_snapshotter-soci-store-v0.0.4-linux-amd64",
+        urls = ["https://storage.googleapis.com/buildbuddy-tools/binaries/soci-snapshotter/soci-store-v0.0.4-linux-amd64"],
+        sha256 = "e58a0d93e9fc414699123f97a321e9d79e84260cbb1b2935052a84bfbfaec6e5",
         executable = True,
-        downloaded_file_path = "soci-store-c1b8cd5a19f8ec80bc0bb488a897d8b00a4a4723-linux-amd64",
+        downloaded_file_path = "soci-store-v0.0.4-linux-amd64",
     )
 
     http_file(
