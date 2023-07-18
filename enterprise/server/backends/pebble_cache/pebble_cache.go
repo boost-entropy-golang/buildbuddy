@@ -1217,7 +1217,7 @@ func (p *PebbleCache) lookupGroupAndPartitionID(ctx context.Context, remoteInsta
 	return groupID, DefaultPartitionID
 }
 
-func (p *PebbleCache) encryptionEnabled(ctx context.Context, partitionID string) (bool, error) {
+func (p *PebbleCache) encryptionEnabled(ctx context.Context) (bool, error) {
 	auth := p.env.GetAuthenticator()
 	if auth == nil {
 		return false, nil
@@ -1244,7 +1244,7 @@ func (p *PebbleCache) makeFileRecord(ctx context.Context, r *rspb.ResourceName) 
 
 	groupID, partID := p.lookupGroupAndPartitionID(ctx, r.GetInstanceName())
 
-	encryptionEnabled, err := p.encryptionEnabled(ctx, partID)
+	encryptionEnabled, err := p.encryptionEnabled(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -1693,28 +1693,6 @@ func (p *PebbleCache) Reader(ctx context.Context, r *rspb.ResourceName, uncompre
 	return pebble.ReadCloserWithFunc(rc, db.Close), nil
 }
 
-type writeCloser struct {
-	interfaces.MetadataWriteCloser
-	closeFn      func(n int64) error
-	bytesWritten int64
-}
-
-func (dc *writeCloser) Close() error {
-	if err := dc.MetadataWriteCloser.Close(); err != nil {
-		return err
-	}
-	return dc.closeFn(dc.bytesWritten)
-}
-
-func (dc *writeCloser) Write(p []byte) (int, error) {
-	n, err := dc.MetadataWriteCloser.Write(p)
-	if err != nil {
-		return 0, err
-	}
-	dc.bytesWritten += int64(n)
-	return n, nil
-}
-
 // zstdCompressor compresses bytes before writing them to the nested writer
 type zstdCompressor struct {
 	cacheName string
@@ -1859,7 +1837,7 @@ func (p *PebbleCache) Writer(ctx context.Context, r *rspb.ResourceName) (interfa
 	}
 
 	wc := interfaces.CommittedWriteCloser(cwc)
-	shouldEncrypt, err := p.encryptionEnabled(ctx, fileRecord.GetIsolation().GetPartitionId())
+	shouldEncrypt, err := p.encryptionEnabled(ctx)
 	if err != nil {
 		_ = wc.Close()
 		return nil, err
@@ -2925,7 +2903,7 @@ func (p *PebbleCache) reader(ctx context.Context, iter pebble.Iterator, r *rspb.
 
 	shouldDecrypt := fileMetadata.EncryptionMetadata != nil
 	if shouldDecrypt {
-		encryptionEnabled, err := p.encryptionEnabled(ctx, fileMetadata.GetFileRecord().GetIsolation().GetPartitionId())
+		encryptionEnabled, err := p.encryptionEnabled(ctx)
 		if err != nil {
 			return nil, err
 		}

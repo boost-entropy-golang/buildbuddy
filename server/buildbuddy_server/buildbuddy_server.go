@@ -12,7 +12,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/buildbuddy-io/buildbuddy/proto/auditlog"
+	"github.com/buildbuddy-io/buildbuddy/enterprise/server/auditlog"
 	"github.com/buildbuddy-io/buildbuddy/server/backends/chunkstore"
 	"github.com/buildbuddy-io/buildbuddy/server/build_event_protocol/build_event_handler"
 	"github.com/buildbuddy-io/buildbuddy/server/bytestream"
@@ -38,6 +38,7 @@ import (
 
 	remote_execution_config "github.com/buildbuddy-io/buildbuddy/enterprise/server/remote_execution/config"
 	akpb "github.com/buildbuddy-io/buildbuddy/proto/api_key"
+	alpb "github.com/buildbuddy-io/buildbuddy/proto/auditlog"
 	bzpb "github.com/buildbuddy-io/buildbuddy/proto/bazel_config"
 	capb "github.com/buildbuddy-io/buildbuddy/proto/cache"
 	enpb "github.com/buildbuddy-io/buildbuddy/proto/encryption"
@@ -330,8 +331,11 @@ func (s *BuildBuddyServer) UpdateGroupUsers(ctx context.Context, req *grpb.Updat
 	if userDB == nil {
 		return nil, status.UnimplementedError("Not Implemented")
 	}
-	if err := userDB.UpdateGroupUsers(ctx, req.GetGroupId(), req.GetUpdate()); err != nil {
+	if err := userDB.UpdateGroupUsers(ctx, req.GetRequestContext().GetGroupId(), req.GetUpdate()); err != nil {
 		return nil, err
+	}
+	if al := s.env.GetAuditLogger(); al != nil {
+		al.Log(ctx, auditlog.GroupResourceID(req.GetRequestContext().GetGroupId()), alpb.Action_UPDATE_MEMBERSHIP, req)
 	}
 	return &grpb.UpdateGroupUsersResponse{}, nil
 }
@@ -398,17 +402,17 @@ func (s *BuildBuddyServer) UpdateGroup(ctx context.Context, req *grpb.UpdateGrou
 	urlIdentifier := strings.TrimSpace(req.GetUrlIdentifier())
 
 	if urlIdentifier != "" {
-		if group, err = userDB.GetGroupByURLIdentifier(ctx, urlIdentifier); group != nil && group.GroupID != req.GetId() {
+		if group, err = userDB.GetGroupByURLIdentifier(ctx, urlIdentifier); group != nil && group.GroupID != req.GetRequestContext().GetGroupId() {
 			return nil, status.InvalidArgumentError("URL is already in use")
 		} else if err != nil && gstatus.Code(err) != gcodes.NotFound {
 			return nil, err
 		}
 	}
 	if group == nil {
-		if req.GetId() == "" {
+		if req.GetRequestContext().GetGroupId() == "" {
 			return nil, status.InvalidArgumentError("Missing organization identifier.")
 		}
-		group, err = userDB.GetGroupByID(ctx, req.GetId())
+		group, err = userDB.GetGroupByID(ctx, req.GetRequestContext().GetGroupId())
 		if err != nil {
 			return nil, err
 		}
@@ -437,6 +441,9 @@ func (s *BuildBuddyServer) UpdateGroup(ctx context.Context, req *grpb.UpdateGrou
 	if _, err := userDB.InsertOrUpdateGroup(ctx, group); err != nil {
 		return nil, err
 	}
+	if al := s.env.GetAuditLogger(); al != nil {
+		al.Log(ctx, auditlog.GroupResourceID(req.GetRequestContext().GetGroupId()), alpb.Action_UPDATE, req)
+	}
 	return &grpb.UpdateGroupResponse{}, nil
 }
 
@@ -457,7 +464,7 @@ func (s *BuildBuddyServer) GetApiKeys(ctx context.Context, req *akpb.GetApiKeysR
 	if authDB == nil {
 		return nil, status.UnimplementedError("Not Implemented")
 	}
-	tableKeys, err := authDB.GetAPIKeys(ctx, req.GetGroupId())
+	tableKeys, err := authDB.GetAPIKeys(ctx, req.GetRequestContext().GetGroupId())
 	if err != nil {
 		return nil, err
 	}
@@ -473,6 +480,9 @@ func (s *BuildBuddyServer) GetApiKeys(ctx context.Context, req *akpb.GetApiKeysR
 			VisibleToDevelopers: k.VisibleToDevelopers,
 		})
 	}
+	if al := s.env.GetAuditLogger(); al != nil {
+		al.Log(ctx, auditlog.GroupAPIKeyResourceID(""), alpb.Action_LIST, req)
+	}
 	return rsp, nil
 }
 
@@ -482,10 +492,13 @@ func (s *BuildBuddyServer) CreateApiKey(ctx context.Context, req *akpb.CreateApi
 		return nil, status.UnimplementedError("Not Implemented")
 	}
 	k, err := authDB.CreateAPIKey(
-		ctx, req.GetGroupId(), req.GetLabel(), req.GetCapability(),
+		ctx, req.GetRequestContext().GetGroupId(), req.GetLabel(), req.GetCapability(),
 		req.GetVisibleToDevelopers())
 	if err != nil {
 		return nil, err
+	}
+	if al := s.env.GetAuditLogger(); al != nil {
+		al.Log(ctx, auditlog.GroupAPIKeyResourceID(k.APIKeyID), alpb.Action_CREATE, req)
 	}
 	return &akpb.CreateApiKeyResponse{
 		ApiKey: &akpb.ApiKey{
@@ -531,6 +544,9 @@ func (s *BuildBuddyServer) UpdateApiKey(ctx context.Context, req *akpb.UpdateApi
 	if err := authDB.UpdateAPIKey(ctx, tk); err != nil {
 		return nil, err
 	}
+	if al := s.env.GetAuditLogger(); al != nil {
+		al.Log(ctx, auditlog.GroupAPIKeyResourceID(req.GetId()), alpb.Action_UPDATE, req)
+	}
 	return &akpb.UpdateApiKeyResponse{}, nil
 }
 
@@ -542,6 +558,9 @@ func (s *BuildBuddyServer) DeleteApiKey(ctx context.Context, req *akpb.DeleteApi
 	if err := authDB.DeleteAPIKey(ctx, req.GetId()); err != nil {
 		return nil, err
 	}
+	if al := s.env.GetAuditLogger(); al != nil {
+		al.Log(ctx, auditlog.GroupAPIKeyResourceID(req.GetId()), alpb.Action_DELETE, req)
+	}
 	return &akpb.DeleteApiKeyResponse{}, nil
 }
 
@@ -550,7 +569,7 @@ func (s *BuildBuddyServer) GetUserApiKeys(ctx context.Context, req *akpb.GetApiK
 	if authDB == nil || !authDB.GetUserOwnedKeysEnabled() {
 		return nil, status.UnimplementedError("Not Implemented")
 	}
-	groupID := req.GetGroupId()
+	groupID := req.GetRequestContext().GetGroupId()
 	tableKeys, err := authDB.GetUserAPIKeys(ctx, groupID)
 	if err != nil {
 		return nil, err
@@ -575,9 +594,12 @@ func (s *BuildBuddyServer) CreateUserApiKey(ctx context.Context, req *akpb.Creat
 	if authDB == nil || !authDB.GetUserOwnedKeysEnabled() {
 		return nil, status.UnimplementedError("Not Implemented")
 	}
-	k, err := authDB.CreateUserAPIKey(ctx, req.GetGroupId(), req.GetLabel(), req.GetCapability())
+	k, err := authDB.CreateUserAPIKey(ctx, req.GetRequestContext().GetGroupId(), req.GetLabel(), req.GetCapability())
 	if err != nil {
 		return nil, err
+	}
+	if al := s.env.GetAuditLogger(); al != nil {
+		al.Log(ctx, auditlog.UserAPIKeyResourceID(k.APIKeyID), alpb.Action_CREATE, req)
 	}
 	return &akpb.CreateApiKeyResponse{
 		ApiKey: &akpb.ApiKey{
@@ -605,6 +627,9 @@ func (s *BuildBuddyServer) UpdateUserApiKey(ctx context.Context, req *akpb.Updat
 	if err := authDB.UpdateAPIKey(ctx, updates); err != nil {
 		return nil, err
 	}
+	if al := s.env.GetAuditLogger(); al != nil {
+		al.Log(ctx, auditlog.UserAPIKeyResourceID(req.GetId()), alpb.Action_UPDATE, req)
+	}
 	return &akpb.UpdateApiKeyResponse{}, nil
 }
 
@@ -615,6 +640,9 @@ func (s *BuildBuddyServer) DeleteUserApiKey(ctx context.Context, req *akpb.Delet
 	}
 	if err := authDB.DeleteAPIKey(ctx, req.GetId()); err != nil {
 		return nil, err
+	}
+	if al := s.env.GetAuditLogger(); al != nil {
+		al.Log(ctx, auditlog.UserAPIKeyResourceID(req.GetId()), alpb.Action_DELETE, req)
 	}
 	return &akpb.DeleteApiKeyResponse{}, nil
 }
@@ -1346,6 +1374,10 @@ func (s *BuildBuddyServer) GetEncryptionConfig(ctx context.Context, request *enp
 	return crypter.GetEncryptionConfig(ctx, request)
 }
 
-func (s *BuildBuddyServer) GetAuditLogs(ctx context.Context, request *auditlog.GetAuditLogsRequest) (*auditlog.GetAuditLogsResponse, error) {
-	return nil, status.UnimplementedError("not implemented")
+func (s *BuildBuddyServer) GetAuditLogs(ctx context.Context, request *alpb.GetAuditLogsRequest) (*alpb.GetAuditLogsResponse, error) {
+	al := s.env.GetAuditLogger()
+	if al == nil {
+		return nil, status.FailedPreconditionError("audit logs not enabled in the server")
+	}
+	return al.GetLogs(ctx, request)
 }
