@@ -20,6 +20,7 @@ go_library(
         "//server/util/status",
         "//server/util/timeutil",
         "@com_github_go_redis_redis_v8//:redis",
+        "@io_gorm_gorm//clause",
     ],
 )
 
