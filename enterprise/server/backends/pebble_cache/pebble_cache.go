@@ -1125,7 +1125,11 @@ func (p *PebbleCache) backgroundRepairIteration(quitChan chan struct{}, opts *re
 		LowerBound: keys.MinByte,
 		UpperBound: keys.MaxByte,
 	})
-	defer iter.Close()
+	// We update the iter variable later on, so we need to wrap the Close call
+	// in a func to operate on the correct iterator instance.
+	defer func() {
+		iter.Close()
+	}()
 
 	pr := message.NewPrinter(language.English)
 	fileMetadata := &rfpb.FileMetadata{}
@@ -1145,6 +1149,22 @@ func (p *PebbleCache) backgroundRepairIteration(quitChan chan struct{}, opts *re
 		case <-quitChan:
 			return nil
 		default:
+		}
+
+		// Create a new iterator once in a while to avoid holding on to sstables
+		// for too long.
+		if totalCount != 0 && totalCount%1_000_000 == 0 {
+			k := make([]byte, len(iter.Key()))
+			copy(k, iter.Key())
+			newIter := db.NewIter(&pebble.IterOptions{
+				LowerBound: k,
+				UpperBound: keys.MaxByte,
+			})
+			iter.Close()
+			if !newIter.First() {
+				break
+			}
+			iter = newIter
 		}
 
 		if bytes.HasPrefix(iter.Key(), SystemKeyPrefix) {
@@ -2523,7 +2543,7 @@ func (e *partitionEvictor) refresh(ctx context.Context, key *evictionKey) (bool,
 		return true, time.Time{}, nil
 	}
 	atime := time.UnixMicro(md.GetLastAccessUsec())
-	age := time.Since(atime)
+	age := e.clock.Since(atime)
 	if age < e.minEvictionAge {
 		return true, time.Time{}, nil
 	}
@@ -2641,7 +2661,6 @@ func (e *partitionEvictor) sample(ctx context.Context, k int) ([]*approxlru.Samp
 					SizeBytes: fileMetadata.GetStoredSizeBytes(),
 					Timestamp: atime,
 				}
-
 				samples = append(samples, sample)
 			}
 
