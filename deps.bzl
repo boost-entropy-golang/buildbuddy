@@ -243,6 +243,132 @@ def install_buildbuddy_dependencies(workspace_name = "buildbuddy"):
         version = "v1.44.286",
     )
     go_repository(
+        name = "com_github_aws_aws_sdk_go_v2",
+        importpath = "github.com/aws/aws-sdk-go-v2",
+        sum = "h1:+tefE750oAb7ZQGzla6bLkOwfcQCEtC5y2RqoqCeqKo=",
+        version = "v1.18.1",
+    )
+    go_repository(
+        name = "com_github_aws_aws_sdk_go_v2_aws_protocol_eventstream",
+        importpath = "github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream",
+        sum = "h1:dK82zF6kkPeCo8J1e+tGx4JdvDIQzj7ygIoLg8WMuGs=",
+        version = "v1.4.10",
+    )
+    go_repository(
+        name = "com_github_aws_aws_sdk_go_v2_config",
+        importpath = "github.com/aws/aws-sdk-go-v2/config",
+        sum = "h1:Az9uLwmssTE6OGTpsFqOnaGpLnKDqNYOJzWuC6UAYzA=",
+        version = "v1.18.27",
+    )
+    go_repository(
+        name = "com_github_aws_aws_sdk_go_v2_credentials",
+        importpath = "github.com/aws/aws-sdk-go-v2/credentials",
+        sum = "h1:qmU+yhKmOCyujmuPY7tf5MxR/RKyZrOPO3V4DobiTUk=",
+        version = "v1.13.26",
+    )
+    go_repository(
+        name = "com_github_aws_aws_sdk_go_v2_feature_ec2_imds",
+        importpath = "github.com/aws/aws-sdk-go-v2/feature/ec2/imds",
+        sum = "h1:LxK/bitrAr4lnh9LnIS6i7zWbCOdMsfzKFBI6LUCS0I=",
+        version = "v1.13.4",
+    )
+    go_repository(
+        name = "com_github_aws_aws_sdk_go_v2_feature_rds_auth",
+        importpath = "github.com/aws/aws-sdk-go-v2/feature/rds/auth",
+        sum = "h1:2v4gCEM/SfIMZiMT8luKNmgrngfZo61YPENzedO22n0=",
+        version = "v1.2.12",
+    )
+
+    go_repository(
+        name = "com_github_aws_aws_sdk_go_v2_feature_s3_manager",
+        importpath = "github.com/aws/aws-sdk-go-v2/feature/s3/manager",
+        sum = "h1:4bh28MeeXoBFTjb0JjQ5sVatzlf5xA1DziV8mZed9v4=",
+        version = "v1.11.70",
+    )
+
+    go_repository(
+        name = "com_github_aws_aws_sdk_go_v2_internal_configsources",
+        importpath = "github.com/aws/aws-sdk-go-v2/internal/configsources",
+        sum = "h1:A5UqQEmPaCFpedKouS4v+dHCTUo2sKqhoKO9U5kxyWo=",
+        version = "v1.1.34",
+    )
+    go_repository(
+        name = "com_github_aws_aws_sdk_go_v2_internal_endpoints_v2",
+        importpath = "github.com/aws/aws-sdk-go-v2/internal/endpoints/v2",
+        sum = "h1:srIVS45eQuewqz6fKKu6ZGXaq6FuFg5NzgQBAM6g8Y4=",
+        version = "v2.4.28",
+    )
+    go_repository(
+        name = "com_github_aws_aws_sdk_go_v2_internal_ini",
+        importpath = "github.com/aws/aws-sdk-go-v2/internal/ini",
+        sum = "h1:LWA+3kDM8ly001vJ1X1waCuLJdtTl48gwkPKWy9sosI=",
+        version = "v1.3.35",
+    )
+
+    go_repository(
+        name = "com_github_aws_aws_sdk_go_v2_internal_v4a",
+        importpath = "github.com/aws/aws-sdk-go-v2/internal/v4a",
+        sum = "h1:wscW+pnn3J1OYnanMnza5ZVYXLX4cKk5rAvUAl4Qu+c=",
+        version = "v1.0.26",
+    )
+    go_repository(
+        name = "com_github_aws_aws_sdk_go_v2_service_internal_accept_encoding",
+        importpath = "github.com/aws/aws-sdk-go-v2/service/internal/accept-encoding",
+        sum = "h1:y2+VQzC6Zh2ojtV2LoC0MNwHWc6qXv/j2vrQtlftkdA=",
+        version = "v1.9.11",
+    )
+    go_repository(
+        name = "com_github_aws_aws_sdk_go_v2_service_internal_checksum",
+        importpath = "github.com/aws/aws-sdk-go-v2/service/internal/checksum",
+        sum = "h1:zZSLP3v3riMOP14H7b4XP0uyfREDQOYv2cqIrvTXDNQ=",
+        version = "v1.1.29",
+    )
+    go_repository(
+        name = "com_github_aws_aws_sdk_go_v2_service_internal_presigned_url",
+        importpath = "github.com/aws/aws-sdk-go-v2/service/internal/presigned-url",
+        sum = "h1:bkRyG4a929RCnpVSTvLM2j/T4ls015ZhhYApbmYs15s=",
+        version = "v1.9.28",
+    )
+    go_repository(
+        name = "com_github_aws_aws_sdk_go_v2_service_internal_s3shared",
+        importpath = "github.com/aws/aws-sdk-go-v2/service/internal/s3shared",
+        sum = "h1:dBL3StFxHtpBzJJ/mNEsjXVgfO+7jR0dAIEwLqMapEA=",
+        version = "v1.14.3",
+    )
+
+    go_repository(
+        name = "com_github_aws_aws_sdk_go_v2_service_s3",
+        importpath = "github.com/aws/aws-sdk-go-v2/service/s3",
+        sum = "h1:ya7fmrN2fE7s1P2gaPbNg5MTkERVWfsH8ToP1YC4Z9o=",
+        version = "v1.35.0",
+    )
+    go_repository(
+        name = "com_github_aws_aws_sdk_go_v2_service_sso",
+        importpath = "github.com/aws/aws-sdk-go-v2/service/sso",
+        sum = "h1:nneMBM2p79PGWBQovYO/6Xnc2ryRMw3InnDJq1FHkSY=",
+        version = "v1.12.12",
+    )
+    go_repository(
+        name = "com_github_aws_aws_sdk_go_v2_service_ssooidc",
+        importpath = "github.com/aws/aws-sdk-go-v2/service/ssooidc",
+        sum = "h1:2qTR7IFk7/0IN/adSFhYu9Xthr0zVFTgBrmPldILn80=",
+        version = "v1.14.12",
+    )
+
+    go_repository(
+        name = "com_github_aws_aws_sdk_go_v2_service_sts",
+        importpath = "github.com/aws/aws-sdk-go-v2/service/sts",
+        sum = "h1:XFJ2Z6sNUUcAz9poj+245DMkrHE4h2j5I9/xD50RHfE=",
+        version = "v1.19.2",
+    )
+    go_repository(
+        name = "com_github_aws_smithy_go",
+        importpath = "github.com/aws/smithy-go",
+        sum = "h1:hgz0X/DX0dGqTYpGALqXJoRKRj5oQ7150i5FdTePzO8=",
+        version = "v1.13.5",
+    )
+
+    go_repository(
         name = "com_github_awslabs_soci_snapshotter",
         importpath = "github.com/awslabs/soci-snapshotter",
         replace = "github.com/buildbuddy-io/soci-snapshotter",
@@ -366,9 +492,6 @@ def install_buildbuddy_dependencies(workspace_name = "buildbuddy"):
     )
     go_repository(
         name = "com_github_bazelbuild_bazelisk",
-        build_directives = [
-            "gazelle:resolve github.com/bgentry/go-netrc/netrc @com_github_bgentry_go_netrc//netrc:go_default_library",
-        ],
         build_file_generation = "on",
         importpath = "github.com/bazelbuild/bazelisk",
         sum = "h1:TDt+a1PYrnBF9on3WRJUisXXFhCMrhcNo8OebyS5Q34=",
@@ -502,9 +625,6 @@ def install_buildbuddy_dependencies(workspace_name = "buildbuddy"):
 
     go_repository(
         name = "com_github_bojand_ghz",
-        build_directives = [
-            "gazelle:proto package",
-        ],
         importpath = "github.com/bojand/ghz",
         sum = "h1:dTMxg+tUcLMw8BYi7vQPjXsrM2DJ20ns53hz1am1SbQ=",
         version = "v0.117.0",
@@ -818,9 +938,6 @@ def install_buildbuddy_dependencies(workspace_name = "buildbuddy"):
     )
     go_repository(
         name = "com_github_cncf_xds_go",
-        build_directives = [
-            "gazelle:resolve go github.com/envoyproxy/protoc-gen-validate/validate @com_github_envoyproxy_protoc_gen_validate//validate:go_default_library",
-        ],
         importpath = "github.com/cncf/xds/go",
         sum = "h1:/inchEIKaYC1Akx+H+gqO04wryn5h75LSazbRlnya1k=",
         version = "v0.0.0-20230607035331-e9ce68804cb4",
@@ -1407,9 +1524,6 @@ def install_buildbuddy_dependencies(workspace_name = "buildbuddy"):
     )
     go_repository(
         name = "com_github_envoyproxy_go_control_plane",
-        build_directives = [
-            "gazelle:resolve go github.com/envoyproxy/protoc-gen-validate/validate @com_github_envoyproxy_protoc_gen_validate//validate:go_default_library",
-        ],
         importpath = "github.com/envoyproxy/go-control-plane",
         sum = "h1:wSUXTlLfiAQRWs2F+p+EKOY9rUyis1MyGqJ2DIk5HpM=",
         version = "v0.11.1",
@@ -1483,9 +1597,6 @@ def install_buildbuddy_dependencies(workspace_name = "buildbuddy"):
 
     go_repository(
         name = "com_github_firecracker_microvm_firecracker_go_sdk",
-        build_directives = [
-            "gazelle:resolve go github.com/containernetworking/cni/pkg/types/current @com_github_containernetworking_cni//pkg/types/current",
-        ],
         importpath = "github.com/firecracker-microvm/firecracker-go-sdk",
         replace = "github.com/bduffany/firecracker-go-sdk",
         sum = "h1:gxdryq8e81djt9+N7gUa4FVJO427la9UUQEiMo2B8tE=",
@@ -2165,9 +2276,6 @@ def install_buildbuddy_dependencies(workspace_name = "buildbuddy"):
     go_repository(
         name = "com_github_golang_protobuf",
         importpath = "github.com/golang/protobuf",
-        # build_file_generation = "off",
-        # patch_args = ["-p1"],
-        # patches = ["@io_bazel_rules_go//third_party:com_github_golang_protobuf-gazelle.patch"],
         sum = "h1:KhyjKVUg7Usr/dYsdSqoFveMYd5ko72D+zANwlG1mmg=",
         version = "v1.5.3",
     )
@@ -4099,15 +4207,6 @@ def install_buildbuddy_dependencies(workspace_name = "buildbuddy"):
 
     go_repository(
         name = "com_github_nishanths_exhaustive",
-        build_directives = [
-            "gazelle:map_kind go_library @io_bazel_rules_go//go:def.bzl",
-            "gazelle:resolve go switch/y @com_github_nishanths_exhaustive//exhaustive/testdata/src/switch/y",
-            "gazelle:resolve go map/y @com_github_nishanths_exhaustive//exhaustive/testdata/src/map/y",
-            "gazelle:resolve go golang.org/x/tools/go/analysis @org_golang_x_tools//go/analysis:go_default_library",
-            "gazelle:resolve go golang.org/x/tools/go/analysis/passes/inspect @org_golang_x_tools//go/analysis/passes/inspect:go_default_library",
-            "gazelle:resolve go golang.org/x/tools/go/ast/inspector @org_golang_x_tools//go/ast/inspector:go_default_library",
-            "gazelle:resolve go golang.org/x/tools/go/ast/astutil @org_golang_x_tools//go/ast/astutil:go_default_library",
-        ],
         importpath = "github.com/nishanths/exhaustive",
         sum = "h1:+ANTMqRNrqwInnP9aszg/0jDo+zbXa4x66U19Bx/oTk=",  # keep
         version = "v0.2.3",  # keep
@@ -4209,9 +4308,6 @@ def install_buildbuddy_dependencies(workspace_name = "buildbuddy"):
 
     go_repository(
         name = "com_github_opencontainers_selinux",
-        build_directives = [
-            "gazelle:resolve go github.com/willf/bitset @com_github_willf_bitset//:bitset",
-        ],
         importpath = "github.com/opencontainers/selinux",
         sum = "h1:+5Zbo97w3Lbmb3PeqQtpmTkMwsW5nRI3YaLpt7tQ7oU=",
         version = "v1.11.0",
@@ -5282,11 +5378,7 @@ def install_buildbuddy_dependencies(workspace_name = "buildbuddy"):
         importpath = "gitlab.com/arm-research/smarter/smarter-device-manager",
         strip_prefix = "smarter-device-manager-v1.20.7",
         sha256 = "b2eb7e20373fbe257361fceff264037cac7d259ee075659fe1ec429c122e4d13",
-        build_directives = [
-            "gazelle:resolve go google.golang.org/grpc @org_golang_google_grpc//:grpc",
-        ],
         urls = ["https://gitlab.com/arm-research/smarter/smarter-device-manager/-/archive/v1.20.7/smarter-device-manager-v1.20.7.zip"],
-        type = "zip",
     )
 
     go_repository(
@@ -6448,9 +6540,6 @@ def install_buildbuddy_dependencies(workspace_name = "buildbuddy"):
 
     go_repository(
         name = "io_opentelemetry_go_contrib_detectors_gcp",
-        build_directives = [
-            "gazelle:resolve go go.opentelemetry.io/otel/semconv/v1.4.0 @io_opentelemetry_go_otel//semconv/v1.4.0:v1_4_0",
-        ],
         importpath = "go.opentelemetry.io/contrib/detectors/gcp",
         sum = "h1:SsuF2+gqrnmTKSz+KLXcx3A4A7PZXqbuRZbm4I6HcX0=",
         version = "v1.17.0",
@@ -6458,9 +6547,6 @@ def install_buildbuddy_dependencies(workspace_name = "buildbuddy"):
 
     go_repository(
         name = "io_opentelemetry_go_contrib_instrumentation_google_golang_org_grpc_otelgrpc",
-        build_directives = [
-            "gazelle:resolve go go.opentelemetry.io/otel/semconv/v1.4.0 @io_opentelemetry_go_otel//semconv/v1.4.0:v1_4_0",
-        ],
         importpath = "go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc",
         sum = "h1:ZOLJc06r4CB42laIXg/7udr0pbZyuAihN10A/XuiQRY=",
         version = "v0.42.0",
@@ -6474,12 +6560,6 @@ def install_buildbuddy_dependencies(workspace_name = "buildbuddy"):
 
     go_repository(
         name = "io_opentelemetry_go_otel",
-        # The OpenTelemetry packages use internal packages across module boundaries which is legal in Go but seems to
-        # confuse Gazelle.
-        build_directives = [
-            "gazelle:go_visibility @io_opentelemetry_go_otel_metric//:__subpackages__",
-        ],
-        build_file_proto_mode = "disable",
         importpath = "go.opentelemetry.io/otel",
         sum = "h1:Z7GVAX/UkAXPKsy94IU+i6thsQS4nb7LviLpnaNeW8s=",
         version = "v1.16.0",
@@ -6487,9 +6567,6 @@ def install_buildbuddy_dependencies(workspace_name = "buildbuddy"):
 
     go_repository(
         name = "io_opentelemetry_go_otel_exporters_jaeger",
-        build_directives = [
-            "gazelle:resolve go go.opentelemetry.io/otel/semconv/v1.4.0 @io_opentelemetry_go_otel//semconv/v1.4.0:v1_4_0",
-        ],
         importpath = "go.opentelemetry.io/otel/exporters/jaeger",
         sum = "h1:YhxxmXZ011C0aDZKoNw+juVWAmEfv/0W2XBOv9aHTaA=",
         version = "v1.16.0",
@@ -6541,9 +6618,6 @@ def install_buildbuddy_dependencies(workspace_name = "buildbuddy"):
 
     go_repository(
         name = "io_opentelemetry_go_otel_sdk",
-        build_directives = [
-            "gazelle:resolve go go.opentelemetry.io/otel/semconv/v1.4.0 @io_opentelemetry_go_otel//semconv/v1.4.0:v1_4_0",
-        ],
         importpath = "go.opentelemetry.io/otel/sdk",
         sum = "h1:Z1Ok1YsijYL0CSJpHt4cS3wDDh7p572grzNrBMiMWgE=",
         version = "v1.16.0",
@@ -6788,9 +6862,6 @@ def install_buildbuddy_dependencies(workspace_name = "buildbuddy"):
     go_repository(
         name = "org_golang_x_tools",
         importpath = "golang.org/x/tools",
-        # build_file_generation = "off",
-        # patch_args = ["-p1"],
-        # patches = ["@io_bazel_rules_go//third_party:org_golang_x_tools-gazelle.patch"],
         sum = "h1:tvDr/iQoUqNdohiYm0LmmKcBk+q86lb9EprIUFhHHGg=",
         version = "v0.10.0",
     )
@@ -6964,17 +7035,16 @@ def install_buildbuddy_dependencies(workspace_name = "buildbuddy"):
     )
 
     http_archive(
+        name = "com_github_buildbuddy_io_firecracker_firecracker-v1.4.0-20230720-cf5f56f",
+        sha256 = "b36d9ad62ca467d2794635c4f19b0993c11bb46ed3b575037287964f9c82cc9b",
+        urls = ["https://storage.googleapis.com/buildbuddy-tools/binaries/firecracker/firecracker-v1.4.0-20230720-cf5f56f.tgz"],
+        build_file_content = 'exports_files(["firecracker-v1.4.0-20230720-cf5f56f", "jailer-v1.4.0-20230720-cf5f56f"])',
+    )
+    http_archive(
         name = "com_github_containerd_stargz_snapshotter-v0.11.4-linux-amd64",
         sha256 = "56933aa04a64d3bf6991f9b1be127ac9896fe597d2fba194c67c2dd4368bbae3",
         urls = ["https://github.com/containerd/stargz-snapshotter/releases/download/v0.11.4/stargz-snapshotter-v0.11.4-linux-amd64.tar.gz"],
         build_file_content = 'exports_files(["stargz-store"])',
-    )
-    http_archive(
-        name = "com_github_firecracker_microvm_firecracker-v1.1.1-x86_64",
-        sha256 = "29194e13888358c6332995199ee288c081a8a23e68f0046944e4bb7f6548af57",
-        urls = ["https://github.com/firecracker-microvm/firecracker/releases/download/v1.1.1/firecracker-v1.1.1-x86_64.tgz"],
-        strip_prefix = "release-v1.1.1-x86_64",
-        build_file_content = 'exports_files(["firecracker-v1.1.1-x86_64", "jailer-v1.1.1-x86_64"])',
     )
 
     http_file(
