@@ -401,6 +401,7 @@ type UserDB interface {
 	// valid authenticator is present in the environment and will return
 	// a UserToken given the provided context.
 	GetUser(ctx context.Context) (*tables.User, error)
+	GetUserByID(ctx context.Context, id string) (*tables.User, error)
 	// GetImpersonatedUser will return the authenticated user's information
 	// with a single group membership corresponding to the group they are trying
 	// to impersonate. It requires that the authenticated user has impersonation
@@ -1101,7 +1102,7 @@ type KMS interface {
 type SecretService interface {
 	GetPublicKey(ctx context.Context, req *skpb.GetPublicKeyRequest) (*skpb.GetPublicKeyResponse, error)
 	ListSecrets(ctx context.Context, req *skpb.ListSecretsRequest) (*skpb.ListSecretsResponse, error)
-	UpdateSecret(ctx context.Context, req *skpb.UpdateSecretRequest) (*skpb.UpdateSecretResponse, error)
+	UpdateSecret(ctx context.Context, req *skpb.UpdateSecretRequest) (*skpb.UpdateSecretResponse, bool, error)
 	DeleteSecret(ctx context.Context, req *skpb.DeleteSecretRequest) (*skpb.DeleteSecretResponse, error)
 
 	// Internal use only -- fetches decoded secrets for use in running a command.
