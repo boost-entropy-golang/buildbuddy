@@ -8,55 +8,15 @@
   margin-top: 32px;
 }
 
-.audit-log-entry {
-  display: flex;
-}
-
-.audit-logs-header {
-  display: flex;
-}
-
-.audit-logs-header div {
-  background-color: #eee;
-  border: 1px solid #f1f3f4;
-  padding: 8px;
-}
-
-.audit-log-entry > div {
-  border: 1px solid #f1f3f4;
-  padding: 8px;
-}
-
-.audit-logs .timestamp {
-  width: 250px;
-}
-
-.audit-logs .user {
-  width: 200px;
-}
-
-.audit-logs .user div {
-  margin-bottom: 8px;
-}
-
-.audit-logs .resource {
-  width: 250px;
-}
-
+.audit-logs .user div,
 .audit-logs .resource div {
   margin-bottom: 8px;
 }
 
-.audit-logs .method {
-  width: 200px;
-}
-
-.audit-logs .request {
-  width: 600px;
-}
-
 .audit-logs .request pre {
   margin: 0;
+  white-space: pre-wrap;
+  word-break: break-all;
 }
 
 .audit-logs .icon-text-button > :not(:last-child) {
@@ -65,4 +25,38 @@
 
 .audit-logs .empty-state {
   margin-top: 16px;
+}
+
+.audit-logs .audit-logs-table {
+  display: grid;
+  grid-template-columns:
+    minmax(100px, max-content) /*timestamp*/
+    minmax(100px, max-content) /*user*/
+    minmax(100px, max-content) /*resource*/
+    minmax(100px, max-content) /*method*/
+    minmax(300px, max-content) /*request*/;
+  max-width: fit-content;
+  border: 1px solid #eee;
+  border-radius: 8px;
+  overflow: hidden;
+  background: #eee;
+  gap: 1px;
+}
+
+.audit-logs :is(.audit-logs-header, .audit-log-entry) {
+  display: contents;
+}
+
+.audit-logs :is(.audit-logs-header, .audit-log-entry) > * {
+  padding: 8px;
+  box-sizing: border-box;
+}
+
+.audit-logs .audit-logs-header > * {
+  background: #fafafa;
+  white-space: nowrap;
+}
+
+.audit-logs .audit-log-entry > * {
+  background: white;
 }
