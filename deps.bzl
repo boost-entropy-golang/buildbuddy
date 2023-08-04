@@ -3233,7 +3233,7 @@ def install_buildbuddy_dependencies(workspace_name = "buildbuddy"):
         importpath = "github.com/jotfs/fastcdc-go",
         patch_args = ["-p1"],
         patch_tool = "patch",
-        patches = ["//buildpatches:fastcdc.patch"],
+        patches = ["@{}//buildpatches:fastcdc.patch".format(workspace_name)],
         sum = "h1:WHYIGk3k9NumGWfp4YMsemEcx/s4JKpGAa6tpCpHJOo=",
         version = "v0.2.0",
     )
@@ -4154,6 +4154,12 @@ def install_buildbuddy_dependencies(workspace_name = "buildbuddy"):
         importpath = "github.com/mwitkow/go-conntrack",
         sum = "h1:KUppIJq7/+SVif2QVs3tOP0zanoHgBEVAwHxUSIzRqU=",
         version = "v0.0.0-20190716064945-2f068394615f",
+    )
+    go_repository(
+        name = "com_github_mwitkow_grpc_proxy",
+        importpath = "github.com/mwitkow/grpc-proxy",
+        sum = "h1:62uLwA3l2JMH84liO4ZhnjTH5PjFyCYxbHLgXPaJMtI=",
+        version = "v0.0.0-20230212185441-f345521cb9c9",
     )
 
     go_repository(
