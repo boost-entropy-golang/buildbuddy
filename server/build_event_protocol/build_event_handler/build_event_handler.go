@@ -39,7 +39,6 @@ import (
 	"github.com/buildbuddy-io/buildbuddy/server/util/redact"
 	"github.com/buildbuddy-io/buildbuddy/server/util/status"
 	"github.com/buildbuddy-io/buildbuddy/server/util/terminal"
-	"github.com/buildbuddy-io/buildbuddy/server/util/usageutil"
 	"github.com/buildbuddy-io/buildbuddy/server/util/uuid"
 	"github.com/google/shlex"
 	"github.com/prometheus/client_golang/prometheus"
@@ -1052,7 +1051,9 @@ func (e *EventChannel) handleEvent(event *pepb.PublishBuildToolEventStreamReques
 		// this is the first attempt of this invocation, to guarantee that we
 		// don't increment the usage on invocation retries.
 		if ut := e.env.GetUsageTracker(); ut != nil && ti.Attempt == 1 {
-			incrementInvocationUsage(e.ctx, ut)
+			if err := ut.Increment(e.ctx, &tables.UsageCounts{Invocations: 1}); err != nil {
+				log.CtxWarningf(e.ctx, "Failed to record invocation usage: %s", err)
+			}
 		}
 	} else if !e.hasReceivedEventWithOptions || !e.hasReceivedStartedEvent {
 		e.bufferedEvents = append(e.bufferedEvents, invocationEvent)
@@ -1311,7 +1312,27 @@ func streamRawInvocationEvents(env environment.Env, ctx context.Context, streamI
 	return nil
 }
 
+// LookupInvocation looks up the invocation, including all events. Prefer to use
+// LookupInvocationWithCallback whenever possible, which avoids buffering events
+// in memory.
 func LookupInvocation(env environment.Env, ctx context.Context, iid string) (*inpb.Invocation, error) {
+	var events []*inpb.InvocationEvent
+	inv, err := LookupInvocationWithCallback(ctx, env, iid, func(event *inpb.InvocationEvent) error {
+		events = append(events, event)
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	inv.Event = events
+	return inv, nil
+}
+
+// LookupInvocationWithCallback looks up an invocation but uses a callback for
+// events instead of buffering events into the events list.
+//
+// TODO: switch to using this API wherever possible.
+func LookupInvocationWithCallback(ctx context.Context, env environment.Env, iid string, cb invocationEventCB) (*inpb.Invocation, error) {
 	ti, err := env.GetInvocationDB().LookupInvocation(ctx, iid)
 	if err != nil {
 		return nil, err
@@ -1405,7 +1426,9 @@ func LookupInvocation(env environment.Env, ctx context.Context, iid string) (*in
 				structuredCommandLines = append(structuredCommandLines, p.StructuredCommandLine)
 			}
 
-			events = append(events, event)
+			if err := cb(event); err != nil {
+				return err
+			}
 			return nil
 		})
 		if err != nil {
@@ -1564,17 +1587,5 @@ func toStoredInvocation(inv *tables.Invocation) *sipb.StoredInvocation {
 		InvocationStatus: inv.InvocationStatus,
 		Success:          inv.Success,
 		Tags:             inv.Tags,
-	}
-}
-
-func incrementInvocationUsage(ctx context.Context, ut interfaces.UsageTracker) {
-	labels, err := usageutil.Labels(ctx)
-	if err != nil {
-		log.CtxWarningf(ctx, "Failed to compute invocation usage labels: %s", err)
-		return
-	}
-	if err := ut.Increment(ctx, labels, &tables.UsageCounts{Invocations: 1}); err != nil {
-		log.CtxWarningf(ctx, "Failed to increment invocation usage: %s", err)
-		return
 	}
 }
