@@ -46,6 +46,8 @@ const (
 	targetHistoryPageSize = 20
 
 	// The max number of targets returned in each TargetGroup page.
+	// TODO(bduffany): let the client set this. We want this to be 100 when on
+	// the Targets tab but 10 when on the overview tab.
 	targetPageSize = 12
 
 	// When returning a paginated list of all targets in an invocation with
@@ -142,7 +144,9 @@ func GetTarget(ctx context.Context, env environment.Env, inv *inpb.Invocation, i
 	}
 
 	var statuses []cmpb.Status
-	if req.GetTargetLabel() == "" && req.GetStatus() == 0 {
+	// Note: req.Status == nil means the status was unset. req.Status will be
+	// non-nil and set to 0 when explicitly requesting the artifact listing.
+	if req.GetTargetLabel() == "" && req.Status == nil {
 		// Requesting a general target listing; fetch initial data pages for
 		// status 0 (for the top-level target+files listing), plus each status
 		// appearing in the build (just metadata).
@@ -174,6 +178,12 @@ func GetTarget(ctx context.Context, env environment.Env, inv *inpb.Invocation, i
 				labels = append(labels, t.GetMetadata().GetLabel())
 			}
 		}
+		// When requesting artifacts, filter out target labels that don't have
+		// any artifacts.
+		if s == 0 {
+			labels = labelsWithFiles(idx, labels)
+		}
+
 		// Set TotalCount based on the length of the label list *before* slicing
 		// based on the page token.
 		g.TotalCount = int64(len(labels))
@@ -247,8 +257,52 @@ func GetTarget(ctx context.Context, env environment.Env, inv *inpb.Invocation, i
 			}
 			g.NextPageToken = tok
 		}
+
+		// When the invocation is in progress, we usually return a non-empty
+		// page token so that the client knows there may be more results since
+		// the last fetch. However, if the page token offset is within the first
+		// page, then the fetched results will overlap with the initial page of
+		// results that is fetched as part of the full GetInvocation refresh
+		// that the UI does every 3s. The client has to somehow deal with this
+		// overlap, which adds some complexity. So for now, we just return an
+		// empty page token whenever there is less than a single page of data
+		// available.
+		if g.TotalCount < page.Limit {
+			g.NextPageToken = ""
+		}
 	}
 	return res, nil
+}
+
+func labelsWithFiles(idx *event_index.Index, labels []string) []string {
+	out := make([]string, 0, len(labels))
+	for _, label := range labels {
+		if hasFiles(idx, label) {
+			out = append(out, label)
+		}
+	}
+	return out
+}
+
+func hasFiles(idx *event_index.Index, label string) bool {
+	completed := idx.TargetCompleteEventByLabel[label]
+	if completed == nil {
+		return false
+	}
+	for _, g := range completed.GetOutputGroup() {
+		for _, s := range g.GetFileSets() {
+			for _, f := range idx.NamedSetOfFilesByID[s.GetId()].GetFiles() {
+				if f.GetUri() == "" {
+					// Ignore inlined file contents and symlinks for now.
+					// TODO: render these in the UI so that we can just
+					// return `len(OutputGroup) > 0` here.
+					continue
+				}
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func filesForLabel(idx *event_index.Index, label string) []*build_event_stream.File {
