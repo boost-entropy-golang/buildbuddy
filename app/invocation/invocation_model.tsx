@@ -2,6 +2,7 @@ import { HelpCircle, PlayCircle, XCircle, CheckCircle } from "lucide-react";
 import moment from "moment";
 import React from "react";
 import { Subject } from "rxjs";
+import { api as api_common } from "../../proto/api/v1/common_ts_proto";
 import { api_key } from "../../proto/api_key_ts_proto";
 import { build_event_stream } from "../../proto/build_event_stream_ts_proto";
 import { cache } from "../../proto/cache_ts_proto";
@@ -43,6 +44,7 @@ export default class InvocationModel {
   structuredCommandLine: command_line.CommandLine[] = [];
   finished?: build_event_stream.BuildFinished;
   aborted?: build_event_stream.BuildEvent;
+  failedAction?: build_event_stream.BuildEvent;
   toolLogs?: build_event_stream.BuildToolLogs;
   workflowConfigured?: build_event_stream.WorkflowConfigured;
   childInvocationsConfigured?: build_event_stream.ChildInvocationsConfigured;
@@ -110,6 +112,10 @@ export default class InvocationModel {
         let results = this.actionMap.get(buildEvent.id.actionCompleted.label) || [];
         results.push(event as invocation.InvocationEvent);
         this.actionMap.set(buildEvent.id.actionCompleted.label, results);
+
+        if (buildEvent?.action?.failureDetail?.message && !this.failedAction) {
+          this.failedAction = buildEvent;
+        }
       }
       if (buildEvent.testSummary && buildEvent.id?.testSummary?.label) {
         this.testSummaryMap.set(buildEvent.id.testSummary.label, event as invocation.InvocationEvent);
@@ -301,6 +307,43 @@ export default class InvocationModel {
 
   isCacheCompressionEnabled() {
     return this.optionsMap.get("experimental_remote_cache_compression") === "1";
+  }
+
+  getTargetConfiguredCount() {
+    return Number(this.invocation.targetConfiguredCount) || this.targets.length;
+  }
+
+  getFailedToBuildCount() {
+    return this.invocation.targetGroups.length
+      ? this.targetCountForStatus(api_common.v1.Status.FAILED_TO_BUILD)
+      : this.brokenTest.length;
+  }
+
+  getFailedCount() {
+    return this.invocation.targetGroups.length
+      ? this.targetCountForStatus(api_common.v1.Status.FAILED)
+      : this.failedTest.length;
+  }
+
+  getBuiltCount() {
+    return this.invocation.targetGroups.length
+      ? this.targetCountForStatus(api_common.v1.Status.BUILT)
+      : this.succeeded.length;
+  }
+
+  getFlakyCount() {
+    return this.invocation.targetGroups.length
+      ? this.targetCountForStatus(api_common.v1.Status.FLAKY)
+      : this.flakyTest.length;
+  }
+
+  private targetCountForStatus(status: api_common.v1.Status): number {
+    for (const group of this.invocation.targetGroups) {
+      if (group.status === status) {
+        return Number(group.totalCount);
+      }
+    }
+    return 0;
   }
 
   getCache() {

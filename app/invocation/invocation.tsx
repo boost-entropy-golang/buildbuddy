@@ -330,12 +330,13 @@ export default class InvocationComponent extends React.Component<Props, State> {
               tab={this.props.tab}
               search={this.props.search}
               placeholder={activeTab == "execution" ? "Filter by digest or command..." : ""}
+              // When serving a paginated invocation, debounce since searching
+              // is done on the server.
+              debounceMillis={this.state.model.invocation.targetGroups.length ? 200 : 0}
             />
           )}
 
-          {(activeTab === "all" || activeTab == "log") && this.state.model.aborted?.aborted?.description && (
-            <ErrorCardComponent model={this.state.model} />
-          )}
+          {(activeTab === "all" || activeTab == "log") && <ErrorCardComponent model={this.state.model} />}
 
           {(activeTab === "all" || activeTab == "log") && this.state.model.botSuggestions.length > 0 && (
             <InvocationBotCard suggestions={this.state.model.botSuggestions} />

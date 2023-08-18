@@ -30,6 +30,7 @@ type Index struct {
 	TargetsByStatus            map[cmnpb.Status][]*trpb.Target
 	NamedSetOfFilesByID        map[string]*bespb.NamedSetOfFiles
 	ActionEvents               []*bespb.BuildEvent
+	ConfiguredCount            int64
 	// Events which aren't indexed by target and are instead returned in the
 	// top-level invocation proto.
 	TopLevelEvents []*inpb.InvocationEvent
@@ -63,11 +64,13 @@ func (idx *Index) Add(event *inpb.InvocationEvent) {
 		nsid := event.GetBuildEvent().GetId().GetNamedSet().GetId()
 		idx.NamedSetOfFilesByID[nsid] = p.NamedSetOfFiles
 	case *bespb.BuildEvent_Configured:
+		idx.ConfiguredCount++
 		label := event.GetBuildEvent().GetId().GetTargetConfigured().GetLabel()
 		idx.AllTargetLabels = append(idx.AllTargetLabels, label)
 		idx.BuildTargetByLabel[label] = &trpb.Target{
 			Metadata: &trpb.TargetMetadata{
 				Label:    label,
+				TestSize: cmnpb.TestSize(p.Configured.GetTestSize()),
 				RuleType: p.Configured.GetTargetKind(),
 			},
 			Status: cmnpb.Status_BUILDING,
@@ -118,8 +121,13 @@ func (idx *Index) Add(event *inpb.InvocationEvent) {
 			// the TestSummary for now.
 			return
 		}
+		configuredTarget := idx.BuildTargetByLabel[label]
 		idx.TestTargetByLabel[label] = &trpb.Target{
-			Metadata:    &trpb.TargetMetadata{Label: label},
+			Metadata: &trpb.TargetMetadata{
+				Label:    label,
+				TestSize: configuredTarget.GetMetadata().GetTestSize(),
+				RuleType: configuredTarget.GetMetadata().GetRuleType(),
+			},
 			Status:      api_common.TestStatusToStatus(summary.GetOverallStatus()),
 			Timing:      api_common.TestTimingFromSummary(summary),
 			TestSummary: summary,
@@ -138,6 +146,11 @@ func (idx *Index) Add(event *inpb.InvocationEvent) {
 		}
 	case *bespb.BuildEvent_Action:
 		idx.ActionEvents = append(idx.ActionEvents, event.GetBuildEvent())
+		// Include failed ActionEvents in the top level events so that they
+		// can be rendered as the reason the invocation failed.
+		if p.Action.GetFailureDetail().GetMessage() != "" {
+			idx.TopLevelEvents = append(idx.TopLevelEvents, event)
+		}
 	case *bespb.BuildEvent_Aborted:
 		label := event.GetBuildEvent().GetId().GetTargetCompleted().GetLabel()
 		target := idx.BuildTargetByLabel[label]

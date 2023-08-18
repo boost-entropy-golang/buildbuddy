@@ -3231,11 +3231,9 @@ def install_buildbuddy_dependencies(workspace_name = "buildbuddy"):
     go_repository(
         name = "com_github_jotfs_fastcdc_go",
         importpath = "github.com/jotfs/fastcdc-go",
-        patch_args = ["-p1"],
-        patch_tool = "patch",
-        patches = ["@{}//buildpatches:fastcdc.patch".format(workspace_name)],
-        sum = "h1:WHYIGk3k9NumGWfp4YMsemEcx/s4JKpGAa6tpCpHJOo=",
-        version = "v0.2.0",
+        replace = "github.com/buildbuddy-io/fastcdc-go",
+        sum = "h1:yu6OEmUHMQqiMQ3BOLlhYUe6O34nb4DJob7vt++E42k=",
+        version = "v0.2.0-rc2",
     )
 
     go_repository(
@@ -7144,7 +7142,7 @@ def install_buildbuddy_dependencies(workspace_name = "buildbuddy"):
     )
     http_file(
         name = "org_kernel_git_linux_kernel-vmlinux",
-        sha256 = "57fb3f81d91709c9fe36ba420ca29042eac314f931ade2218daf085b031cf40f",
-        urls = ["https://storage.googleapis.com/buildbuddy-tools/binaries/linux/vmlinux-v5.4-57fb3f81d91709c9fe36ba420ca29042eac314f931ade2218daf085b031cf40f"],
+        sha256 = "4582d9c5d572c0449f55cc1cf317bf154dc0ff25df97378991f7c5bc9554f14e",
+        urls = ["https://storage.googleapis.com/buildbuddy-tools/binaries/linux/vmlinux-v5.15-4582d9c5d572c0449f55cc1cf317bf154dc0ff25df97378991f7c5bc9554f14e"],
         executable = True,
     )

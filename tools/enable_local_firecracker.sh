@@ -11,11 +11,6 @@ if [ "$(id -u)" -ne 0 ]; then
     exit 1
 fi
 
-if ! command -v jailer &>/dev/null; then
-    echo "jailer could not be found (install firecracker + jailer?)"
-    exit 1
-fi
-
 if ! command -v ip &>/dev/null; then
     echo "ip could not be found (install iproute2?)"
     exit 1
@@ -26,11 +21,26 @@ if ! command -v iptables &>/dev/null; then
     exit 1
 fi
 
+# Install firecracker to make sure the local version matches the one in deps.bzl.
+tools/install_firecracker.sh
+
+if ! command -v jailer &>/dev/null; then
+    echo "jailer could not be found (make sure /usr/local/bin is in PATH)"
+    exit 1
+fi
+
 CGROUP2_PATH=$( (mount | grep -E -m1 '^cgroup2 on ' | awk '{print $3}') || true)
 if [[ ! "$CGROUP2_PATH" ]]; then
     echo "missing cgroup2 mount"
     exit 1
 fi
+
+# Set vm.unprivileged_userfaultfd=1, which allows running the UffdPrivileged
+# memory backend as an unprivileged user.
+#
+# See:
+# https://github.com/maggie-lou/firecracker/blob/5747e84568376bbc130b167c2873b30fb46f22a9/src/vmm/src/vmm_config/snapshot.rs#L39-L43
+sysctl -w vm.unprivileged_userfaultfd=1
 
 groupadd -f -r cgroups
 usermod -a -G cgroups root

@@ -37,9 +37,10 @@ interface RepoComponentState {
   workflowResponse: workflow.ExecuteWorkflowResponse | null;
 }
 
+const selectedInstallationIndexLocalStorageKey = "repo-selectedInstallationIndex";
 export default class RepoComponent extends React.Component<RepoComponentProps, RepoComponentState> {
   state: RepoComponentState = {
-    selectedInstallationIndex: 0,
+    selectedInstallationIndex: localStorage[selectedInstallationIndexLocalStorageKey] || 0,
     githubInstallationsLoading: true,
     githubInstallationsResponse: null,
     isCreating: false,
@@ -106,8 +107,8 @@ export default class RepoComponent extends React.Component<RepoComponentProps, R
         install: "true",
       })}`;
     }
-
     let index = Number(e.target.value);
+    localStorage[selectedInstallationIndexLocalStorageKey] = index;
     this.setState({ selectedInstallationIndex: index });
   }
 
@@ -323,12 +324,20 @@ export default class RepoComponent extends React.Component<RepoComponentProps, R
             </button>
           )}
           {this.state.repoResponse && (
-            <a className="view-button" href={this.state.repoResponse.repoUrl} target="_blank">
-              View repository
-            </a>
+            <div className="view-buttons">
+              <a className="view-button" href={this.state.repoResponse.repoUrl} target="_blank">
+                View
+              </a>
+              <a
+                className="code-button"
+                href={this.state.repoResponse.repoUrl?.replace("github.com", "bgithub.com")}
+                target="_blank">
+                Code
+              </a>
+            </div>
           )}
         </div>
-        {this.getSecrets().length && (
+        {this.getSecrets().length > 0 && (
           <div
             className={`repo-block card repo-create ${this.props.user && this.state.repoResponse ? "" : "disabled"}`}>
             <div className="repo-title">Configure deployment</div>

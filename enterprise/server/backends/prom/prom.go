@@ -33,10 +33,10 @@ var (
 	// export to customers.
 	metricConfigs = []*metricConfig{
 		{
-			sourceMetricName: "buildbuddy_remote_exectuion_queue_length",
+			sourceMetricName: "buildbuddy_remote_execution_queue_length",
 			labelNames:       []string{},
 			exportedFamily: &dto.MetricFamily{
-				Name: proto.String("exported_builbduddy_remote_execution_queue_length"),
+				Name: proto.String("exported_buildbuddy_remote_execution_queue_length"),
 				Help: proto.String("Number of actions currently waiting in the executor queue."),
 				Type: dto.MetricType_GAUGE.Enum(),
 			},
