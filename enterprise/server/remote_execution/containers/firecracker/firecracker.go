@@ -26,6 +26,7 @@ import (
 	"github.com/buildbuddy-io/buildbuddy/enterprise/server/remote_execution/blockio"
 	"github.com/buildbuddy-io/buildbuddy/enterprise/server/remote_execution/commandutil"
 	"github.com/buildbuddy-io/buildbuddy/enterprise/server/remote_execution/container"
+	"github.com/buildbuddy-io/buildbuddy/enterprise/server/remote_execution/containers/docker"
 	"github.com/buildbuddy-io/buildbuddy/enterprise/server/remote_execution/nbd/nbdserver"
 	"github.com/buildbuddy-io/buildbuddy/enterprise/server/remote_execution/platform"
 	"github.com/buildbuddy-io/buildbuddy/enterprise/server/remote_execution/snaploader"
@@ -70,6 +71,7 @@ var debugStreamVMLogs = flag.Bool("executor.firecracker_debug_stream_vm_logs", f
 var debugTerminal = flag.Bool("executor.firecracker_debug_terminal", false, "Run an interactive terminal in the Firecracker VM connected to the executor's controlling terminal. For debugging only.")
 var enableNBD = flag.Bool("executor.firecracker_enable_nbd", false, "Enables network block devices for firecracker VMs.")
 var enableUFFD = flag.Bool("executor.firecracker_enable_uffd", false, "Enables userfaultfd for firecracker VMs.")
+var enableLocalSnapshotSharing = flag.Bool("executor.firecracker_enable_local_snapshot_sharing", false, "Enables local snapshot sharing for firecracker VMs. Also requires that firecracker_enable_nbd is true.")
 var dieOnFirecrackerFailure = flag.Bool("executor.die_on_firecracker_failure", false, "Makes the host executor process die if any command orchestrating or running Firecracker fails. Useful for capturing failures preemptively. WARNING: using this option MAY leave the host machine in an unhealthy state on Firecracker failure; some post-hoc cleanup may be necessary.")
 
 const (
@@ -295,6 +297,61 @@ func checkIfFilesExist(targetDir string, files ...string) bool {
 	return true
 }
 
+type Provider struct {
+	env            environment.Env
+	dockerClient   *dockerclient.Client
+	imageCacheAuth *container.ImageCacheAuthenticator
+	buildRoot      string
+}
+
+func NewProvider(env environment.Env, imageCacheAuth *container.ImageCacheAuthenticator, hostBuildRoot string) *Provider {
+	// Best effort trying to initialize the docker client. If it fails, we'll
+	// simply fall back to use skopeo to download and cache container images.
+	client, err := docker.NewClient()
+	if err != nil {
+		client = nil
+	}
+
+	return &Provider{
+		env:            env,
+		dockerClient:   client,
+		imageCacheAuth: imageCacheAuth,
+		buildRoot:      hostBuildRoot,
+	}
+}
+
+func (p *Provider) New(ctx context.Context, props *platform.Properties, task *repb.ScheduledTask, state *rnpb.RunnerState, workingDir string) (container.CommandContainer, error) {
+	var vmConfig *fcpb.VMConfiguration
+	savedState := state.GetContainerState().GetFirecrackerState()
+	if savedState == nil {
+		sizeEstimate := task.GetSchedulingMetadata().GetTaskSize()
+		vmConfig = &fcpb.VMConfiguration{
+			NumCpus:           int64(math.Max(1.0, float64(sizeEstimate.GetEstimatedMilliCpu())/1000)),
+			MemSizeMb:         int64(math.Max(1.0, float64(sizeEstimate.GetEstimatedMemoryBytes())/1e6)),
+			ScratchDiskSizeMb: int64(float64(sizeEstimate.GetEstimatedFreeDiskBytes()) / 1e6),
+			EnableNetworking:  true,
+			InitDockerd:       props.InitDockerd,
+			EnableDockerdTcp:  props.EnableDockerdTCP,
+		}
+	} else {
+		vmConfig = state.GetContainerState().GetFirecrackerState().GetVmConfiguration()
+	}
+	opts := ContainerOpts{
+		VMConfiguration:        vmConfig,
+		SavedState:             savedState,
+		ContainerImage:         props.ContainerImage,
+		User:                   props.DockerUser,
+		DockerClient:           p.dockerClient,
+		ActionWorkingDirectory: workingDir,
+		JailerRoot:             p.buildRoot,
+	}
+	c, err := NewContainer(ctx, p.env, p.imageCacheAuth, task.GetExecutionTask(), opts)
+	if err != nil {
+		return nil, err
+	}
+	return c, nil
+}
+
 // FirecrackerContainer executes commands inside of a firecracker VM.
 type FirecrackerContainer struct {
 	id          string // a random GUID, unique per-run of firecracker
@@ -423,7 +480,14 @@ func NewContainer(ctx context.Context, env environment.Env, imageCacheAuth *cont
 		if err != nil {
 			return nil, err
 		}
-		c.snapshotKey, err = snaploader.NewKey(task, cd.GetHash(), c.id)
+
+		// TODO(Maggie): Once local snapshot sharing is stable, remove runner ID
+		// from the snapshot key
+		runnerID := c.id
+		if *enableNBD && *enableLocalSnapshotSharing {
+			runnerID = ""
+		}
+		c.snapshotKey, err = snaploader.NewKey(task, cd.GetHash(), runnerID)
 		if err != nil {
 			return nil, err
 		}
@@ -556,28 +620,6 @@ func (c *FirecrackerContainer) State(ctx context.Context) (*rnpb.ContainerState,
 	return state, nil
 }
 
-func (c *FirecrackerContainer) unpackBaseSnapshot(ctx context.Context) (string, error) {
-	baseDir := filepath.Join(c.getChroot(), "base")
-	if err := disk.EnsureDirectoryExists(baseDir); err != nil {
-		return "", err
-	}
-	snap, err := c.loader.GetSnapshot(ctx, c.snapshotKey)
-	if err != nil {
-		return "", err
-	}
-	if _, err := c.loader.UnpackSnapshot(ctx, snap, baseDir); err != nil {
-		return "", err
-	}
-	// The base snapshot is no longer useful since we're merging on top
-	// of it and replacing the paused VM snapshot with the new merged
-	// snapshot. Delete it to prevent unnecessary filecache evictions.
-	if err := c.loader.DeleteSnapshot(ctx, snap); err != nil {
-		log.Warningf("Failed to delete snapshot: %s", err)
-	}
-
-	return baseDir, nil
-}
-
 func (c *FirecrackerContainer) pauseVM(ctx context.Context) error {
 	if c.machine == nil {
 		return status.InternalError("failed to pause VM: machine is not started")
@@ -613,7 +655,7 @@ func (c *FirecrackerContainer) saveSnapshot(ctx context.Context, snapshotDetails
 		log.CtxDebugf(ctx, "SaveSnapshot took %s", time.Since(start))
 	}()
 
-	baseMemSnapshotPath := filepath.Join(snapshotDetails.baseSnapshotUnpackDir, fullMemSnapshotName)
+	baseMemSnapshotPath := filepath.Join(c.getChroot(), fullMemSnapshotName)
 	memSnapshotPath := filepath.Join(c.getChroot(), snapshotDetails.memSnapshotName)
 
 	if snapshotDetails.snapshotType == diffSnapshotType {
@@ -660,14 +702,11 @@ func (c *FirecrackerContainer) saveSnapshot(ctx context.Context, snapshotDetails
 	}
 
 	snaploaderStart := time.Now()
-	if _, err := c.loader.CacheSnapshot(ctx, c.snapshotKey, opts); err != nil {
+	_, err := c.loader.CacheSnapshot(ctx, c.snapshotKey, opts)
+	if err != nil {
 		return status.WrapError(err, "add snapshot to cache")
 	}
 	log.CtxDebugf(ctx, "snaploader.CacheSnapshot took %s", time.Since(snaploaderStart))
-
-	// Once we've merged the base snapshot and linked it to filecache, we
-	// don't need the unpack dir anymore and can unlink.
-	os.RemoveAll(snapshotDetails.baseSnapshotUnpackDir)
 
 	return nil
 }
@@ -1939,53 +1978,23 @@ func (c *FirecrackerContainer) Pause(ctx context.Context) error {
 }
 
 type snapshotDetails struct {
-	snapshotType          string
-	memSnapshotName       string
-	vmStateSnapshotName   string
-	baseSnapshotUnpackDir string
+	snapshotType        string
+	memSnapshotName     string
+	vmStateSnapshotName string
 }
 
 func (c *FirecrackerContainer) snapshotDetails(ctx context.Context) (*snapshotDetails, error) {
-	if *enableUFFD {
-		if c.memoryStore != nil {
-			return &snapshotDetails{
-				snapshotType:        diffSnapshotType,
-				memSnapshotName:     diffMemSnapshotName,
-				vmStateSnapshotName: vmStateSnapshotName,
-			}, nil
-		} else {
-			return &snapshotDetails{
-				snapshotType:        fullSnapshotType,
-				memSnapshotName:     fullMemSnapshotName,
-				vmStateSnapshotName: vmStateSnapshotName,
-			}, nil
-		}
+	if c.recycled {
+		return &snapshotDetails{
+			snapshotType:        diffSnapshotType,
+			memSnapshotName:     diffMemSnapshotName,
+			vmStateSnapshotName: vmStateSnapshotName,
+		}, nil
 	}
-
-	// If a snapshot already exists, get a reference to the memory snapshot so
-	// that we can perform a diff snapshot and merge the modified pages on top
-	// of the existing memory snapshot.
-	baseSnapshotUnpackDir, err := c.unpackBaseSnapshot(ctx)
-	if err != nil {
-		// Ignore Unavailable errors since it just means there's no base
-		// snapshot yet (which will happen on the first task executed), or the
-		// snapshot was evicted from cache. When this happens, just fall back to
-		// taking a full snapshot.
-		if status.IsUnavailableError(err) {
-			return &snapshotDetails{
-				snapshotType:        fullSnapshotType,
-				memSnapshotName:     fullMemSnapshotName,
-				vmStateSnapshotName: vmStateSnapshotName,
-			}, nil
-		}
-		return nil, err
-	}
-
 	return &snapshotDetails{
-		snapshotType:          diffSnapshotType,
-		memSnapshotName:       diffMemSnapshotName,
-		vmStateSnapshotName:   vmStateSnapshotName,
-		baseSnapshotUnpackDir: baseSnapshotUnpackDir,
+		snapshotType:        fullSnapshotType,
+		memSnapshotName:     fullMemSnapshotName,
+		vmStateSnapshotName: vmStateSnapshotName,
 	}, nil
 }
 
