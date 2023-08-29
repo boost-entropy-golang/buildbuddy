@@ -32,19 +32,21 @@ import (
 	"github.com/buildbuddy-io/buildbuddy/enterprise/server/util/ext4"
 	"github.com/buildbuddy-io/buildbuddy/enterprise/server/util/vfs_server"
 	"github.com/buildbuddy-io/buildbuddy/enterprise/server/util/vsock"
-	vmsupport_bundle "github.com/buildbuddy-io/buildbuddy/enterprise/vmsupport"
 	"github.com/buildbuddy-io/buildbuddy/server/environment"
 	"github.com/buildbuddy-io/buildbuddy/server/interfaces"
+	"github.com/buildbuddy-io/buildbuddy/server/metrics"
 	"github.com/buildbuddy-io/buildbuddy/server/remote_cache/digest"
 	"github.com/buildbuddy-io/buildbuddy/server/util/alert"
 	"github.com/buildbuddy-io/buildbuddy/server/util/background"
 	"github.com/buildbuddy-io/buildbuddy/server/util/disk"
 	"github.com/buildbuddy-io/buildbuddy/server/util/log"
 	"github.com/buildbuddy-io/buildbuddy/server/util/networking"
+	"github.com/buildbuddy-io/buildbuddy/server/util/perms"
 	"github.com/buildbuddy-io/buildbuddy/server/util/status"
 	"github.com/buildbuddy-io/buildbuddy/server/util/tracing"
 	"github.com/firecracker-microvm/firecracker-go-sdk/client/operations"
 	"github.com/google/uuid"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/sirupsen/logrus"
 	"golang.org/x/sync/errgroup"
 	"golang.org/x/sys/unix"
@@ -52,6 +54,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	containerutil "github.com/buildbuddy-io/buildbuddy/enterprise/server/util/container"
+	vmsupport_bundle "github.com/buildbuddy-io/buildbuddy/enterprise/vmsupport"
 	fcpb "github.com/buildbuddy-io/buildbuddy/proto/firecracker"
 	repb "github.com/buildbuddy-io/buildbuddy/proto/remote_execution"
 	rnpb "github.com/buildbuddy-io/buildbuddy/proto/runner"
@@ -371,6 +374,13 @@ type FirecrackerContainer struct {
 	// Whether the VM was recycled.
 	recycled bool
 
+	// When the VM was initialized (i.e. created or unpaused) for the command
+	// it is currently executing
+	//
+	// This can be used to understand the total time it takes to execute a task,
+	// including VM startup time
+	currentTaskInitTimeUsec int64
+
 	// dockerClient is used to optimize image pulls by reusing image layers from
 	// the Docker cache as well as deduping multiple requests for the same image.
 	dockerClient *dockerclient.Client
@@ -393,7 +403,7 @@ type FirecrackerContainer struct {
 	vmLog              *VMLog
 	env                environment.Env
 	imageCacheAuth     *container.ImageCacheAuthenticator
-	allowSnapshotStart bool
+	createFromSnapshot bool
 	mountWorkspaceFile bool
 
 	// If a container is resumed from a snapshot, the jailer
@@ -410,6 +420,10 @@ type FirecrackerContainer struct {
 }
 
 func NewContainer(ctx context.Context, env environment.Env, imageCacheAuth *container.ImageCacheAuthenticator, task *repb.ExecutionTask, opts ContainerOpts) (*FirecrackerContainer, error) {
+	if *snaploader.EnableLocalSnapshotSharing && !(*enableNBD && *enableUFFD) {
+		return nil, status.FailedPreconditionError("executor configuration error: local snapshot sharing requires NBD and UFFD to be enabled")
+	}
+
 	if opts.VMConfiguration == nil {
 		return nil, status.InvalidArgumentError("missing VMConfiguration")
 	}
@@ -480,12 +494,20 @@ func NewContainer(ctx context.Context, env environment.Env, imageCacheAuth *cont
 		// TODO(Maggie): Once local snapshot sharing is stable, remove runner ID
 		// from the snapshot key
 		runnerID := c.id
-		if *enableNBD && *snaploader.EnableLocalSnapshotSharing {
+		if *snaploader.EnableLocalSnapshotSharing {
 			runnerID = ""
 		}
 		c.snapshotKey, err = snaploader.NewKey(task, cd.GetHash(), runnerID)
 		if err != nil {
 			return nil, err
+		}
+		// If recycling is enabled and a snapshot exists, then when calling
+		// Create(), load the snapshot instead of creating a new VM.
+
+		recyclingEnabled := platform.IsTrue(platform.FindValue(task.GetCommand().GetPlatform(), platform.RecycleRunnerPropertyName))
+		if recyclingEnabled && *snaploader.EnableLocalSnapshotSharing {
+			_, err := loader.GetSnapshot(ctx, c.snapshotKey)
+			c.createFromSnapshot = (err == nil)
 		}
 	} else {
 		c.snapshotKey = opts.SavedState.GetSnapshotKey()
@@ -606,6 +628,14 @@ func alignToMultiple(n int64, multiple int64) int64 {
 // container can be reconstructed from the state on disk after an executor
 // restart.
 func (c *FirecrackerContainer) State(ctx context.Context) (*rnpb.ContainerState, error) {
+	if *snaploader.EnableLocalSnapshotSharing {
+		// When local snapshot sharing is enabled, don't bother explicitly
+		// persisting container state across reboots. Instead we can
+		// deterministically match tasks to cached snapshots just based on the
+		// task's snapshot key.
+		return nil, status.UnimplementedError("not implemented")
+	}
+
 	state := &rnpb.ContainerState{
 		IsolationType: string(platform.FirecrackerContainerType),
 		FirecrackerState: &rnpb.FirecrackerState{
@@ -1529,18 +1559,31 @@ func (c *FirecrackerContainer) Run(ctx context.Context, command *repb.Command, a
 // Create creates a new VM and starts a top-level process inside it listening
 // for commands to execute.
 func (c *FirecrackerContainer) Create(ctx context.Context, actionWorkingDir string) error {
+	c.actionWorkingDir = actionWorkingDir
+
+	if c.createFromSnapshot {
+		log.Debugf("Create: will unpause snapshot")
+		return c.Unpause(ctx)
+	}
+
 	ctx, span := tracing.StartSpan(ctx)
 	defer span.End()
 
 	start := time.Now()
-	defer func() {
-		log.CtxDebugf(ctx, "Create took %s", time.Since(start))
-	}()
+	err := c.create(ctx)
 
+	createTime := time.Since(start)
+	log.CtxDebugf(ctx, "Create took %s", createTime)
+
+	success := err == nil
+	c.observeStageDuration(ctx, "init", createTime.Microseconds(), success)
+	return err
+}
+
+func (c *FirecrackerContainer) create(ctx context.Context) error {
+	c.currentTaskInitTimeUsec = time.Now().UnixMicro()
 	c.rmOnce = &sync.Once{}
 	c.rmErr = nil
-
-	c.actionWorkingDir = actionWorkingDir
 
 	var err error
 	c.tempDir, err = os.MkdirTemp(c.jailerRoot, "fc-container-*")
@@ -1703,11 +1746,16 @@ func (c *FirecrackerContainer) Exec(ctx context.Context, cmd *repb.Command, stdi
 	defer span.End()
 
 	start := time.Now()
-	defer func() {
-		log.CtxDebugf(ctx, "Exec took %s", time.Since(start))
-	}()
-
 	result := &interfaces.CommandResult{ExitCode: commandutil.NoExitCode}
+	defer func() {
+		execDuration := time.Since(start)
+		log.CtxDebugf(ctx, "Exec took %s", execDuration)
+
+		timeSinceContainerInit := time.Since(time.UnixMicro(c.currentTaskInitTimeUsec))
+		execSuccess := result.Error == nil
+		c.observeStageDuration(ctx, "task_lifecycle", timeSinceContainerInit.Microseconds(), execSuccess)
+		c.observeStageDuration(ctx, "exec", execDuration.Microseconds(), execSuccess)
+	}()
 
 	if c.fsLayout == nil {
 		if err := c.syncWorkspace(ctx); err != nil {
@@ -1921,10 +1969,17 @@ func (c *FirecrackerContainer) Pause(ctx context.Context) error {
 	defer span.End()
 
 	start := time.Now()
-	defer func() {
-		log.CtxDebugf(ctx, "Pause took %s", time.Since(start))
-	}()
+	err := c.pause(ctx)
 
+	pauseTime := time.Since(start)
+	log.CtxDebugf(ctx, "Pause took %s", pauseTime)
+
+	success := err == nil
+	c.observeStageDuration(ctx, "pause", pauseTime.Microseconds(), success)
+	return err
+}
+
+func (c *FirecrackerContainer) pause(ctx context.Context) error {
 	snapDetails, err := c.snapshotDetails(ctx)
 	if err != nil {
 		return err
@@ -2027,11 +2082,19 @@ func (c *FirecrackerContainer) Unpause(ctx context.Context) error {
 	defer span.End()
 
 	start := time.Now()
-	defer func() {
-		log.CtxDebugf(ctx, "Unpause took %s", time.Since(start))
-	}()
+	err := c.unpause(ctx)
 
+	unpauseTime := time.Since(start)
+	log.CtxDebugf(ctx, "Unpause took %s", unpauseTime)
+
+	success := err == nil
+	c.observeStageDuration(ctx, "init", unpauseTime.Microseconds(), success)
+	return err
+}
+
+func (c *FirecrackerContainer) unpause(ctx context.Context) error {
 	c.recycled = true
+	c.currentTaskInitTimeUsec = time.Now().UnixMicro()
 
 	// Don't hot-swap the workspace into the VM since we haven't yet downloaded inputs.
 	return c.LoadSnapshot(ctx)
@@ -2120,6 +2183,37 @@ func (c *FirecrackerContainer) parseSegFault(cmdResult *interfaces.CommandResult
 	// Logs contain "\r\n"; convert these to universal line endings.
 	tail = strings.ReplaceAll(tail, "\r\n", "\n")
 	return status.InternalErrorf("process hit a segfault:\n%s", tail)
+}
+
+func (c *FirecrackerContainer) observeStageDuration(ctx context.Context, taskStage string, durationUsec int64, success bool) {
+	taskStatus := "success"
+	if !success {
+		taskStatus = "failure"
+	}
+
+	recycleStatus := "clean"
+	if c.recycled {
+		recycleStatus = "recycled"
+	}
+
+	var groupID string
+	u, err := perms.AuthenticatedUser(ctx, c.env)
+	if err == nil {
+		groupID = u.GetGroupID()
+	}
+
+	snapshotSharingStatus := "disabled"
+	if *snaploader.EnableLocalSnapshotSharing {
+		snapshotSharingStatus = "local_sharing_enabled"
+	}
+
+	metrics.FirecrackerStageDurationUsec.With(prometheus.Labels{
+		metrics.Stage:                    taskStage,
+		metrics.StatusHumanReadableLabel: taskStatus,
+		metrics.RecycledRunnerStatus:     recycleStatus,
+		metrics.GroupID:                  groupID,
+		metrics.SnapshotSharingStatus:    snapshotSharingStatus,
+	}).Observe(float64(durationUsec))
 }
 
 // VMLog retains the tail of the VM log.
