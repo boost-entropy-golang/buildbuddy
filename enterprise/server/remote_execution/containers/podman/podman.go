@@ -75,12 +75,14 @@ var (
 	sociStoreKeychainPort   = flag.Int("executor.podman.soci_store_keychain_port", 1989, "The port on which the soci-store local keychain service is exposed, for sharing credentials for streaming private container images.")
 	podmanRuntime           = flag.String("executor.podman.runtime", "", "Enables running podman with other runtimes, like gVisor (runsc).")
 	podmanEnableStats       = flag.Bool("executor.podman.enable_stats", false, "Whether to enable cgroup-based podman stats.")
+	transientStore          = flag.Bool("executor.podman.transient_store", false, "Enables --transient-store for podman commands.")
 
 	// Additional time used to kill the container if the command doesn't exit cleanly
 	containerFinalizationTimeout = 10 * time.Second
 
-	storageErrorRegex = regexp.MustCompile(`(?s)A storage corruption might have occurred.*Error: readlink.*no such file or directory`)
-	userRegex         = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]*(:[a-z0-9_-]*)?$`)
+	storageErrorRegex     = regexp.MustCompile(`(?s)A storage corruption might have occurred.*Error: readlink.*no such file or directory`)
+	inputOutputErrorRegex = regexp.MustCompile(`can't stat lower layer.*input/output error`)
+	userRegex             = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]*(:[a-z0-9_-]*)?$`)
 
 	// A map from image name to pull status. This is used to avoid parallel pulling of the same image.
 	pullOperations sync.Map
@@ -88,6 +90,10 @@ var (
 
 const (
 	podmanInternalExitCode = 125
+
+	// error code returned by podman when it can't invoke the requested command.
+	podmanCannotInvokeExitCode = 126
+
 	// podmanExecSIGKILLExitCode is the exit code returned by `podman exec` when the exec
 	// process is killed due to the parent container being removed.
 	podmanExecSIGKILLExitCode = 137
@@ -556,10 +562,6 @@ func (c *podmanCommandContainer) Exec(ctx context.Context, cmd *repb.Command, st
 }
 
 func (c *podmanCommandContainer) IsImageCached(ctx context.Context) (bool, error) {
-	if c.imageIsStreamable {
-		return true, nil
-	}
-
 	// Try to avoid the `pull` command which results in a network roundtrip.
 	listResult := runPodman(ctx, "image", &container.Stdio{}, "inspect", "--format={{.ID}}", c.image)
 	if listResult.ExitCode == podmanInternalExitCode {
@@ -927,6 +929,9 @@ func (c *podmanCommandContainer) State(ctx context.Context) (*rnpb.ContainerStat
 func runPodman(ctx context.Context, subCommand string, stdio *container.Stdio, args ...string) *interfaces.CommandResult {
 	command := []string{
 		"podman",
+		// Use transient store to reduce contention.
+		// See https://github.com/containers/podman/issues/19824
+		fmt.Sprintf("--transient-store=%t", *transientStore),
 		subCommand,
 	}
 
@@ -957,19 +962,27 @@ func (c *podmanCommandContainer) killContainerIfRunning(ctx context.Context) err
 	return err
 }
 
-// An image can be corrupted if "podman pull" command is killed when pulling a parent layer.
-// More details can be found at https://github.com/containers/storage/issues/1136. When this
-// happens when need to remove the image before re-pulling the image in order to fix it.
+// An image can be corrupted in a couple of circumstances:
+//   - If "podman pull" command is killed when pulling a parent layer, more details:
+//     https://github.com/containers/storage/issues/1136
+//   - Due to a bug streaming the container image:
+//     https://github.com/buildbuddy-io/buildbuddy-internal/issues/2570
+//
+// In either case we need to remove the image before re-pulling the image in order to fix it.
 func (c *podmanCommandContainer) maybeCleanupCorruptedImages(ctx context.Context, result *interfaces.CommandResult) error {
-	if result.ExitCode != podmanInternalExitCode {
-		return nil
+	stderr := string(result.Stderr)
+	if result.ExitCode == podmanInternalExitCode && storageErrorRegex.MatchString(stderr) {
+		log.CtxInfo(ctx, "podman detected storage corruption, removing image")
+		result.Error = status.UnavailableError("a storage corruption occurred")
+		result.ExitCode = commandutil.NoExitCode
+		return removeImage(ctx, c.image)
+	} else if result.ExitCode == podmanCannotInvokeExitCode && inputOutputErrorRegex.MatchString(stderr) {
+		log.CtxInfo(ctx, "podman detected input/output error, removing image")
+		result.Error = status.UnavailableError("an input/output error occurred streaming the image")
+		result.ExitCode = commandutil.NoExitCode
+		return removeImage(ctx, c.image)
 	}
-	if !storageErrorRegex.MatchString(string(result.Stderr)) {
-		return nil
-	}
-	result.Error = status.UnavailableError("a storage corruption occurred")
-	result.ExitCode = commandutil.NoExitCode
-	return removeImage(ctx, c.image)
+	return nil
 }
 
 func removeImage(ctx context.Context, imageName string) error {
