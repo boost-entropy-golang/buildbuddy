@@ -12,7 +12,6 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -1414,7 +1413,7 @@ func (p *PebbleCache) blobDir() string {
 }
 
 func (p *PebbleCache) lookupFileMetadataAndVersion(ctx context.Context, iter pebble.Iterator, key filestore.PebbleKey) (*rfpb.FileMetadata, filestore.PebbleKeyVersion, error) {
-	ctx, spn := tracing.StartSpan(ctx)
+	ctx, spn := tracing.StartSpan(ctx) // nolint:SA4006
 	defer spn.End()
 
 	fileMetadata := &rfpb.FileMetadata{}
@@ -1464,7 +1463,7 @@ func (p *PebbleCache) iterHasKey(iter pebble.Iterator, key filestore.PebbleKey) 
 }
 
 func readFileMetadata(ctx context.Context, reader pebble.Reader, keyBytes []byte) (*rfpb.FileMetadata, error) {
-	ctx, spn := tracing.StartSpan(ctx)
+	ctx, spn := tracing.StartSpan(ctx) // nolint:SA4006
 	defer spn.End()
 
 	fileMetadata := &rfpb.FileMetadata{}
@@ -1605,9 +1604,6 @@ func (p *PebbleCache) GetMulti(ctx context.Context, resources []*rspb.ResourceNa
 	defer db.Close()
 
 	foundMap := make(map[*repb.Digest][]byte, len(resources))
-	sort.Slice(resources, func(i, j int) bool {
-		return resources[i].GetDigest().GetHash() < resources[j].GetDigest().GetHash()
-	})
 
 	buf := &bytes.Buffer{}
 	for _, r := range resources {
@@ -1621,7 +1617,12 @@ func (p *PebbleCache) GetMulti(ctx context.Context, resources []*rspb.ResourceNa
 
 		_, copyErr := io.Copy(buf, rc)
 		closeErr := rc.Close()
-		if copyErr != nil || closeErr != nil {
+		if copyErr != nil {
+			log.Warningf("GetMulti encountered error when copying %s: %s", r.GetDigest().GetHash(), copyErr)
+			continue
+		}
+		if closeErr != nil {
+			log.Warningf("GetMulti cannot close reader when copying %s: %s", r.GetDigest().GetHash(), closeErr)
 			continue
 		}
 		foundMap[r.GetDigest()] = append([]byte{}, buf.Bytes()...)
@@ -1921,6 +1922,11 @@ func (p *PebbleCache) newCDCCommitedWriteCloser(ctx context.Context, fileRecord 
 			LastAccessUsec:  now,
 			LastModifyUsec:  now,
 			FileType:        rfpb.FileMetadata_COMPLETE_FILE_TYPE,
+		}
+
+		if numChunks := len(md.StorageMetadata.GetChunkedMetadata().GetResource()); numChunks <= 1 {
+			log.Errorf("expected to have more than one chunks, but actually have %d for digest %s", numChunks, fileRecord.GetDigest().GetHash())
+			return status.InternalErrorf("invalid number of chunks (%d)", numChunks)
 		}
 		return p.writeMetadata(ctx, db, key, md)
 	}
@@ -2665,6 +2671,9 @@ func (e *partitionEvictor) computeSize() (int64, int64, int64, error) {
 	start := append([]byte(e.partitionKeyPrefix()+"/"), keys.MinByte...)
 	end := append([]byte(e.partitionKeyPrefix()+"/"), keys.MaxByte...)
 	totalSizeBytes, totalCasCount, totalAcCount, err := e.computeSizeInRange(start, end)
+	if err != nil {
+		return 0, 0, 0, err
+	}
 
 	partitionMD := &rfpb.PartitionMetadata{
 		PartitionId: e.part.ID,

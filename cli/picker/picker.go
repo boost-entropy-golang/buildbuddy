@@ -21,6 +21,16 @@ func HandlePicker(args []string) []string {
 	// If the command is build, test, or query without a specified target - apply to all targets.
 	command := arg.GetCommand(args)
 
+	// Skip using the picker if the user has specified a query file.
+	if strings.Contains(command, "query") && arg.Has(args, "query_file") {
+		return args
+	}
+
+	// Skip using the picker if the user has specified a target pattern file.
+	if command == "build" && arg.Has(args, "target_pattern_file") {
+		return args
+	}
+
 	// If it's a build, test, or query - apply to all targets.
 	if command == "build" || command == "test" || command == "query" {
 		args = append(args, "//...")

@@ -26,7 +26,7 @@ func TestPackAndUnpack(t *testing.T) {
 	ctx := context.Background()
 	env := testenv.GetTestEnv(t)
 	filecacheDir := testfs.MakeTempDir(t)
-	fc, err := filecache.NewFileCache(filecacheDir, maxFilecacheSizeBytes)
+	fc, err := filecache.NewFileCache(filecacheDir, maxFilecacheSizeBytes, false)
 	require.NoError(t, err)
 	fc.WaitForDirectoryScanToComplete()
 	env.SetFileCache(fc)
@@ -80,7 +80,7 @@ func TestPackAndUnpackChunkedFiles(t *testing.T) {
 	ctx := context.Background()
 	env := testenv.GetTestEnv(t)
 	filecacheDir := testfs.MakeTempDir(t)
-	fc, err := filecache.NewFileCache(filecacheDir, maxFilecacheSizeBytes)
+	fc, err := filecache.NewFileCache(filecacheDir, maxFilecacheSizeBytes, false)
 	require.NoError(t, err)
 	fc.WaitForDirectoryScanToComplete()
 	env.SetFileCache(fc)
@@ -104,7 +104,9 @@ func TestPackAndUnpackChunkedFiles(t *testing.T) {
 	keyA, err := snaploader.NewKey(taskA, "config-hash-a", "")
 	require.NoError(t, err)
 	optsA := makeFakeSnapshot(t, workDirA)
-	optsA.ChunkedFiles = map[string]*blockio.COWStore{"scratchfs": cowA}
+	optsA.ChunkedFiles = map[string]*snaploader.ChunkedFile{
+		"scratchfs": {COWStore: cowA},
+	}
 	snapA, err := loader.CacheSnapshot(ctx, keyA, optsA)
 	require.NoError(t, err)
 	// Note: we'd normally close cowA here, but we keep it open so that

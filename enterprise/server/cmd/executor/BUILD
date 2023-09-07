@@ -99,10 +99,10 @@ container_layer(
     files = [
         ":firecracker",
         ":jailer",
-        "@com_github_buildbuddy_io_soci_snapshotter-soci-store-v0.0.7-linux-amd64//file:soci-store-v0.0.7-linux-amd64",
+        "@com_github_buildbuddy_io_soci_snapshotter-soci-store-v0.0.8-linux-amd64//file:soci-store-v0.0.8-linux-amd64",
     ],
     symlinks = {
-        "/usr/bin/soci-store": "/usr/bin/soci-store-v0.0.7-linux-amd64",
+        "/usr/bin/soci-store": "/usr/bin/soci-store-v0.0.8-linux-amd64",
     },
 )
 
@@ -122,9 +122,20 @@ container_image(
 #
 # This target can be run locally with enterprise/tools/run_executor_image.sh
 go_image(
-    name = "executor_image",
+    name = "executor_go_image",
     base = ":base_image",
     binary = ":executor",
+    tags = ["manual"],
+)
+
+container_image(
+    name = "executor_image",
+    base = ":executor_go_image",
+    entrypoint = [
+        "/tini",
+        "--",
+        "/app/enterprise/server/cmd/executor/executor",
+    ],
     tags = ["manual"],
 )
 
