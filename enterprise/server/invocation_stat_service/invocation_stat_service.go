@@ -39,6 +39,7 @@ var (
 	useTimezoneInHeatmapQueries    = flag.Bool("app.use_timezone_in_heatmap_queries", true, "If enabled, use timezone instead of 'timezone offset' to compute day boundaries in heatmap queries.")
 	invocationSummaryAvailableUsec = flag.Int64("app.invocation_summary_available_usec", 0, "The timstamp when the invocation summary is available in the DB")
 	tagsInDrilldowns               = flag.Bool("app.fetch_tags_drilldown_data", true, "If enabled, DrilldownType_TAG_DRILLDOWN_TYPE can be returned in GetStatDrilldownRequests")
+	finerDrilldownTimeBuckets      = flag.Bool("app.finer_drilldown_time_buckets", false, "If enabled, split drilldowns into smaller time buckets when the user has a smaller date range selected.")
 )
 
 type InvocationStatService struct {
@@ -149,7 +150,7 @@ func flattenTrendsQuery(innerQuery string) string {
 	FROM (` + innerQuery + ")"
 }
 
-func (i *InvocationStatService) addWhereClauses(q *query_builder.Query, tq *stpb.TrendQuery, reqCtx *ctxpb.RequestContext, lookbackWindowDays int32) error {
+func (i *InvocationStatService) addWhereClauses(q *query_builder.Query, tq *stpb.TrendQuery, reqCtx *ctxpb.RequestContext) error {
 
 	if user := tq.GetUser(); user != "" {
 		q.AddWhereClause("user = ?", user)
@@ -199,16 +200,8 @@ func (i *InvocationStatService) addWhereClauses(q *query_builder.Query, tq *stpb
 	if start := tq.GetUpdatedAfter(); start.IsValid() {
 		q.AddWhereClause("updated_at_usec >= ?", start.AsTime().UnixMicro())
 	} else {
-		// If no start time specified, respect the lookback window field if set,
-		// or default to 7 days.
-		// TODO(bduffany): Delete this once clients no longer need it.
+		// If no start time specified, default to 7 days.
 		lookbackWindowHours := 7 * 24 * time.Hour
-		if lookbackWindowDays != 0 {
-			if lookbackWindowDays < 1 || lookbackWindowDays > 365 {
-				return status.InvalidArgumentErrorf("lookback_window_days must be between 0 and 366")
-			}
-			lookbackWindowHours = time.Duration(lookbackWindowDays*24) * time.Hour
-		}
 		q.AddWhereClause("updated_at_usec >= ?", time.Now().Add(-lookbackWindowHours).UnixMicro())
 	}
 
@@ -265,7 +258,7 @@ func (i *InvocationStatService) getInvocationSummary(ctx context.Context, req *s
     `)
 
 	reqCtx := req.GetRequestContext()
-	if err := i.addWhereClauses(q, req.GetQuery(), reqCtx, 0); err != nil {
+	if err := i.addWhereClauses(q, req.GetQuery(), reqCtx); err != nil {
 		return nil, err
 	}
 	qStr, qArgs := q.Build()
@@ -281,7 +274,7 @@ func (i *InvocationStatService) getInvocationTrend(ctx context.Context, req *stp
 	reqCtx := req.GetRequestContext()
 
 	q := query_builder.NewQuery(i.getTrendBasicQuery(reqCtx.GetTimezoneOffsetMinutes()))
-	if err := i.addWhereClauses(q, req.GetQuery(), reqCtx, req.GetLookbackWindowDays()); err != nil {
+	if err := i.addWhereClauses(q, req.GetQuery(), reqCtx); err != nil {
 		return nil, err
 	}
 	q.SetGroupBy("name")
@@ -362,7 +355,7 @@ func (i *InvocationStatService) getExecutionTrend(ctx context.Context, req *stpb
 	reqCtx := req.GetRequestContext()
 
 	q := query_builder.NewQuery(i.getExecutionTrendQuery(reqCtx.GetTimezoneOffsetMinutes()))
-	if err := i.addWhereClauses(q, req.GetQuery(), req.GetRequestContext(), req.GetLookbackWindowDays()); err != nil {
+	if err := i.addWhereClauses(q, req.GetQuery(), req.GetRequestContext()); err != nil {
 		return nil, err
 	}
 	q.SetGroupBy("name")
@@ -556,6 +549,21 @@ func (i *InvocationStatService) getMetricBuckets(ctx context.Context, table stri
 	return metricBuckets, metricArrayStr, nil
 }
 
+// Given a duration for which we are computing a heatmap, return an
+// appropriate fixed bucket size for a heatmap.
+func computeTimeBucketSize(duration time.Duration) time.Duration {
+	if duration <= 16*time.Hour {
+		return 5 * time.Minute
+	}
+	if duration <= 48*time.Hour {
+		return 15 * time.Minute
+	}
+	if duration <= 96*time.Hour {
+		return 30 * time.Minute
+	}
+	return 1 * time.Hour
+}
+
 const ONE_WEEK = 7 * 24 * time.Hour
 
 func getTimestampBuckets(q *stpb.TrendQuery, requestContext *ctxpb.RequestContext) ([]int64, string, error) {
@@ -594,15 +602,29 @@ func getTimestampBuckets(q *stpb.TrendQuery, requestContext *ctxpb.RequestContex
 	start := time.Unix(startSec, 0).In(loc)
 	end := time.Unix(endSec, 0).In(loc)
 
-	// Each subsequent bucket will start at midnight on the following day.
-	midnightOnStartDate := time.Date(start.Year(), start.Month(), start.Day(), 0, 0, 0, 0, start.Location())
-	current := midnightOnStartDate.AddDate(0, 0, 1)
-
 	var timestampBuckets []int64
 	timestampBuckets = append(timestampBuckets, start.UnixMicro())
-	for current.Before(end) {
-		timestampBuckets = append(timestampBuckets, current.UnixMicro())
-		current = current.AddDate(0, 0, 1)
+	// When the queried time range is less than eight days, we show smaller buckets.
+	const eightDays = 8 * 24 * time.Hour
+	queriedDuration := end.Sub(start)
+	if *finerDrilldownTimeBuckets && queriedDuration <= eightDays {
+		increment := computeTimeBucketSize(time.Duration(endSec-startSec) * time.Second)
+		current := start.Round(increment)
+		for current.Before(start) || current.Equal(start) {
+			current = current.Add(increment)
+		}
+		for current.Before(end) {
+			timestampBuckets = append(timestampBuckets, current.UnixMicro())
+			current = current.Add(increment)
+		}
+	} else {
+		// Each subsequent bucket will start at midnight on the following day.
+		midnightOnStartDate := time.Date(start.Year(), start.Month(), start.Day(), 0, 0, 0, 0, start.Location())
+		current := midnightOnStartDate.AddDate(0, 0, 1)
+		for current.Before(end) {
+			timestampBuckets = append(timestampBuckets, current.UnixMicro())
+			current = current.AddDate(0, 0, 1)
+		}
 	}
 	timestampBuckets = append(timestampBuckets, end.UnixMicro())
 
@@ -656,7 +678,7 @@ func (i *InvocationStatService) generateQueryInputs(ctx context.Context, table s
 
 func (i *InvocationStatService) getWhereClauseForHeatmapQuery(m *sfpb.Metric, q *stpb.TrendQuery, reqCtx *ctxpb.RequestContext) (string, []interface{}, error) {
 	placeholderQuery := query_builder.NewQuery("")
-	if err := i.addWhereClauses(placeholderQuery, q, reqCtx, 0); err != nil {
+	if err := i.addWhereClauses(placeholderQuery, q, reqCtx); err != nil {
 		return "", nil, err
 	}
 	if m.GetInvocation() == sfpb.InvocationMetricType_DURATION_USEC_INVOCATION_METRIC {
@@ -970,7 +992,7 @@ func (i *InvocationStatService) getDrilldownQuery(ctx context.Context, req *stpb
 	}
 	placeholderQuery := query_builder.NewQuery("")
 
-	if err := i.addWhereClauses(placeholderQuery, req.GetQuery(), req.GetRequestContext(), 0); err != nil {
+	if err := i.addWhereClauses(placeholderQuery, req.GetQuery(), req.GetRequestContext()); err != nil {
 		return "", nil, err
 	}
 

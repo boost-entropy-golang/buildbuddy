@@ -220,8 +220,9 @@ type Group struct {
 	GithubToken *string
 	Model
 
-	SharingEnabled       bool `gorm:"default:1"`
-	UserOwnedKeysEnabled bool `gorm:"not null;default:0"`
+	SharingEnabled                    bool `gorm:"default:1"`
+	UserOwnedKeysEnabled              bool `gorm:"not null;default:0"`
+	RestrictCleanWorkflowRunsToAdmins bool `gorm:"not null;default:0"`
 
 	// If enabled, builds for this group will always use their own executors instead of the installation-wide shared
 	// executors.
@@ -358,6 +359,10 @@ type APIKey struct {
 	// migrate old DB rows to reflect the new default.
 	Capabilities        int32 `gorm:"default:1"`
 	VisibleToDevelopers bool  `gorm:"not null;default:0"`
+	// Indicates whether this key is used for impersonation.
+	Impersonation bool `gorm:"not null;default:0"`
+	// If set, the API key is not considered to be valid after this time.
+	ExpiryUsec int64 `gorm:"not null;default:0"`
 }
 
 func (k *APIKey) TableName() string {

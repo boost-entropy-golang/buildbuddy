@@ -253,16 +253,17 @@ func makeGroups(groupRoles []*tables.GroupRole) []*grpb.Group {
 			githubToken = *g.GithubToken
 		}
 		r = append(r, &grpb.Group{
-			Id:                     g.GroupID,
-			Name:                   g.Name,
-			OwnedDomain:            g.OwnedDomain,
-			GithubLinked:           githubToken != "",
-			UrlIdentifier:          urlIdentifier,
-			SharingEnabled:         g.SharingEnabled,
-			UserOwnedKeysEnabled:   g.UserOwnedKeysEnabled,
-			UseGroupOwnedExecutors: g.UseGroupOwnedExecutors != nil && *g.UseGroupOwnedExecutors,
-			SuggestionPreference:   g.SuggestionPreference,
-			Url:                    getGroupUrl(&gr.Group),
+			Id:                                g.GroupID,
+			Name:                              g.Name,
+			OwnedDomain:                       g.OwnedDomain,
+			GithubLinked:                      githubToken != "",
+			UrlIdentifier:                     urlIdentifier,
+			SharingEnabled:                    g.SharingEnabled,
+			UserOwnedKeysEnabled:              g.UserOwnedKeysEnabled,
+			UseGroupOwnedExecutors:            g.UseGroupOwnedExecutors != nil && *g.UseGroupOwnedExecutors,
+			RestrictCleanWorkflowRunsToAdmins: g.RestrictCleanWorkflowRunsToAdmins,
+			SuggestionPreference:              g.SuggestionPreference,
+			Url:                               getGroupUrl(&gr.Group),
 		})
 	}
 	return r
@@ -509,6 +510,7 @@ func (s *BuildBuddyServer) UpdateGroup(ctx context.Context, req *grpb.UpdateGrou
 	group.UserOwnedKeysEnabled = req.GetUserOwnedKeysEnabled()
 	group.UseGroupOwnedExecutors = &useGroupOwnedExecutors
 	group.SuggestionPreference = req.GetSuggestionPreference()
+	group.RestrictCleanWorkflowRunsToAdmins = req.GetRestrictCleanWorkflowRunsToAdmins()
 	if group.SuggestionPreference == grpb.SuggestionPreference_UNKNOWN_SUGGESTION_PREFERENCE {
 		group.SuggestionPreference = grpb.SuggestionPreference_ENABLED
 	}
@@ -684,6 +686,30 @@ func (s *BuildBuddyServer) DeleteApiKey(ctx context.Context, req *akpb.DeleteApi
 		al.Log(ctx, rid, alpb.Action_DELETE, req)
 	}
 	return &akpb.DeleteApiKeyResponse{}, nil
+}
+
+func (s *BuildBuddyServer) CreateImpersonationApiKey(ctx context.Context, req *akpb.CreateImpersonationApiKeyRequest) (*akpb.CreateImpersonationApiKeyResponse, error) {
+	authDB := s.env.GetAuthDB()
+	if authDB == nil {
+		return nil, status.UnimplementedError("Not Implemented")
+	}
+	k, err := authDB.CreateImpersonationAPIKey(ctx, req.GetRequestContext().GetGroupId())
+	if err != nil {
+		return nil, err
+	}
+	if al := s.env.GetAuditLogger(); al != nil {
+		al.Log(ctx, auditlog.GroupResourceID(req.GetRequestContext().GetGroupId()), alpb.Action_CREATE_IMPERSONATION_API_KEY, req)
+	}
+	return &akpb.CreateImpersonationApiKeyResponse{
+		ApiKey: &akpb.ApiKey{
+			Id:                  k.APIKeyID,
+			Value:               k.Value,
+			Label:               k.Label,
+			Capability:          capabilities.FromInt(k.Capabilities),
+			VisibleToDevelopers: k.VisibleToDevelopers,
+			ExpiryUsec:          k.ExpiryUsec,
+		},
+	}, nil
 }
 
 func (s *BuildBuddyServer) GetUserApiKeys(ctx context.Context, req *akpb.GetApiKeysRequest) (*akpb.GetApiKeysResponse, error) {
