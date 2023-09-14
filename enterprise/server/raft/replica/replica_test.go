@@ -27,7 +27,7 @@ import (
 	rfpb "github.com/buildbuddy-io/buildbuddy/proto/raft"
 	repb "github.com/buildbuddy-io/buildbuddy/proto/remote_execution"
 	rspb "github.com/buildbuddy-io/buildbuddy/proto/resource"
-	dbsm "github.com/lni/dragonboat/v3/statemachine"
+	dbsm "github.com/lni/dragonboat/v4/statemachine"
 )
 
 var (
@@ -52,10 +52,10 @@ func (fs *fakeStore) Sender() *sender.Sender {
 	return nil
 }
 func (fs *fakeStore) NotifyUsage(ru *rfpb.ReplicaUsage) {}
-func (fs *fakeStore) AddPeer(ctx context.Context, sourceClusterID, newClusterID uint64) error {
+func (fs *fakeStore) AddPeer(ctx context.Context, sourceShardID, newShardID uint64) error {
 	return nil
 }
-func (fs *fakeStore) SnapshotCluster(ctx context.Context, clusterID uint64) error {
+func (fs *fakeStore) SnapshotCluster(ctx context.Context, shardID uint64) error {
 	return nil
 }
 func (fs *fakeStore) WithFileReadFn(fn fileReadFn) *fakeStore {
@@ -63,7 +63,7 @@ func (fs *fakeStore) WithFileReadFn(fn fileReadFn) *fakeStore {
 	return fs
 }
 
-func newTestReplica(t *testing.T, rootDir string, clusterID, nodeID uint64, store replica.IStore) *replica.Replica {
+func newTestReplica(t *testing.T, rootDir string, shardID, replicaID uint64, store replica.IStore) *replica.Replica {
 	db, err := pebble.Open(rootDir, &pebble.Options{})
 	require.NoError(t, err)
 
@@ -73,7 +73,7 @@ func newTestReplica(t *testing.T, rootDir string, clusterID, nodeID uint64, stor
 		db.Close()
 	})
 
-	return replica.New(leaser, clusterID, nodeID, store, partitions)
+	return replica.New(leaser, shardID, replicaID, store, partitions)
 }
 
 func TestOpenCloseReplica(t *testing.T) {

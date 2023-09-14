@@ -1,13 +1,14 @@
 package config
 
 import (
-	dbConfig "github.com/lni/dragonboat/v3/config"
+	dbConfig "github.com/lni/dragonboat/v4/config"
 )
 
-func GetRaftConfig(clusterID, nodeID uint64) dbConfig.Config {
+func GetRaftConfig(shardID, replicaID uint64) dbConfig.Config {
 	rc := dbConfig.Config{
-		NodeID:             nodeID,
-		ClusterID:          clusterID,
+		ReplicaID:          replicaID,
+		ShardID:            shardID,
+		WaitReady:          true,
 		PreVote:            true,
 		ElectionRTT:        200,
 		HeartbeatRTT:       20,
