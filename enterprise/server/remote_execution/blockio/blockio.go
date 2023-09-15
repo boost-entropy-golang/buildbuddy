@@ -34,22 +34,6 @@ type Store interface {
 	SizeBytes() (int64, error)
 }
 
-// File implements the Store interface using standard file operations.
-type File struct{ *os.File }
-
-// NewFile returns a File store for an existing file.
-func NewFile(path string) (*File, error) {
-	f, err := os.OpenFile(path, os.O_RDWR, 0)
-	if err != nil {
-		return nil, err
-	}
-	return &File{File: f}, nil
-}
-
-func (f *File) SizeBytes() (int64, error) {
-	return fileSizeBytes(f.File)
-}
-
 // Mmap implements the Store interface using a memory-mapped file. This allows processes to read/write to the file as if it
 // was memory, as opposed to having to interact with it via I/O file operations.
 type Mmap struct {
@@ -125,8 +109,8 @@ func (m *Mmap) ReadAt(p []byte, off int64) (n int, err error) {
 			return 0, err
 		}
 	}
-	if off < 0 || int(off)+len(p) > len(m.data) {
-		return 0, status.InvalidArgumentErrorf("invalid read at offset 0x%x length 0x%x", off, len(p))
+	if err := checkBounds("read", int64(len(m.data)), p, off); err != nil {
+		return 0, err
 	}
 	copy(p, m.data[int(off):int(off)+len(p)])
 	return len(p), nil
@@ -138,8 +122,8 @@ func (m *Mmap) WriteAt(p []byte, off int64) (n int, err error) {
 			return 0, err
 		}
 	}
-	if off < 0 || int(off)+len(p) > len(m.data) {
-		return 0, status.InvalidArgumentErrorf("invalid write at offset 0x%x length 0x%x", off, len(p))
+	if err := checkBounds("write", int64(len(m.data)), p, off); err != nil {
+		return 0, err
 	}
 	copy(m.data[int(off):int(off)+len(p)], p)
 	return len(p), nil
@@ -346,11 +330,16 @@ func (c *COWStore) chunkStartOffset(off int64) int64 {
 }
 
 func (c *COWStore) ReadAt(p []byte, off int64) (int, error) {
+	if err := checkBounds("read", c.totalSizeBytes, p, off); err != nil {
+		return 0, err
+	}
+
 	chunkOffset := c.chunkStartOffset(off)
 	n := 0
 	for len(p) > 0 {
 		chunkRelativeOffset := off % c.chunkSizeBytes
-		readSize := int(c.chunkSizeBytes - chunkRelativeOffset)
+		chunkCalculatedSize := c.calculateChunkSize(chunkOffset)
+		readSize := int(chunkCalculatedSize - chunkRelativeOffset)
 		if readSize > len(p) {
 			readSize = len(p)
 		}
@@ -359,13 +348,47 @@ func (c *COWStore) ReadAt(p []byte, off int64) (int, error) {
 		c.mu.RUnlock()
 		if chunk == nil {
 			// No chunk at this index yet; write all 0s.
-			for i := range p[:readSize] {
-				p[i] = 0
-			}
+			copy(p[:readSize], c.zeroBuf)
 		} else {
-			if _, err := readFullAt(chunk, p[:readSize], chunkRelativeOffset); err != nil {
+			// chunkActualSize will be different than chunkCalculatedSize only
+			// if this chunk was the last chunk when we called Resize(). This is
+			// because Resize() does not actually resize the chunk itself - it
+			// is a lazy operation that "virtually" right-pads the COWStore with
+			// 0s. So in this case, we need to limit the amount of data
+			// requested from the chunk (readSize) to the amount of data that's
+			// actually remaining in the chunk (remainingDataSize), then fill
+			// the remainder with zeroes.
+			//
+			// For example, let's say we have the following chunks, before
+			// resizing:
+			//     [1111]  [1]
+			//     c1      c2
+			// Now let's say we Resize, increasing the COW's total size by 4
+			// bytes. (Bytes between "[]"" are physically present in the chunk,
+			// while other bytes are "virtual")
+			//     [1111]  [1]000  0
+			//     c1      c2      c3
+			// Now, the chunkActualSize of c2 will still be 1, while the
+			// chunkCalculatedSize will be 4. So when reading from c2, we need
+			// to make sure that we zero-pad when reading offset >= 1.
+
+			chunkActualSize, err := chunk.SizeBytes()
+			if err != nil {
 				return n, err
 			}
+			// Chunk might have less data available than the calculated size
+			// if this was the last chunk when we resized. If so then fill
+			// the range from [dataSize, readSize) with 0s.
+			dataSize := int64(readSize)
+			if remainder := chunkActualSize - chunkRelativeOffset; readSize > int(remainder) {
+				dataSize = max(0, remainder)
+			}
+			if dataSize > 0 {
+				if _, err := readFullAt(chunk, p[:dataSize], chunkRelativeOffset); err != nil {
+					return n, err
+				}
+			}
+			copy(p[dataSize:readSize], c.zeroBuf)
 		}
 		n += readSize
 		p = p[readSize:]
@@ -376,6 +399,10 @@ func (c *COWStore) ReadAt(p []byte, off int64) (int, error) {
 }
 
 func (c *COWStore) WriteAt(p []byte, off int64) (int, error) {
+	if err := checkBounds("write", c.totalSizeBytes, p, off); err != nil {
+		return 0, err
+	}
+
 	chunkOffset := c.chunkStartOffset(off)
 	n := 0
 	for len(p) > 0 {
@@ -460,6 +487,17 @@ func (s *COWStore) ChunkSizeBytes() int64 {
 	return s.chunkSizeBytes
 }
 
+// Resize resizes the COWStore to the given size, effectively right-padding the
+// current store with 0-bytes.
+func (s *COWStore) Resize(newSize int64) (oldSize int64, err error) {
+	oldSize = s.totalSizeBytes
+	if newSize < oldSize {
+		return 0, status.InvalidArgumentErrorf("cannot decrease COWStore size (requested %d, currently %d)", newSize, s.totalSizeBytes)
+	}
+	s.totalSizeBytes = newSize
+	return oldSize, nil
+}
+
 // WriteFile creates a new file at the given path and writes all contents to the
 // file.
 func (s *COWStore) WriteFile(path string) error {
@@ -502,8 +540,8 @@ func (s *COWStore) copyChunkIfNotDirty(chunkStartOffset int64) (err error) {
 		return nil
 	}
 
-	size := s.calculateChunkSize(chunkStartOffset)
-	dst, err := s.initDirtyChunk(chunkStartOffset, size)
+	dstChunkSize := s.calculateChunkSize(chunkStartOffset)
+	dst, err := s.initDirtyChunk(chunkStartOffset, dstChunkSize)
 	if err != nil {
 		return status.WrapError(err, "initialize dirty chunk")
 	}
@@ -523,9 +561,19 @@ func (s *COWStore) copyChunkIfNotDirty(chunkStartOffset int64) (err error) {
 		src.Close()
 	}()
 
+	// note: the src chunk might be smaller than the dst chunk if we resized
+	// and now we're copying the last chunk, since resizing is done lazily.
+	srcChunkSize, err := src.SizeBytes()
+	if err != nil {
+		return err
+	}
+	if srcChunkSize > dstChunkSize {
+		return status.InternalErrorf("chunk source size %d is greater than dest size %d; this is a bug", srcChunkSize, dstChunkSize)
+	}
+
 	b := s.copyBufPool.Get().(*[]byte)
 	defer s.copyBufPool.Put(b)
-	copyBuf := (*b)[:size]
+	copyBuf := (*b)[:srcChunkSize]
 
 	// TODO: avoid a full read here in the case where the chunk contains holes.
 	// Can achieve this by having the Mmap keep around the underlying file
@@ -534,9 +582,9 @@ func (s *COWStore) copyChunkIfNotDirty(chunkStartOffset int64) (err error) {
 		return status.WrapError(err, "read chunk for copy")
 	}
 	// Copy to the mmap but skip holes to avoid materializing them as blocks.
-	for off := int64(0); off < size; off += s.ioBlockSize {
+	for off := int64(0); off < srcChunkSize; off += s.ioBlockSize {
 		blockSize := s.ioBlockSize
-		if remainder := size - off; blockSize > remainder {
+		if remainder := srcChunkSize - off; blockSize > remainder {
 			blockSize = remainder
 		}
 		dataBlock := copyBuf[off : off+blockSize]
@@ -744,4 +792,12 @@ func (r *storeReader) Read(p []byte) (n int, err error) {
 // memoryAddress returns the memory address of the first byte of a slice
 func memoryAddress(s []byte) uintptr {
 	return uintptr(unsafe.Pointer(&s[0]))
+}
+
+// checkBounds checks whether a read or write operation is safe.
+func checkBounds(opName string, storeSize int64, p []byte, off int64) error {
+	if off < 0 || off+int64(len(p)) > storeSize {
+		return status.InvalidArgumentErrorf("invalid %s at offset 0x%x, length 0x%x", opName, off, len(p))
+	}
+	return nil
 }

@@ -823,7 +823,7 @@ func (s *Store) updateUsages(r *replica.Replica) error {
 // closed on this node will notify us when their range appears and disappears.
 // We'll use this information to drive the range tags we broadcast.
 func (s *Store) AddRange(rd *rfpb.RangeDescriptor, r *replica.Replica) {
-	s.log.Debugf("Adding range %d: [%q, %q) gen %d", rd.GetRangeId(), rd.GetLeft(), rd.GetRight(), rd.GetGeneration())
+	s.log.Debugf("Adding range %d: [%q, %q) gen %d", rd.GetRangeId(), rd.GetStart(), rd.GetEnd(), rd.GetGeneration())
 	_, loaded := s.replicas.LoadOrStore(rd.GetRangeId(), r)
 	if loaded {
 		s.log.Warningf("AddRange stomped on another range. Did you forget to call RemoveRange?")
@@ -842,7 +842,7 @@ func (s *Store) AddRange(rd *rfpb.RangeDescriptor, r *replica.Replica) {
 		return
 	}
 
-	if rd.GetLeft() == nil && rd.GetRight() == nil {
+	if rd.GetStart() == nil && rd.GetEnd() == nil {
 		s.log.Debugf("range %d has no bounds (yet?)", rd.GetRangeId())
 		return
 	}
@@ -865,7 +865,7 @@ func (s *Store) AddRange(rd *rfpb.RangeDescriptor, r *replica.Replica) {
 }
 
 func (s *Store) RemoveRange(rd *rfpb.RangeDescriptor, r *replica.Replica) {
-	s.log.Debugf("Removing range %d: [%q, %q) gen %d", rd.GetRangeId(), rd.GetLeft(), rd.GetRight(), rd.GetGeneration())
+	s.log.Debugf("Removing range %d: [%q, %q) gen %d", rd.GetRangeId(), rd.GetStart(), rd.GetEnd(), rd.GetGeneration())
 	s.replicas.Delete(rd.GetRangeId())
 	s.usages.RemoveRange(rd.GetRangeId())
 
@@ -1104,22 +1104,18 @@ func (s *Store) AddPeer(ctx context.Context, sourceShardID, newShardID uint64) e
 		initialMembers[replica.GetReplicaId()] = nhid
 	}
 
-	s.log.Infof("Starting new raft node c%dn%d", newShardID, sourceReplica.ReplicaID)
-	rc := raftConfig.GetRaftConfig(newShardID, sourceReplica.ReplicaID)
-	err = s.nodeHost.StartOnDiskReplica(initialMembers, false /*join*/, s.ReplicaFactoryFn, rc)
-	if err != nil {
-		if err == dragonboat.ErrShardAlreadyExist {
-			err = status.AlreadyExistsError(err.Error())
-		}
-		return err
-	}
-
-	return nil
+	_, err = s.StartShard(ctx, &rfpb.StartShardRequest{
+		ShardId:       newShardID,
+		ReplicaId:     sourceReplica.ReplicaID,
+		InitialMember: initialMembers,
+		Join:          false,
+	})
+	return err
 }
 
-func (s *Store) StartCluster(ctx context.Context, req *rfpb.StartClusterRequest) (*rfpb.StartClusterResponse, error) {
+func (s *Store) StartShard(ctx context.Context, req *rfpb.StartShardRequest) (*rfpb.StartShardResponse, error) {
+	s.log.Infof("Starting new raft node c%dn%d", req.GetShardId(), req.GetReplicaId())
 	rc := raftConfig.GetRaftConfig(req.GetShardId(), req.GetReplicaId())
-
 	err := s.nodeHost.StartOnDiskReplica(req.GetInitialMember(), req.GetJoin(), s.ReplicaFactoryFn, rc)
 	if err != nil {
 		if err == dragonboat.ErrShardAlreadyExist {
@@ -1134,7 +1130,7 @@ func (s *Store) StartCluster(ctx context.Context, req *rfpb.StartClusterRequest)
 		}
 	}
 
-	rsp := &rfpb.StartClusterResponse{}
+	rsp := &rfpb.StartShardResponse{}
 	if req.GetBatch() == nil || len(req.GetInitialMember()) == 0 {
 		return rsp, nil
 	}
@@ -1464,7 +1460,7 @@ func (s *Store) NodeDescriptor() *rfpb.NodeDescriptor {
 	}
 }
 
-func (s *Store) GetClusterMembership(ctx context.Context, shardID uint64) ([]*rfpb.ReplicaDescriptor, error) {
+func (s *Store) GetMembership(ctx context.Context, shardID uint64) ([]*rfpb.ReplicaDescriptor, error) {
 	var membership *dragonboat.Membership
 	var err error
 	err = client.RunNodehostFn(ctx, func(ctx context.Context) error {
@@ -1493,7 +1489,7 @@ func (s *Store) GetClusterMembership(ctx context.Context, shardID uint64) ([]*rf
 	return replicas, nil
 }
 
-func (s *Store) SplitCluster(ctx context.Context, req *rfpb.SplitClusterRequest) (*rfpb.SplitClusterResponse, error) {
+func (s *Store) SplitRange(ctx context.Context, req *rfpb.SplitRangeRequest) (*rfpb.SplitRangeResponse, error) {
 	if !*enableSplittingReplicas {
 		return nil, status.FailedPreconditionError("Splitting not enabled")
 	}
@@ -1529,7 +1525,7 @@ func (s *Store) SplitCluster(ctx context.Context, req *rfpb.SplitClusterRequest)
 	if err != nil {
 		return nil, err
 	}
-	if err := s.updateMetarange(ctx, sourceRange, simpleSplitRsp.GetNewLeft(), simpleSplitRsp.GetNewRight()); err != nil {
+	if err := s.updateMetarange(ctx, sourceRange, simpleSplitRsp.GetNewStart(), simpleSplitRsp.GetNewEnd()); err != nil {
 		log.Errorf("metarange update error: %s", err)
 		return nil, err
 	}
@@ -1537,9 +1533,9 @@ func (s *Store) SplitCluster(ctx context.Context, req *rfpb.SplitClusterRequest)
 	if err := s.SnapshotCluster(ctx, shardID); err != nil {
 		return nil, err
 	}
-	return &rfpb.SplitClusterResponse{
-		Left:  simpleSplitRsp.GetNewLeft(),
-		Right: simpleSplitRsp.GetNewRight(),
+	return &rfpb.SplitRangeResponse{
+		Start: simpleSplitRsp.GetNewStart(),
+		End:   simpleSplitRsp.GetNewEnd(),
 	}, nil
 }
 
@@ -1600,12 +1596,12 @@ func (s *Store) getConfigChangeID(ctx context.Context, shardID uint64) (uint64, 
 	return membership.ConfigChangeID, nil
 }
 
-// AddClusterNode adds a new node to the specified cluster if pre-reqs are met.
+// AddReplica adds a new node to the specified cluster if pre-reqs are met.
 // Pre-reqs are:
 //   - The request must be valid and contain all information
 //   - This node must be a member of the cluster that is being added to
 //   - The provided range descriptor must be up to date
-func (s *Store) AddClusterNode(ctx context.Context, req *rfpb.AddClusterNodeRequest) (*rfpb.AddClusterNodeResponse, error) {
+func (s *Store) AddReplica(ctx context.Context, req *rfpb.AddReplicaRequest) (*rfpb.AddReplicaResponse, error) {
 	// Check the request looks valid.
 	if len(req.GetRange().GetReplicas()) == 0 {
 		return nil, status.FailedPreconditionErrorf("No replicas in range: %+v", req.GetRange())
@@ -1666,7 +1662,7 @@ func (s *Store) AddClusterNode(ctx context.Context, req *rfpb.AddClusterNodeRequ
 	if err != nil {
 		return nil, err
 	}
-	_, err = c.StartCluster(ctx, &rfpb.StartClusterRequest{
+	_, err = c.StartShard(ctx, &rfpb.StartShardRequest{
 		ShardId:          shardID,
 		ReplicaId:        newReplicaID,
 		Join:             true,
@@ -1687,17 +1683,17 @@ func (s *Store) AddClusterNode(ctx context.Context, req *rfpb.AddClusterNodeRequ
 		metrics.RaftMoveLabel:       "add",
 	}).Inc()
 
-	return &rfpb.AddClusterNodeResponse{
+	return &rfpb.AddReplicaResponse{
 		Range: rd,
 	}, nil
 }
 
-// RemoveClusterNode removes a new node from the specified cluster if pre-reqs are
+// RemoveReplica removes a new node from the specified cluster if pre-reqs are
 // met. Pre-reqs are:
 //   - The request must be valid and contain all information
 //   - This node must be a member of the cluster that is being removed from
 //   - The provided range descriptor must be up to date
-func (s *Store) RemoveClusterNode(ctx context.Context, req *rfpb.RemoveClusterNodeRequest) (*rfpb.RemoveClusterNodeResponse, error) {
+func (s *Store) RemoveReplica(ctx context.Context, req *rfpb.RemoveReplicaRequest) (*rfpb.RemoveReplicaResponse, error) {
 	// Check this is a range we have and the range descriptor provided is up to date
 	s.rangeMu.RLock()
 	rd, rangeOK := s.openRanges[req.GetRange().GetRangeId()]
@@ -1767,12 +1763,12 @@ func (s *Store) RemoveClusterNode(ctx context.Context, req *rfpb.RemoveClusterNo
 		metrics.RaftMoveLabel:       "remove",
 	}).Inc()
 
-	return &rfpb.RemoveClusterNodeResponse{
+	return &rfpb.RemoveReplicaResponse{
 		Range: rd,
 	}, nil
 }
 
-func (s *Store) ListCluster(ctx context.Context, req *rfpb.ListClusterRequest) (*rfpb.ListClusterResponse, error) {
+func (s *Store) ListRange(ctx context.Context, req *rfpb.ListRangeRequest) (*rfpb.ListRangeResponse, error) {
 	s.rangeMu.RLock()
 	openRanges := make([]*rfpb.RangeDescriptor, 0, len(s.openRanges))
 	for _, rd := range s.openRanges {
@@ -1780,7 +1776,7 @@ func (s *Store) ListCluster(ctx context.Context, req *rfpb.ListClusterRequest) (
 	}
 	s.rangeMu.RUnlock()
 
-	rsp := &rfpb.ListClusterResponse{
+	rsp := &rfpb.ListRangeResponse{
 		Node: s.NodeDescriptor(),
 	}
 	for _, rd := range openRanges {
@@ -1863,8 +1859,8 @@ func casRangeEdit(key []byte, old, new *rfpb.RangeDescriptor) (*rfpb.CASRequest,
 	}, nil
 }
 
-func addLocalRangeEdits(oldLeft, newLeft *rfpb.RangeDescriptor, b *rbuilder.BatchBuilder) error {
-	cas, err := casRangeEdit(constants.LocalRangeKey, oldLeft, newLeft)
+func addLocalRangeEdits(oldStart, newStart *rfpb.RangeDescriptor, b *rbuilder.BatchBuilder) error {
+	cas, err := casRangeEdit(constants.LocalRangeKey, oldStart, newStart)
 	if err != nil {
 		return err
 	}
@@ -1872,23 +1868,23 @@ func addLocalRangeEdits(oldLeft, newLeft *rfpb.RangeDescriptor, b *rbuilder.Batc
 	return nil
 }
 
-func addMetaRangeEdits(oldLeft, newLeft, newRight *rfpb.RangeDescriptor, b *rbuilder.BatchBuilder) error {
-	newLeftBuf, err := proto.Marshal(newLeft)
+func addMetaRangeEdits(oldStart, newStart, newEnd *rfpb.RangeDescriptor, b *rbuilder.BatchBuilder) error {
+	newStartBuf, err := proto.Marshal(newStart)
 	if err != nil {
 		return err
 	}
-	oldLeftBuf, err := proto.Marshal(oldLeft)
+	oldStartBuf, err := proto.Marshal(oldStart)
 	if err != nil {
 		return err
 	}
-	newRightBuf, err := proto.Marshal(newRight)
+	newEndBuf, err := proto.Marshal(newEnd)
 	if err != nil {
 		return err
 	}
 
 	// Send a single request that:
-	//  - CAS sets the newLeft value to newNewLeftBuf
-	//  - inserts the new newRightBuf
+	//  - CAS sets the newStart value to newNewStartBuf
+	//  - inserts the new newEndBuf
 	//
 	// if the CAS fails, check the existing value
 	//  if it's generation is past ours, ignore the error, we're out of date
@@ -1896,29 +1892,29 @@ func addMetaRangeEdits(oldLeft, newLeft, newRight *rfpb.RangeDescriptor, b *rbui
 	//  else return an error
 	b.Add(&rfpb.CASRequest{
 		Kv: &rfpb.KV{
-			Key:   keys.RangeMetaKey(newRight.GetRight()),
-			Value: newRightBuf,
+			Key:   keys.RangeMetaKey(newEnd.GetEnd()),
+			Value: newEndBuf,
 		},
-		ExpectedValue: oldLeftBuf,
+		ExpectedValue: oldStartBuf,
 	}).Add(&rfpb.CASRequest{
 		Kv: &rfpb.KV{
-			Key:   keys.RangeMetaKey(newLeft.GetRight()),
-			Value: newLeftBuf,
+			Key:   keys.RangeMetaKey(newStart.GetEnd()),
+			Value: newStartBuf,
 		},
 	})
 	return nil
 }
 
-func (s *Store) updateMetarange(ctx context.Context, oldLeft, left, right *rfpb.RangeDescriptor) error {
+func (s *Store) updateMetarange(ctx context.Context, oldStart, start, end *rfpb.RangeDescriptor) error {
 	b := rbuilder.NewBatchBuilder()
-	if err := addMetaRangeEdits(oldLeft, left, right, b); err != nil {
+	if err := addMetaRangeEdits(oldStart, start, end, b); err != nil {
 		return err
 	}
 	batchProto, err := b.ToProto()
 	if err != nil {
 		return err
 	}
-	rsp, err := s.Sender().SyncPropose(ctx, keys.RangeMetaKey(right.GetRight()), batchProto)
+	rsp, err := s.Sender().SyncPropose(ctx, keys.RangeMetaKey(end.GetEnd()), batchProto)
 	if err != nil {
 		return err
 	}
@@ -1946,7 +1942,7 @@ func (s *Store) updateRangeDescriptor(ctx context.Context, shardID uint64, old, 
 	if err := addLocalRangeEdits(old, new, localBatch); err != nil {
 		return err
 	}
-	metaRangeDescriptorKey := keys.RangeMetaKey(new.GetRight())
+	metaRangeDescriptorKey := keys.RangeMetaKey(new.GetEnd())
 	metaRangeCasReq := &rfpb.CASRequest{
 		Kv: &rfpb.KV{
 			Key:   metaRangeDescriptorKey,
