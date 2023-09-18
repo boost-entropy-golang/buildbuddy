@@ -29,6 +29,7 @@ import (
 	"github.com/buildbuddy-io/buildbuddy/server/util/status"
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/config"
+	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/golang-jwt/jwt"
 	"github.com/google/go-github/v43/github"
 	"golang.org/x/oauth2"
@@ -52,7 +53,7 @@ var (
 	privateKey    = flagutil.New("github.app.private_key", "", "GitHub app private key.", flagutil.SecretTag)
 	webhookSecret = flagutil.New("github.app.webhook_secret", "", "GitHub app webhook secret used to verify that webhook payload contents were sent by GitHub.", flagutil.SecretTag)
 
-	validPathRegex = regexp.MustCompile(`^[a-zA-Z0-9/]*$`)
+	validPathRegex = regexp.MustCompile(`^[a-zA-Z0-9/_-]*$`)
 )
 
 const (
@@ -695,6 +696,10 @@ func cloneTemplate(email, tmpDirName, token, srcURL, destURL, srcDir string) err
 	if err != nil {
 		return err
 	}
+	err = gitRepo.Storer.SetReference(plumbing.NewSymbolicReference(plumbing.HEAD, plumbing.Main))
+	if err != nil {
+		return err
+	}
 	gitWorkTree, err := gitRepo.Worktree()
 	if err != nil {
 		return err
@@ -713,14 +718,14 @@ func cloneTemplate(email, tmpDirName, token, srcURL, destURL, srcDir string) err
 
 	// Create a new remote and push to it
 	remote, err := gitRepo.CreateRemote(&config.RemoteConfig{
-		Name: "origin",
+		Name: git.DefaultRemoteName,
 		URLs: []string{destURL},
 	})
 	if err != nil {
 		return err
 	}
 	return remote.Push(&git.PushOptions{
-		RemoteName: "origin",
+		RemoteName: git.DefaultRemoteName,
 		Auth:       auth,
 		Force:      true,
 	})

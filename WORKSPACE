@@ -42,12 +42,14 @@ http_archive(
     ],
 )
 
-load(":deps.bzl", "install_buildbuddy_dependencies")
+load(":deps.bzl", "install_go_mod_dependencies", "install_static_dependencies")
+
+install_static_dependencies()
 
 # Install gazelle and go_rules dependencies after ours so that our go module versions take precedence.
 
-# gazelle:repository_macro deps.bzl%install_buildbuddy_dependencies
-install_buildbuddy_dependencies()
+# gazelle:repository_macro deps.bzl%install_go_mod_dependencies
+install_go_mod_dependencies()
 
 load("@bazel_gazelle//:deps.bzl", "gazelle_dependencies")
 load("@io_bazel_rules_go//go:deps.bzl", "go_download_sdk", "go_register_toolchains", "go_rules_dependencies")
@@ -443,3 +445,20 @@ http_file(
     sha256 = "6a8ba1c9f858386edba0ea82b7bf8168ef513d1eb0df3a08cc7cf4bb89f856d0",
     url = "https://s3.amazonaws.com/rds-downloads/rds-combined-ca-bundle.pem",
 )
+
+# Proto rules
+
+http_archive(
+    name = "rules_proto",
+    sha256 = "dc3fb206a2cb3441b485eb1e423165b231235a1ea9b031b4433cf7bc1fa460dd",
+    strip_prefix = "rules_proto-5.3.0-21.7",
+    urls = [
+        "https://github.com/bazelbuild/rules_proto/archive/refs/tags/5.3.0-21.7.tar.gz",
+    ],
+)
+
+load("@rules_proto//proto:repositories.bzl", "rules_proto_dependencies", "rules_proto_toolchains")
+
+rules_proto_dependencies()
+
+rules_proto_toolchains()
