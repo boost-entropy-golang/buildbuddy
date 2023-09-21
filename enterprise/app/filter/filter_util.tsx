@@ -1,5 +1,5 @@
 import capabilities from "../../../app/capabilities/capabilities";
-import { differenceInCalendarDays, formatDateRange, formatPreviousDateRange } from "../../../app/format/format";
+import { differenceInCalendarDays, durationMillis, formatDateRange } from "../../../app/format/format";
 import * as proto from "../../../app/util/proto";
 import { google as google_duration } from "../../../proto/duration_ts_proto";
 import { google as google_timestamp } from "../../../proto/timestamp_ts_proto";
@@ -102,7 +102,10 @@ export function getProtoFilterParams(search: URLSearchParams, now?: moment.Momen
 }
 
 export function getDefaultStartDate(now?: moment.Moment): Date {
-  return (now ? moment(now) : moment()).add(-DEFAULT_LAST_N_DAYS + 1, "days").toDate();
+  return (now ? moment(now) : moment())
+    .add(-DEFAULT_LAST_N_DAYS + 1, "days")
+    .startOf("day")
+    .toDate();
 }
 
 export function getStartDate(search: URLSearchParams, now?: moment.Moment): Date {
@@ -115,16 +118,19 @@ export function getStartDate(search: URLSearchParams, now?: moment.Moment): Date
     return moment(dateString).toDate();
   }
   if (search.get(LAST_N_DAYS_PARAM_NAME)) {
-    return (now ? moment(now) : moment()).add(-Number(search.get(LAST_N_DAYS_PARAM_NAME)) + 1, "days").toDate();
+    return (now ? moment(now) : moment())
+      .add(-Number(search.get(LAST_N_DAYS_PARAM_NAME)) + 1, "days")
+      .startOf("day")
+      .toDate();
   }
   return getDefaultStartDate(now);
 }
 
-export function getDisplayDateRange(search: URLSearchParams): { startDate: Date; endDate: Date } {
+export function getDisplayDateRange(search: URLSearchParams): { startDate: Date; endDate?: Date } {
   // Not using `getEndDate` here because it's set to "start of day after the one specified
   // in the URL" which causes an off-by-one error if we were to render that directly in
   // the calendar.
-  let endDate = new Date();
+  let endDate = undefined;
   const dateString = search.get(END_DATE_PARAM_NAME);
   if (dateString) {
     const dateNumber = Number(dateString);
@@ -191,15 +197,22 @@ export function isExecutionMetric(m: stat_filter.Metric): boolean {
   return m.execution !== null && m.execution !== undefined;
 }
 
-export function formatPreviousDateRangeFromSearchParams(search: URLSearchParams): string {
-  const { startDate, endDate } = getDisplayDateRange(search);
-  return formatPreviousDateRange(startDate, endDate);
-}
+export function formatDateRangeDurationFromSearchParams(search: URLSearchParams): string {
+  const startDate = getStartDate(search);
+  const endDate = getEndDate(search) ?? moment(new Date()).add(1, "days").startOf("day").toDate();
+  const deltaMillis = endDate.getTime() - startDate.getTime();
 
-export function getDayCountStringFromSearchParams(search: URLSearchParams): string {
-  const { startDate, endDate } = getDisplayDateRange(search);
-  const diff = differenceInCalendarDays(startDate, endDate) + 1;
-  return diff == 1 ? "1 day" : `${diff} days`;
+  if (
+    startDate.getMinutes() != 0 ||
+    endDate?.getMinutes() != 0 ||
+    startDate.getHours() != 0 ||
+    endDate?.getHours() != 0
+  ) {
+    return durationMillis(deltaMillis);
+  }
+
+  const diff = differenceInCalendarDays(startDate, endDate ?? new Date());
+  return diff == 1 ? "day" : `${diff} days`;
 }
 
 export function formatDateRangeFromSearchParams(search: URLSearchParams): string {

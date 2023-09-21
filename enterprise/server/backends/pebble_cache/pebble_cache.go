@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/hex"
-	"flag"
 	"fmt"
 	"io"
 	"io/fs"
@@ -31,7 +30,7 @@ import (
 	"github.com/buildbuddy-io/buildbuddy/server/util/bytebufferpool"
 	"github.com/buildbuddy-io/buildbuddy/server/util/compression"
 	"github.com/buildbuddy-io/buildbuddy/server/util/disk"
-	"github.com/buildbuddy-io/buildbuddy/server/util/flagutil"
+	"github.com/buildbuddy-io/buildbuddy/server/util/flag"
 	"github.com/buildbuddy-io/buildbuddy/server/util/ioutil"
 	"github.com/buildbuddy-io/buildbuddy/server/util/lockmap"
 	"github.com/buildbuddy-io/buildbuddy/server/util/log"
@@ -62,8 +61,8 @@ var (
 	rootDirectoryFlag          = flag.String("cache.pebble.root_directory", "", "The root directory to store the database in.")
 	blockCacheSizeBytesFlag    = flag.Int64("cache.pebble.block_cache_size_bytes", DefaultBlockCacheSizeBytes, "How much ram to give the block cache")
 	maxInlineFileSizeBytesFlag = flag.Int64("cache.pebble.max_inline_file_size_bytes", DefaultMaxInlineFileSizeBytes, "Files smaller than this may be inlined directly into pebble")
-	partitionsFlag             = flagutil.New("cache.pebble.partitions", []disk.Partition{}, "")
-	partitionMappingsFlag      = flagutil.New("cache.pebble.partition_mappings", []disk.PartitionMapping{}, "")
+	partitionsFlag             = flag.Slice("cache.pebble.partitions", []disk.Partition{}, "")
+	partitionMappingsFlag      = flag.Slice("cache.pebble.partition_mappings", []disk.PartitionMapping{}, "")
 
 	backgroundRepairFrequency = flag.Duration("cache.pebble.background_repair_frequency", 1*24*time.Hour, "How frequently to run period background repair tasks.")
 	backgroundRepairQPSLimit  = flag.Int("cache.pebble.background_repair_qps_limit", 100, "QPS limit for background repair modifications.")
@@ -499,7 +498,7 @@ func NewPebbleCache(env environment.Env, opts *Options) (*PebbleCache, error) {
 		pebbleOptions.Cache = c
 	}
 
-	db, err := pebble.Open(opts.RootDirectory, pebbleOptions)
+	db, err := pebble.Open(opts.RootDirectory, opts.Name, pebbleOptions)
 	if err != nil {
 		return nil, err
 	}
@@ -1901,12 +1900,12 @@ func (p *PebbleCache) newCDCCommitedWriteCloser(ctx context.Context, fileRecord 
 	cwc.CommitFn = func(bytesWritten int64) error {
 		if decompressor != nil {
 			if err := decompressor.Close(); err != nil {
-				return err
+				return status.InternalErrorf("failed to close decompressor: %s", err)
 			}
 		}
 
 		if err := cdcw.closeChunkerAndWait(); err != nil {
-			return err
+			return status.InternalErrorf("failed to close chunker: %s", err)
 		}
 
 		cdcw.mu.Lock()
@@ -1983,15 +1982,13 @@ func (cdcw *cdcWriter) writeRawChunk(fileRecord *rfpb.FileRecord, key filestore.
 	if err != nil {
 		return err
 	}
+	defer wcm.Close()
 	_, err = wcm.Write(chunkData)
 	if err != nil {
-		return err
-	}
-	if err := wcm.Close(); err != nil {
-		return err
+		return status.InternalErrorf("failed to write raw chunk: %s", err)
 	}
 	if err := wcm.Commit(); err != nil {
-		return err
+		return status.InternalErrorf("failed to commit while writing raw chunk: %s", err)
 	}
 	return nil
 }
