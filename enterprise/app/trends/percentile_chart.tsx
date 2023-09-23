@@ -49,8 +49,7 @@ export default class PercentilesChartComponent extends React.Component<Percentil
 
   onMouseDown(e: CategoricalChartState) {
     if (!this.props.onZoomSelection || !e) {
-      this.state.refAreaLeft = undefined;
-      this.state.refAreaRight = undefined;
+      this.setState({ refAreaLeft: undefined, refAreaRight: undefined });
       return;
     }
     this.setState({ refAreaLeft: e.activeLabel, refAreaRight: e.activeLabel });
@@ -58,20 +57,18 @@ export default class PercentilesChartComponent extends React.Component<Percentil
 
   onMouseMove(e: CategoricalChartState) {
     if (!this.props.onZoomSelection || !e) {
-      this.state.refAreaLeft = undefined;
-      this.state.refAreaRight = undefined;
+      this.setState({ refAreaLeft: undefined, refAreaRight: undefined });
       return;
     }
     if (!this.state.refAreaLeft) {
       return;
     }
-    this.state.refAreaLeft && this.setState({ refAreaRight: e.activeLabel });
+    this.setState({ refAreaRight: e.activeLabel });
   }
 
   onMouseUp(e: CategoricalChartState) {
     if (!this.props.onZoomSelection || !e) {
-      this.state.refAreaLeft = undefined;
-      this.state.refAreaRight = undefined;
+      this.setState({ refAreaLeft: undefined, refAreaRight: undefined });
       return;
     }
     const finalRightValue = e.activeLabel;
@@ -84,8 +81,7 @@ export default class PercentilesChartComponent extends React.Component<Percentil
       }
       this.props.onZoomSelection(v1, v2);
     }
-    this.state.refAreaLeft = undefined;
-    this.state.refAreaRight = undefined;
+    this.setState({ refAreaLeft: undefined, refAreaRight: undefined });
   }
 
   shouldRenderTooltip(): boolean {
@@ -128,6 +124,7 @@ export default class PercentilesChartComponent extends React.Component<Percentil
               dataKey={(datum) => this.props.extractP50(datum)}
               stroke="#067BC2"
               dot={false}
+              isAnimationActive={false}
             />
             <Line
               yAxisId="duration"
@@ -135,6 +132,7 @@ export default class PercentilesChartComponent extends React.Component<Percentil
               dataKey={(datum) => this.props.extractP75(datum)}
               stroke="#84BCDA"
               dot={false}
+              isAnimationActive={false}
             />
             <Line
               yAxisId="duration"
@@ -142,6 +140,7 @@ export default class PercentilesChartComponent extends React.Component<Percentil
               dataKey={(datum) => this.props.extractP90(datum)}
               stroke="#ECC30B"
               dot={false}
+              isAnimationActive={false}
             />
             <Line
               yAxisId="duration"
@@ -149,6 +148,7 @@ export default class PercentilesChartComponent extends React.Component<Percentil
               dataKey={(datum) => this.props.extractP95(datum)}
               stroke="#F37748"
               dot={false}
+              isAnimationActive={false}
             />
             <Line
               yAxisId="duration"
@@ -156,10 +156,12 @@ export default class PercentilesChartComponent extends React.Component<Percentil
               dataKey={(datum) => this.props.extractP99(datum)}
               stroke="#D56062"
               dot={false}
+              isAnimationActive={false}
             />
             {this.state.refAreaLeft && this.state.refAreaRight ? (
               <ReferenceArea
                 yAxisId="duration"
+                ifOverflow="visible"
                 x1={Math.min(+this.state.refAreaLeft, +this.state.refAreaRight)}
                 x2={Math.max(+this.state.refAreaLeft, +this.state.refAreaRight)}
                 strokeOpacity={0.3}

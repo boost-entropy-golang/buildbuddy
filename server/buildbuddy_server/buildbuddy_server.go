@@ -30,6 +30,7 @@ import (
 	"github.com/buildbuddy-io/buildbuddy/server/tables"
 	"github.com/buildbuddy-io/buildbuddy/server/target"
 	"github.com/buildbuddy-io/buildbuddy/server/util/alert"
+	"github.com/buildbuddy-io/buildbuddy/server/util/authutil"
 	"github.com/buildbuddy-io/buildbuddy/server/util/capabilities"
 	"github.com/buildbuddy-io/buildbuddy/server/util/flagutil"
 	"github.com/buildbuddy-io/buildbuddy/server/util/log"
@@ -53,6 +54,7 @@ import (
 	ghpb "github.com/buildbuddy-io/buildbuddy/proto/github"
 	grpb "github.com/buildbuddy-io/buildbuddy/proto/group"
 	inpb "github.com/buildbuddy-io/buildbuddy/proto/invocation"
+	irpb "github.com/buildbuddy-io/buildbuddy/proto/iprules"
 	qpb "github.com/buildbuddy-io/buildbuddy/proto/quota"
 	repb "github.com/buildbuddy-io/buildbuddy/proto/repo"
 	rnpb "github.com/buildbuddy-io/buildbuddy/proto/runner"
@@ -262,6 +264,7 @@ func makeGroups(groupRoles []*tables.GroupRole) []*grpb.Group {
 			UserOwnedKeysEnabled:              g.UserOwnedKeysEnabled,
 			UseGroupOwnedExecutors:            g.UseGroupOwnedExecutors != nil && *g.UseGroupOwnedExecutors,
 			RestrictCleanWorkflowRunsToAdmins: g.RestrictCleanWorkflowRunsToAdmins,
+			EnforceIpRules:                    g.EnforceIPRules,
 			SuggestionPreference:              g.SuggestionPreference,
 			Url:                               getGroupUrl(&gr.Group),
 		})
@@ -391,18 +394,41 @@ func (s *BuildBuddyServer) GetGroup(ctx context.Context, req *grpb.GetGroupReque
 	if userDB == nil {
 		return nil, status.UnimplementedError("Not Implemented")
 	}
-	urlIdentifier := strings.TrimSpace(req.GetUrlIdentifier())
-	if urlIdentifier == "" {
-		if sd := subdomain.Get(ctx); sd != "" {
-			urlIdentifier = sd
-		} else {
-			return nil, status.InvalidArgumentError("URL identifier is required.")
-		}
-	}
 
-	group, err := userDB.GetGroupByURLIdentifier(ctx, urlIdentifier)
-	if err != nil {
-		return nil, err
+	var group *tables.Group
+	if req.GetGroupId() != "" {
+		// Looking up by group ID is restricted to server admins.
+		u, err := perms.AuthenticatedUser(ctx, s.env)
+		if err != nil {
+			return nil, err
+		}
+		adminGroupID := s.env.GetAuthenticator().AdminGroupID()
+		if adminGroupID == "" {
+			return nil, status.PermissionDeniedError("Access denied")
+		}
+		if err := authutil.AuthorizeGroupRole(u, adminGroupID, role.Admin); err != nil {
+			return nil, err
+		}
+		g, err := userDB.GetGroupByID(ctx, req.GetGroupId())
+		if err != nil {
+			return nil, err
+		}
+		group = g
+	} else {
+		urlIdentifier := strings.TrimSpace(req.GetUrlIdentifier())
+		if urlIdentifier == "" {
+			if sd := subdomain.Get(ctx); sd != "" {
+				urlIdentifier = sd
+			} else {
+				return nil, status.InvalidArgumentError("URL identifier is required.")
+			}
+		}
+
+		g, err := userDB.GetGroupByURLIdentifier(ctx, urlIdentifier)
+		if err != nil {
+			return nil, err
+		}
+		group = g
 	}
 	return &grpb.GetGroupResponse{
 		Id: group.GroupID,
@@ -1877,4 +1903,107 @@ func (s *BuildBuddyServer) CreateGithubRef(ctx context.Context, req *ghpb.Create
 		return nil, status.UnimplementedError("Not implemented")
 	}
 	return a.CreateGithubRef(ctx, req)
+}
+
+func (s *BuildBuddyServer) SetIPRulesConfig(ctx context.Context, request *irpb.SetRulesConfigRequest) (*irpb.SetRulesConfigResponse, error) {
+	irs := s.env.GetIPRulesService()
+	if irs == nil {
+		return nil, status.UnimplementedError("IP rules not enabled")
+	}
+	rsp, err := irs.SetIPRuleConfig(ctx, request)
+	if err != nil {
+		return nil, err
+	}
+	if al := s.env.GetAuditLogger(); al != nil {
+		al.Log(ctx, auditlog.GroupResourceID(request.GetRequestContext().GetGroupId()), alpb.Action_UPDATE_IP_RULES_CONFIG, request)
+	}
+	return rsp, err
+}
+
+func (s *BuildBuddyServer) GetIPRulesConfig(ctx context.Context, request *irpb.GetRulesConfigRequest) (*irpb.GetRulesConfigResponse, error) {
+	irs := s.env.GetIPRulesService()
+	if irs == nil {
+		return nil, status.UnimplementedError("IP rules not enabled")
+	}
+	rsp, err := irs.GetIPRuleConfig(ctx, request)
+	if err != nil {
+		return nil, err
+	}
+	return rsp, err
+}
+
+func (s *BuildBuddyServer) GetIPRules(ctx context.Context, request *irpb.GetRulesRequest) (*irpb.GetRulesResponse, error) {
+	irs := s.env.GetIPRulesService()
+	if irs == nil {
+		return nil, status.UnimplementedError("IP rules not enabled")
+	}
+	return irs.GetRules(ctx, request)
+}
+
+func (s *BuildBuddyServer) AddIPRule(ctx context.Context, request *irpb.AddRuleRequest) (*irpb.AddRuleResponse, error) {
+	irs := s.env.GetIPRulesService()
+	if irs == nil {
+		return nil, status.UnimplementedError("IP rules not enabled")
+	}
+	rsp, err := irs.AddRule(ctx, request)
+	if err != nil {
+		return nil, err
+	}
+	if al := s.env.GetAuditLogger(); al != nil {
+		rid := &alpb.ResourceID{
+			Type: alpb.ResourceType_IP_RULE,
+			Id:   rsp.GetRule().GetIpRuleId(),
+			Name: request.GetRule().GetDescription(),
+		}
+		al.Log(ctx, rid, alpb.Action_CREATE, request)
+	}
+	return rsp, nil
+}
+
+func (s *BuildBuddyServer) UpdateIPRule(ctx context.Context, request *irpb.UpdateRuleRequest) (*irpb.UpdateRuleResponse, error) {
+	irs := s.env.GetIPRulesService()
+	if irs == nil {
+		return nil, status.UnimplementedError("IP rules not enabled")
+	}
+	r, err := irs.GetRule(ctx, request.GetRequestContext().GetGroupId(), request.GetRule().GetIpRuleId())
+	if err != nil {
+		return nil, err
+	}
+	rsp, err := irs.UpdateRule(ctx, request)
+	if err != nil {
+		return nil, err
+	}
+	if al := s.env.GetAuditLogger(); al != nil {
+		rid := &alpb.ResourceID{
+			Type: alpb.ResourceType_IP_RULE,
+			Id:   request.GetRule().GetIpRuleId(),
+			Name: r.Description,
+		}
+		al.Log(ctx, rid, alpb.Action_UPDATE, request)
+	}
+	return rsp, nil
+}
+
+func (s *BuildBuddyServer) DeleteIPRule(ctx context.Context, request *irpb.DeleteRuleRequest) (*irpb.DeleteRuleResponse, error) {
+	irs := s.env.GetIPRulesService()
+	if irs == nil {
+		return nil, status.UnimplementedError("IP rules not enabled")
+	}
+	r, err := irs.GetRule(ctx, request.GetRequestContext().GetGroupId(), request.GetIpRuleId())
+	if err != nil {
+		return nil, err
+	}
+	rsp, err := irs.DeleteRule(ctx, request)
+	if err != nil {
+		return nil, err
+	}
+	if al := s.env.GetAuditLogger(); al != nil {
+		rid := &alpb.ResourceID{
+			Type: alpb.ResourceType_IP_RULE,
+			Id:   request.GetIpRuleId(),
+			Name: r.Description,
+		}
+		al.Log(ctx, rid, alpb.Action_DELETE, request)
+	}
+	return rsp, nil
 }

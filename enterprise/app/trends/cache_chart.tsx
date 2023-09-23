@@ -75,8 +75,7 @@ export default class CacheChartComponent extends React.Component<Props, State> {
 
   onMouseDown(e: CategoricalChartState) {
     if (!this.props.onZoomSelection || !e) {
-      this.state.refAreaLeft = undefined;
-      this.state.refAreaRight = undefined;
+      this.setState({ refAreaLeft: undefined, refAreaRight: undefined });
       return;
     }
     this.setState({ refAreaLeft: e.activeLabel, refAreaRight: e.activeLabel });
@@ -84,20 +83,18 @@ export default class CacheChartComponent extends React.Component<Props, State> {
 
   onMouseMove(e: CategoricalChartState) {
     if (!this.props.onZoomSelection || !e) {
-      this.state.refAreaLeft = undefined;
-      this.state.refAreaRight = undefined;
+      this.setState({ refAreaLeft: undefined, refAreaRight: undefined });
       return;
     }
     if (!this.state.refAreaLeft) {
       return;
     }
-    this.state.refAreaLeft && this.setState({ refAreaRight: e.activeLabel });
+    this.setState({ refAreaRight: e.activeLabel });
   }
 
   onMouseUp(e: CategoricalChartState) {
     if (!this.props.onZoomSelection || !e) {
-      this.state.refAreaLeft = undefined;
-      this.state.refAreaRight = undefined;
+      this.setState({ refAreaLeft: undefined, refAreaRight: undefined });
       return;
     }
     const finalRightValue = e.activeLabel;
@@ -110,8 +107,7 @@ export default class CacheChartComponent extends React.Component<Props, State> {
       }
       this.props.onZoomSelection(v1, v2);
     }
-    this.state.refAreaLeft = undefined;
-    this.state.refAreaRight = undefined;
+    this.setState({ refAreaLeft: undefined, refAreaRight: undefined });
   }
 
   shouldRenderTooltip(): boolean {
@@ -149,12 +145,19 @@ export default class CacheChartComponent extends React.Component<Props, State> {
                 />
               }
             />
-            <Bar yAxisId="hits" name="hits" dataKey={(datum) => this.props.extractHits(datum)} fill="#8BC34A" />
+            <Bar
+              yAxisId="hits"
+              name="hits"
+              dataKey={(datum) => this.props.extractHits(datum)}
+              fill="#8BC34A"
+              isAnimationActive={false}
+            />
             <Bar
               yAxisId="hits"
               name={this.props.secondaryBarName}
               dataKey={(datum) => this.props.extractSecondary(datum)}
               fill="#f44336"
+              isAnimationActive={false}
             />
             <Line
               yAxisId="percent"
@@ -165,10 +168,12 @@ export default class CacheChartComponent extends React.Component<Props, State> {
                 (this.props.extractHits(datum) + this.props.extractSecondary(datum))
               }
               stroke="#03A9F4"
+              isAnimationActive={false}
             />
             {this.state.refAreaLeft && this.state.refAreaRight ? (
               <ReferenceArea
                 yAxisId="percent"
+                ifOverflow="visible"
                 x1={Math.min(+this.state.refAreaLeft, +this.state.refAreaRight)}
                 x2={Math.max(+this.state.refAreaLeft, +this.state.refAreaRight)}
                 strokeOpacity={0.3}

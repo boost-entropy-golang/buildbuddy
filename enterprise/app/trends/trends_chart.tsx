@@ -90,8 +90,7 @@ export default class TrendsChartComponent extends React.Component<Props, State> 
 
   onMouseDown(e: CategoricalChartState) {
     if (!this.props.onZoomSelection || !e) {
-      this.state.refAreaLeft = undefined;
-      this.state.refAreaRight = undefined;
+      this.setState({ refAreaLeft: undefined, refAreaRight: undefined });
       return;
     }
     this.setState({ refAreaLeft: e.activeLabel, refAreaRight: e.activeLabel });
@@ -99,20 +98,18 @@ export default class TrendsChartComponent extends React.Component<Props, State> 
 
   onMouseMove(e: CategoricalChartState) {
     if (!this.props.onZoomSelection || !e) {
-      this.state.refAreaLeft = undefined;
-      this.state.refAreaRight = undefined;
+      this.setState({ refAreaLeft: undefined, refAreaRight: undefined });
       return;
     }
     if (!this.state.refAreaLeft) {
       return;
     }
-    this.state.refAreaLeft && this.setState({ refAreaRight: e.activeLabel });
+    this.setState({ refAreaRight: e.activeLabel });
   }
 
   onMouseUp(e: CategoricalChartState) {
     if (!this.props.onZoomSelection || !e) {
-      this.state.refAreaLeft = undefined;
-      this.state.refAreaRight = undefined;
+      this.setState({ refAreaLeft: undefined, refAreaRight: undefined });
       return;
     }
     const finalRightValue = e.activeLabel;
@@ -125,8 +122,7 @@ export default class TrendsChartComponent extends React.Component<Props, State> 
       }
       this.props.onZoomSelection(v1, v2);
     }
-    this.state.refAreaLeft = undefined;
-    this.state.refAreaRight = undefined;
+    this.setState({ refAreaLeft: undefined, refAreaRight: undefined });
   }
 
   shouldRenderTooltip(): boolean {
@@ -180,6 +176,7 @@ export default class TrendsChartComponent extends React.Component<Props, State> 
               yAxisId="primary"
               name={this.props.name}
               dataKey={this.props.extractValue}
+              isAnimationActive={false}
               fill="#607D8B">
               {this.props.data.map((date, index) => (
                 <Cell
@@ -200,6 +197,7 @@ export default class TrendsChartComponent extends React.Component<Props, State> 
                 name={this.props.secondaryName}
                 dot={false}
                 dataKey={this.props.extractSecondaryValue}
+                isAnimationActive={false}
                 stroke="#03A9F4"
               />
             )}
@@ -211,6 +209,7 @@ export default class TrendsChartComponent extends React.Component<Props, State> 
                 yAxisId={this.props.separateAxis ? "secondary" : "primary"}
                 name={this.props.secondaryName}
                 dataKey={this.props.extractSecondaryValue}
+                isAnimationActive={false}
                 fill="#03A9F4">
                 {this.props.data.map((date, index) => (
                   <Cell
@@ -232,6 +231,7 @@ export default class TrendsChartComponent extends React.Component<Props, State> 
             {this.state.refAreaLeft && this.state.refAreaRight ? (
               <ReferenceArea
                 yAxisId="primary"
+                ifOverflow="visible"
                 x1={Math.min(+this.state.refAreaLeft, +this.state.refAreaRight)}
                 x2={Math.max(+this.state.refAreaLeft, +this.state.refAreaRight)}
                 strokeOpacity={0.3}
