@@ -298,13 +298,12 @@ func checkIfFilesExist(targetDir string, files ...string) bool {
 }
 
 type Provider struct {
-	env            environment.Env
-	dockerClient   *dockerclient.Client
-	imageCacheAuth *container.ImageCacheAuthenticator
-	buildRoot      string
+	env          environment.Env
+	dockerClient *dockerclient.Client
+	buildRoot    string
 }
 
-func NewProvider(env environment.Env, imageCacheAuth *container.ImageCacheAuthenticator, hostBuildRoot string) *Provider {
+func NewProvider(env environment.Env, hostBuildRoot string) *Provider {
 	// Best effort trying to initialize the docker client. If it fails, we'll
 	// simply fall back to use skopeo to download and cache container images.
 	client, err := docker.NewClient()
@@ -313,10 +312,9 @@ func NewProvider(env environment.Env, imageCacheAuth *container.ImageCacheAuthen
 	}
 
 	return &Provider{
-		env:            env,
-		dockerClient:   client,
-		imageCacheAuth: imageCacheAuth,
-		buildRoot:      hostBuildRoot,
+		env:          env,
+		dockerClient: client,
+		buildRoot:    hostBuildRoot,
 	}
 }
 
@@ -345,7 +343,7 @@ func (p *Provider) New(ctx context.Context, props *platform.Properties, task *re
 		ActionWorkingDirectory: workingDir,
 		JailerRoot:             p.buildRoot,
 	}
-	c, err := NewContainer(ctx, p.env, p.imageCacheAuth, task.GetExecutionTask(), opts)
+	c, err := NewContainer(ctx, p.env, task.GetExecutionTask(), opts)
 	if err != nil {
 		return nil, err
 	}
@@ -363,7 +361,6 @@ type FirecrackerContainer struct {
 	containerImage   string // the OCI container image. ex "alpine:latest"
 	actionWorkingDir string // the action directory with inputs / outputs
 	containerFSPath  string // the path to the container ext4 image
-	tempDir          string // path for writing disk images before the chroot is created
 	user             string // user to execute all commands as
 
 	rmOnce *sync.Once
@@ -404,16 +401,8 @@ type FirecrackerContainer struct {
 	machine            *fcclient.Machine // the firecracker machine object.
 	vmLog              *VMLog
 	env                environment.Env
-	imageCacheAuth     *container.ImageCacheAuthenticator
 	createFromSnapshot bool
 	mountWorkspaceFile bool
-
-	// If a container is resumed from a snapshot, the jailer
-	// is started first using an external command and then the snapshot
-	// is loaded. This slightly breaks the firecracker SDK's "Wait()"
-	// method, so in that case we wait for the external jailer command
-	// to finish, rather than calling "Wait()" on the sdk machine object.
-	externalJailerCmd *exec.Cmd
 
 	cleanupVethPair func(context.Context) error
 	// cancelVmCtx cancels the Machine context, stopping the VMM if it hasn't
@@ -421,7 +410,7 @@ type FirecrackerContainer struct {
 	cancelVmCtx context.CancelFunc
 }
 
-func NewContainer(ctx context.Context, env environment.Env, imageCacheAuth *container.ImageCacheAuthenticator, task *repb.ExecutionTask, opts ContainerOpts) (*FirecrackerContainer, error) {
+func NewContainer(ctx context.Context, env environment.Env, task *repb.ExecutionTask, opts ContainerOpts) (*FirecrackerContainer, error) {
 	if *snaploader.EnableLocalSnapshotSharing && !(*enableNBD && *enableUFFD) {
 		return nil, status.FailedPreconditionError("executor configuration error: local snapshot sharing requires NBD and UFFD to be enabled")
 	}
@@ -475,7 +464,6 @@ func NewContainer(ctx context.Context, env environment.Env, imageCacheAuth *cont
 		env:                env,
 		loader:             loader,
 		vmLog:              vmLog,
-		imageCacheAuth:     imageCacheAuth,
 		mountWorkspaceFile: *firecrackerMountWorkspaceFile,
 		cancelVmCtx:        func() {},
 	}
@@ -1067,10 +1055,6 @@ func nonCmdExit(ctx context.Context, err error) *interfaces.CommandResult {
 	}
 }
 
-func (c *FirecrackerContainer) startedFromSnapshot() bool {
-	return c.externalJailerCmd != nil
-}
-
 func (c *FirecrackerContainer) newID(ctx context.Context) error {
 	vmIdxMu.Lock()
 	defer vmIdxMu.Unlock()
@@ -1592,7 +1576,7 @@ func (c *FirecrackerContainer) Run(ctx context.Context, command *repb.Command, a
 	// there's no need to Create the machine.
 	if c.machine == nil {
 		log.CtxInfof(ctx, "Pulling image %q", c.containerImage)
-		if err := container.PullImageIfNecessary(ctx, c.env, c.imageCacheAuth, c, creds, c.containerImage); err != nil {
+		if err := container.PullImageIfNecessary(ctx, c.env, c, creds, c.containerImage); err != nil {
 			return nonCmdExit(ctx, err)
 		}
 
@@ -1649,27 +1633,12 @@ func (c *FirecrackerContainer) create(ctx context.Context) error {
 	c.rmOnce = &sync.Once{}
 	c.rmErr = nil
 
-	var err error
-	c.tempDir, err = os.MkdirTemp(c.jailerRoot, "fc-container-*")
-	if err != nil {
-		return err
-	}
 	if err := os.MkdirAll(c.getChroot(), 0755); err != nil {
 		return status.InternalErrorf("failed to create chroot dir: %s", err)
 	}
 
 	scratchFSPath := c.scratchFSPath()
 	workspaceFSPath := c.workspaceFSPath()
-
-	// When mounting the workspace image directly as a block device (rather than
-	// as an NBD), the firecracker go SDK expects the disk images to be outside
-	// the chroot, and will move them to the chroot for us. So we place them in
-	// a temp dir so that the SDK doesn't complain that the chroot paths already
-	// exist when it tries to create them.
-	if !*enableNBD {
-		scratchFSPath = filepath.Join(c.tempDir, scratchFSName)
-		workspaceFSPath = filepath.Join(c.tempDir, workspaceFSName)
-	}
 	if *EnableRootfs {
 		if err := c.initRootfsStore(ctx); err != nil {
 			return status.WrapError(err, "create root image")
@@ -1685,7 +1654,6 @@ func (c *FirecrackerContainer) create(ctx context.Context) error {
 	if err := c.createWorkspaceImage(ctx, "" /*=workspaceDir*/, workspaceFSPath); err != nil {
 		return err
 	}
-	log.CtxDebugf(ctx, "Scratch and workspace disk images written to %q", c.tempDir)
 	log.CtxDebugf(ctx, "Using container image at %q", c.containerFSPath)
 	log.CtxDebugf(ctx, "getChroot() is %q", c.getChroot())
 	fcCfg, err := c.getConfig(ctx, c.containerFSPath, scratchFSPath, workspaceFSPath)
@@ -1984,12 +1952,6 @@ func (c *FirecrackerContainer) remove(ctx context.Context) error {
 		log.CtxErrorf(ctx, "Error cleaning up networking: %s", err)
 		lastErr = err
 	}
-	if c.tempDir != "" {
-		if err := os.RemoveAll(c.tempDir); err != nil {
-			log.CtxErrorf(ctx, "Error removing workspace fs: %s", err)
-			lastErr = err
-		}
-	}
 	if err := os.RemoveAll(filepath.Dir(c.getChroot())); err != nil {
 		log.CtxErrorf(ctx, "Error removing chroot: %s", err)
 		lastErr = err
@@ -2204,9 +2166,8 @@ func (c *FirecrackerContainer) syncWorkspace(ctx context.Context) error {
 func (c *FirecrackerContainer) Wait(ctx context.Context) error {
 	ctx, span := tracing.StartSpan(ctx)
 	defer span.End()
-
-	if c.externalJailerCmd != nil {
-		return c.externalJailerCmd.Wait()
+	if c.machine == nil {
+		return nil
 	}
 	return c.machine.Wait(ctx)
 }
