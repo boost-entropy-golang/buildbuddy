@@ -81,6 +81,7 @@ type Handler struct {
 	lis            net.Listener
 	stoppedChan    chan struct{}
 	handleDoneChan chan struct{}
+	handleErr      error
 
 	earlyTerminationReader *os.File
 	earlyTerminationWriter *os.File
@@ -123,9 +124,8 @@ func (h *Handler) Start(ctx context.Context, socketPath string, memoryStore *cop
 	h.earlyTerminationWriter = pipeWrite
 
 	go func() {
-		if err := h.handle(ctx, memoryStore); err != nil {
-			log.CtxErrorf(ctx, "Failed to handle firecracker memory requests: %s", err)
-		}
+		h.handleErr = h.handle(ctx, memoryStore)
+		close(h.handleDoneChan)
 	}()
 	return nil
 }
@@ -200,9 +200,7 @@ func (h *Handler) receiveSetupMsg(ctx context.Context) (*setupMessage, error) {
 	}, nil
 }
 
-func (h *Handler) handle(ctx context.Context, memoryStore *copy_on_write.COWStore) error {
-	defer close(h.handleDoneChan)
-
+func (h *Handler) handle(ctx context.Context, memoryStore *copy_on_write.COWStore) (err error) {
 	// Get uffd sent from firecracker
 	setup, err := h.receiveSetupMsg(ctx)
 	if err != nil {
@@ -319,6 +317,13 @@ func pageStartAddress(addr uint64, pageSize int) uintptr {
 	return uintptr(addr & ^(uint64(pageSize) - 1))
 }
 
+// Wait waits for the UFFD handler to terminate. It returns an error only if
+// the handler terminated because it failed to handle a page fault request.
+func (h *Handler) Wait() error {
+	<-h.handleDoneChan
+	return h.handleErr
+}
+
 func (h *Handler) Stop() error {
 	if h.earlyTerminationWriter == nil || h.earlyTerminationReader == nil || h.handleDoneChan == nil {
 		log.Info("UFFD handler was already stopped when Stop() was called")
@@ -335,7 +340,6 @@ func (h *Handler) Stop() error {
 
 	// Wait for handle() to finish processing open requests
 	<-h.handleDoneChan
-	h.handleDoneChan = nil
 
 	h.earlyTerminationReader.Close()
 	h.earlyTerminationWriter.Close()

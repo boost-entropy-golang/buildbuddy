@@ -151,7 +151,7 @@ func (c *CacheProxy) getClient(ctx context.Context, peer string) (dcpb.Distribut
 		return client, nil
 	}
 	log.Debugf("Creating new client for peer: %q", peer)
-	conn, err := grpc_client.DialTarget("grpc://" + peer)
+	conn, err := grpc_client.DialInternal(c.env, "grpc://"+peer)
 	if err != nil {
 		return nil, err
 	}
@@ -318,19 +318,18 @@ func (c *CacheProxy) Read(req *dcpb.ReadRequest, stream dcpb.DistributedCache_Re
 	copyBuf := c.bufferPool.Get(bufSize)
 	defer c.bufferPool.Put(copyBuf)
 
-	buf := copyBuf[:bufSize]
 	for {
-		n, err := io.ReadFull(reader, buf)
+		n, err := io.ReadFull(reader, copyBuf)
 		if err == io.EOF {
 			break
 		} else if err == io.ErrUnexpectedEOF {
-			if err := stream.Send(&dcpb.ReadResponse{Data: buf[:n]}); err != nil {
+			if err := stream.Send(&dcpb.ReadResponse{Data: copyBuf[:n]}); err != nil {
 				return err
 			}
 		} else if err != nil {
 			return err
 		} else {
-			if err := stream.Send(&dcpb.ReadResponse{Data: buf}); err != nil {
+			if err := stream.Send(&dcpb.ReadResponse{Data: copyBuf}); err != nil {
 				return err
 			}
 			continue

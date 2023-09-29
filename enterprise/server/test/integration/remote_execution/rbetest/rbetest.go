@@ -377,7 +377,7 @@ func newBuildBuddyServer(t *testing.T, env *buildBuddyServerEnv, opts *BuildBudd
 	}
 	server.start()
 
-	clientConn, err := grpc_client.DialTarget(fmt.Sprintf("grpc://localhost:%d", port))
+	clientConn, err := grpc_client.DialSimple(fmt.Sprintf("grpc://localhost:%d", port))
 	if err != nil {
 		assert.FailNowf(t, "could not connect to BuildBuddy server", err.Error())
 	}
@@ -885,8 +885,9 @@ func (r *Env) GetActionResultForFailedAction(ctx context.Context, cmd *Command, 
 		assert.FailNow(r.t, fmt.Sprintf("unable to attach invocation ID %q to digest", invocationID))
 	}
 	req := &repb.GetActionResultRequest{
-		InstanceName: cmd.GetActionResourceName().GetInstanceName(),
-		ActionDigest: actionResultDigest,
+		InstanceName:   cmd.GetActionResourceName().GetInstanceName(),
+		ActionDigest:   actionResultDigest,
+		DigestFunction: cmd.GetActionResourceName().GetDigestFunction(),
 	}
 	acClient := r.GetActionResultStorageClient()
 	return acClient.GetActionResult(context.Background(), req)
