@@ -26,7 +26,6 @@ import (
 	"github.com/buildbuddy-io/buildbuddy/enterprise/server/raft/sender"
 	"github.com/buildbuddy-io/buildbuddy/enterprise/server/util/pebble"
 	"github.com/buildbuddy-io/buildbuddy/server/gossip"
-	"github.com/buildbuddy-io/buildbuddy/server/interfaces"
 	"github.com/buildbuddy-io/buildbuddy/server/metrics"
 	"github.com/buildbuddy-io/buildbuddy/server/resources"
 	"github.com/buildbuddy-io/buildbuddy/server/util/alert"
@@ -568,7 +567,9 @@ type Store struct {
 	usages              *usageTracker
 	rangeUsageListeners []RangeUsageListener
 
-	metaRangeData   string
+	metaRangeMu   sync.Mutex
+	metaRangeData []byte
+
 	leaderUpdatedCB listener.LeaderCB
 
 	fileStorer filestore.Store
@@ -595,7 +596,8 @@ func New(rootDir string, nodeHost *dragonboat.NodeHost, gossipManager *gossip.Go
 		leases:   sync.Map{},
 		replicas: sync.Map{},
 
-		metaRangeData: "",
+		metaRangeMu:   sync.Mutex{},
+		metaRangeData: make([]byte, 0),
 		fileStorer:    filestore.New(),
 		eg:            &errgroup.Group{},
 	}
@@ -619,9 +621,60 @@ func New(rootDir string, nodeHost *dragonboat.NodeHost, gossipManager *gossip.Go
 	listener.DefaultListener().RegisterLeaderUpdatedCB(&s.leaderUpdatedCB)
 	statusz.AddSection("raft_store", "Store", s)
 
+	go s.queryForMetarange()
 	go s.updateTags()
 
 	return s, nil
+}
+
+func (s *Store) getMetaRangeBuf() []byte {
+	s.metaRangeMu.Lock()
+	defer s.metaRangeMu.Unlock()
+	if len(s.metaRangeData) == 0 {
+		return nil
+	}
+	buf := make([]byte, len(s.metaRangeData))
+	copy(buf, s.metaRangeData)
+	return buf
+}
+
+func (s *Store) setMetaRangeBuf(buf []byte) {
+	s.metaRangeMu.Lock()
+	defer s.metaRangeMu.Unlock()
+	new := &rfpb.RangeDescriptor{}
+	if err := proto.Unmarshal(buf, new); err != nil {
+		log.Errorf("Error unmarshaling new metarange data: %s", err)
+		return
+	}
+	if len(s.metaRangeData) > 0 {
+		// Compare existing to new -- only update if generation is greater.
+		existing := &rfpb.RangeDescriptor{}
+		if err := proto.Unmarshal(s.metaRangeData, existing); err != nil {
+			log.Errorf("Error unmarshaling existing metarange data: %s", err)
+			return
+		}
+		if new.GetGeneration() <= existing.GetGeneration() {
+			return
+		}
+	}
+	// Update the value
+	s.metaRangeData = buf
+	s.sender.UpdateRange(new)
+	go s.renewNodeLiveness()
+}
+
+func (s *Store) queryForMetarange() {
+	start := time.Now()
+	stream, err := s.gossipManager.Query(constants.MetaRangeTag, nil, nil)
+	if err != nil {
+		log.Errorf("Error querying for metarange: %s", err)
+	}
+	for p := range stream.ResponseCh() {
+		s.setMetaRangeBuf(p.Payload)
+		stream.Close()
+		log.Infof("Discovered metarange in %s", time.Since(start))
+		return
+	}
 }
 
 func (s *Store) Statusz(ctx context.Context) string {
@@ -904,7 +957,7 @@ func (s *Store) AddRange(rd *rfpb.RangeDescriptor, r *replica.Replica) {
 			s.log.Errorf("Error marshaling metarange descriptor: %s", err)
 			return
 		}
-		go s.gossipManager.SetTags(map[string]string{constants.MetaRangeTag: string(buf)})
+		go s.gossipManager.SendUserEvent(constants.MetaRangeTag, buf /*coalesce=*/, false)
 	}
 
 	// Start goroutines for these so that Adding ranges is quick.
@@ -1338,96 +1391,21 @@ func (s *Store) Read(req *rfpb.ReadRequest, stream rfspb.Api_ReadServer) error {
 	return err
 }
 
-func (s *Store) Write(stream rfspb.Api_WriteServer) error {
-	var bytesWritten int64
-	var writeCloser interfaces.MetadataWriteCloser
-	var shardID uint64
-	for {
-		req, err := stream.Recv()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return err
-		}
-		if writeCloser == nil {
-			r, err := s.LeasedRange(req.GetHeader())
-			if err != nil {
-				s.log.Errorf("Error while calling LeasedRange: %s", err)
-				return err
-			}
-			shardID = r.ShardID
-			writeCloser, err = r.Writer(stream.Context(), req.GetHeader(), req.GetFileRecord())
-			if err != nil {
-				return err
-			}
-			defer writeCloser.Close()
-			// Send the client an empty write response as an indicator that we
-			// have accepted the write.
-			if err := stream.Send(&rfpb.WriteResponse{}); err != nil {
-				return err
-			}
-		}
-		n, err := writeCloser.Write(req.Data)
-		if err != nil {
-			return err
-		}
-		bytesWritten += int64(n)
-		if req.FinishWrite {
-			now := time.Now()
-			md := &rfpb.FileMetadata{
-				FileRecord:      req.GetFileRecord(),
-				StorageMetadata: writeCloser.Metadata(),
-				StoredSizeBytes: bytesWritten,
-				LastModifyUsec:  now.UnixMicro(),
-				LastAccessUsec:  now.UnixMicro(),
-			}
-			pebbleKey, err := s.fileStorer.PebbleKey(req.GetFileRecord())
-			if err != nil {
-				return err
-			}
-			fileMetadataKey, err := pebbleKey.Bytes(filestore.Version2)
-			if err != nil {
-				return err
-			}
-			protoBytes, err := proto.Marshal(md)
-			if err != nil {
-				return err
-			}
-			writeReq := rbuilder.NewBatchBuilder().Add(&rfpb.DirectWriteRequest{
-				Kv: &rfpb.KV{
-					Key:   fileMetadataKey,
-					Value: protoBytes,
-				},
-			})
-			if err := client.SyncProposeLocalBatchNoRsp(stream.Context(), s.nodeHost, shardID, writeReq); err != nil {
-				return err
-			}
-			return stream.Send(&rfpb.WriteResponse{
-				CommittedSize: bytesWritten,
-			})
-		}
-	}
-	return nil
-}
-
 func (s *Store) OnEvent(updateType serf.EventType, event serf.Event) {
 	switch updateType {
-	case serf.EventMemberJoin, serf.EventMemberUpdate:
-		memberEvent, _ := event.(serf.MemberEvent)
-		for _, member := range memberEvent.Members {
-			if metaRangeData, ok := member.Tags[constants.MetaRangeTag]; ok {
-				// Whenever the metarange data changes, for any
-				// reason, start a goroutine that ensures the
-				// node liveness record is up to date.
-				if s.metaRangeData != metaRangeData {
-					s.metaRangeData = metaRangeData
-					// Start this in a goroutine so that
-					// other gossip callbacks are not
-					// blocked.
-					go s.renewNodeLiveness()
+	case serf.EventQuery:
+		query, _ := event.(*serf.Query)
+		if query.Name == constants.MetaRangeTag {
+			if buf := s.getMetaRangeBuf(); len(buf) > 0 {
+				if err := query.Respond(buf); err != nil {
+					log.Debugf("Error responding to metarange query: %s", err)
 				}
 			}
+		}
+	case serf.EventUser:
+		userEvent, _ := event.(serf.UserEvent)
+		if userEvent.Name == constants.MetaRangeTag {
+			s.setMetaRangeBuf(userEvent.Payload)
 		}
 	default:
 		return
