@@ -1,3 +1,6 @@
+build --enable_platform_specific_config=true
+query --enable_platform_specific_config=true
+
 # Skymeld merges the analysis phase and execution phase.
 # This allows build and test executions to start before the analysis phase finishes,
 # thus speeding up the build overall .
@@ -34,10 +37,8 @@ build:remote-shared --remote_timeout=600
 build:remote-shared --remote_download_minimal
 build:remote-shared --jobs=100
 build:remote-shared --verbose_failures
-build:remote-shared --platforms=@buildbuddy_toolchain//:platform_linux
-build:remote-shared --host_platform=@buildbuddy_toolchain//:platform_linux
-build:remote-shared --crosstool_top=@buildbuddy_toolchain//:ubuntu_cc_toolchain_suite
-build:remote-shared --extra_toolchains=@buildbuddy_toolchain//:ubuntu_cc_toolchain
+build:remote-shared --platforms=@buildbuddy_toolchain//:platform_bare_linux
+build:remote-shared --host_platform=@buildbuddy_toolchain//:platform_bare_linux
 build:remote-shared --extra_toolchains=//:sh_toolchain
 
 # Build with --config=remote to use BuildBuddy RBE.
@@ -144,6 +145,11 @@ build:auto-release --config=remote
 build:auto-release --remote_instance_name=buildbuddy-io/buildbuddy/auto-release
 build:auto-release -c opt
 
+build:linux --incompatible_enable_cc_toolchain_resolution
+build:linux --action_env BAZEL_DO_NOT_DETECT_CPP_TOOLCHAIN=1
+build:linux --@io_bazel_rules_go//go/config:static=true
+build:linux --copt=-fPIC
+
 # By default, build logs get sent to the production server
 build --bes_results_url=https://app.buildbuddy.io/invocation/
 build --bes_backend=grpcs://remote.buildbuddy.io
@@ -152,7 +158,9 @@ build --bes_backend=grpcs://remote.buildbuddy.io
 build --noremote_upload_local_results # Uploads logs & artifacts without writing to cache
 
 # Populate workspace info like commit sha and repo name to your invocation.
-build --workspace_status_command=$(pwd)/workspace_status.sh
+build:linux --workspace_status_command=$(pwd)/workspace_status.sh
+build:macos --workspace_status_command=$(pwd)/workspace_status.sh
+build:windows --workspace_status_command="bash workspace_status.sh"
 
 # Misc remote cache/BES optimizations
 build --experimental_remote_cache_async
@@ -163,7 +171,8 @@ build --nolegacy_important_outputs
 build --incompatible_strict_action_env
 
 # rules_nodejs needs runfiles to be explicitly enabled.
-build --enable_runfiles
+build:linux --enable_runfiles
+build:macos --enable_runfiles
 
 # Use syscall to create symlink in-process.
 # Need to work around M1 Mac browser test issue https://github.com/bazelbuild/rules_webtesting/issues/438
@@ -175,7 +184,12 @@ build --experimental_inprocess_symlink_creation
 test --test_tag_filters=-docker,-bare
 
 # Use C++17 standard for all C++ compilation
-build --host_cxxopt=-std=c++17
+build:linux --host_cxxopt=-std=c++17
+build:linux --cxxopt=-std=c++17
+build:macos --host_cxxopt=-std=c++17
+build:macos --cxxopt=-std=c++17
+build:windows --host_cxxopt=/std:c++17
+build:windows --cxxopt=/std:c++17
 
 # Run Webdriver tests with --config=webdriver-debug to debug webdriver tests locally.
 # See server/testutil/webtester/webtester.go for more details.
