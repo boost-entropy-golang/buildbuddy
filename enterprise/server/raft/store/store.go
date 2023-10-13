@@ -79,8 +79,10 @@ type Store struct {
 	rangeMu    sync.RWMutex
 	openRanges map[uint64]*rfpb.RangeDescriptor
 
-	leases              sync.Map // map of uint64 rangeID -> *rangelease.Lease
-	replicas            sync.Map // map of uint64 rangeID -> *replica.Replica
+	leases   sync.Map // map of uint64 rangeID -> *rangelease.Lease
+	replicas sync.Map // map of uint64 rangeID -> *replica.Replica
+
+	usageUpdates        chan *rfpb.ReplicaUsage
 	usages              *usagetracker.Tracker
 	rangeUsageListeners []RangeUsageListener
 
@@ -115,6 +117,7 @@ func New(rootDir string, nodeHost *dragonboat.NodeHost, gossipManager *gossip.Go
 		leases:   sync.Map{},
 		replicas: sync.Map{},
 
+		usageUpdates:  make(chan *rfpb.ReplicaUsage, 100),
 		metaRangeMu:   sync.Mutex{},
 		metaRangeData: make([]byte, 0),
 		fileStorer:    filestore.New(),
@@ -241,6 +244,21 @@ func (s *Store) Statusz(ctx context.Context) string {
 	return buf
 }
 
+func (s *Store) handleUsageUpdates(ctx context.Context, usageUpdatesChan <-chan *rfpb.ReplicaUsage) error {
+	for {
+		select {
+		case usage := <-usageUpdatesChan:
+			if rd := s.lookupRange(usage.GetRangeId()); rd != nil {
+				s.NotifyUsage(usage, rd)
+			} else {
+				log.Warningf("Usage update for unknown range: %d", usage.GetRangeId())
+			}
+		case <-ctx.Done():
+			return nil
+		}
+	}
+}
+
 func (s *Store) handleLeaderUpdates(ctx context.Context, leaderUpdatesChan <-chan raftio.LeaderInfo) error {
 	for {
 		select {
@@ -303,6 +321,10 @@ func (s *Store) Start() error {
 	eg, gctx := errgroup.WithContext(ctx)
 	eg.Go(func() error {
 		return s.handleLeaderUpdates(gctx, leaderUpdatesChan)
+	})
+
+	eg.Go(func() error {
+		return s.handleUsageUpdates(gctx, s.usageUpdates)
 	})
 
 	return nil
@@ -630,6 +652,11 @@ func (s *Store) LeasedRange(header *rfpb.Header) (*replica.Replica, error) {
 		return nil, err
 	}
 
+	// Stale reads don't need a lease, so return early.
+	if header.GetConsistencyMode() == rfpb.Header_STALE {
+		return r, nil
+	}
+
 	if s.haveLease(header.GetRangeId()) {
 		return r, nil
 	}
@@ -639,7 +666,7 @@ func (s *Store) LeasedRange(header *rfpb.Header) (*replica.Replica, error) {
 }
 
 func (s *Store) ReplicaFactoryFn(shardID, replicaID uint64) dbsm.IOnDiskStateMachine {
-	r := replica.New(s.leaser, shardID, replicaID, s)
+	r := replica.New(s.leaser, shardID, replicaID, s, s.usageUpdates)
 	return r
 }
 
@@ -827,11 +854,13 @@ func (s *Store) SyncPropose(ctx context.Context, req *rfpb.SyncProposeRequest) (
 }
 
 func (s *Store) SyncRead(ctx context.Context, req *rfpb.SyncReadRequest) (*rfpb.SyncReadResponse, error) {
-	shardID := req.GetHeader().GetReplica().GetShardId()
-	batchResponse, err := client.SyncReadLocal(ctx, s.nodeHost, shardID, req.GetBatch())
+	batch := req.GetBatch()
+	batch.Header = req.GetHeader()
+
+	batchResponse, err := client.SyncReadLocal(ctx, s.nodeHost, batch)
 	if err != nil {
 		if err == dragonboat.ErrShardNotFound {
-			return nil, status.OutOfRangeErrorf("%s: cluster %d not found", constants.RangeLeaseInvalidMsg, shardID)
+			return nil, status.OutOfRangeErrorf("%s: cluster not found for %+v", constants.RangeLeaseInvalidMsg, req.GetHeader())
 		}
 		return nil, err
 	}
@@ -841,47 +870,61 @@ func (s *Store) SyncRead(ctx context.Context, req *rfpb.SyncReadRequest) (*rfpb.
 	}, nil
 }
 
-// TODO(tylerw): consolidate these in a non-confusing way.
-func (s *Store) FindMissing(ctx context.Context, req *rfpb.FindMissingRequest) (*rfpb.FindMissingResponse, error) {
-	_, err := s.LeasedRange(req.GetHeader())
+func (s *Store) localRead(ctx context.Context, batch *rfpb.BatchCmdRequest) (*rfpb.BatchCmdResponse, error) {
+	header := batch.GetHeader()
+
+	_, err := s.LeasedRange(header)
 	if err != nil {
 		return nil, err
 	}
-	shardID := req.GetHeader().GetReplica().GetShardId()
+
+	rsp, err := client.SyncReadLocal(ctx, s.nodeHost, batch)
+	if err != nil {
+		if err == dragonboat.ErrShardNotFound {
+			return nil, status.OutOfRangeErrorf("%s: cluster not found for %+v", constants.RangeLeaseInvalidMsg, header)
+		}
+		return nil, err
+	}
+	return rsp, nil
+}
+
+func (s *Store) FindMissing(ctx context.Context, req *rfpb.FindMissingRequest) (*rfpb.FindMissingResponse, error) {
 	batch, err := rbuilder.NewBatchBuilder().Add(req).ToProto()
 	if err != nil {
 		return nil, err
 	}
 	batch.Header = req.GetHeader()
-	rsp, err := client.SyncReadLocal(ctx, s.nodeHost, shardID, batch)
+	rsp, err := s.localRead(ctx, batch)
 	if err != nil {
-		if err == dragonboat.ErrShardNotFound {
-			return nil, status.OutOfRangeErrorf("%s: cluster %d not found", constants.RangeLeaseInvalidMsg, shardID)
-		}
 		return nil, err
 	}
 	return rbuilder.NewBatchResponseFromProto(rsp).FindMissingResponse(0)
 }
 
 func (s *Store) GetMulti(ctx context.Context, req *rfpb.GetMultiRequest) (*rfpb.GetMultiResponse, error) {
-	_, err := s.LeasedRange(req.GetHeader())
-	if err != nil {
-		return nil, err
-	}
-	shardID := req.GetHeader().GetReplica().GetShardId()
 	batch, err := rbuilder.NewBatchBuilder().Add(req).ToProto()
 	if err != nil {
 		return nil, err
 	}
 	batch.Header = req.GetHeader()
-	rsp, err := client.SyncReadLocal(ctx, s.nodeHost, shardID, batch)
+	rsp, err := s.localRead(ctx, batch)
 	if err != nil {
-		if err == dragonboat.ErrShardNotFound {
-			return nil, status.OutOfRangeErrorf("%s: cluster %d not found", constants.RangeLeaseInvalidMsg, shardID)
-		}
 		return nil, err
 	}
 	return rbuilder.NewBatchResponseFromProto(rsp).GetMultiResponse(0)
+}
+
+func (s *Store) Metadata(ctx context.Context, req *rfpb.MetadataRequest) (*rfpb.MetadataResponse, error) {
+	batch, err := rbuilder.NewBatchBuilder().Add(req).ToProto()
+	if err != nil {
+		return nil, err
+	}
+	batch.Header = req.GetHeader()
+	rsp, err := s.localRead(ctx, batch)
+	if err != nil {
+		return nil, err
+	}
+	return rbuilder.NewBatchResponseFromProto(rsp).MetadataResponse(0)
 }
 
 func (s *Store) SetMulti(ctx context.Context, req *rfpb.SetMultiRequest) (*rfpb.SetMultiResponse, error) {
@@ -889,41 +932,19 @@ func (s *Store) SetMulti(ctx context.Context, req *rfpb.SetMultiRequest) (*rfpb.
 	if err != nil {
 		return nil, err
 	}
-	shardID := req.GetHeader().GetReplica().GetShardId()
 	batch, err := rbuilder.NewBatchBuilder().Add(req).ToProto()
 	if err != nil {
 		return nil, err
 	}
 	batch.Header = req.GetHeader()
-	rsp, err := client.SyncReadLocal(ctx, s.nodeHost, shardID, batch)
+	rsp, err := client.SyncReadLocal(ctx, s.nodeHost, batch)
 	if err != nil {
 		if err == dragonboat.ErrShardNotFound {
-			return nil, status.OutOfRangeErrorf("%s: cluster %d not found", constants.RangeLeaseInvalidMsg, shardID)
+			return nil, status.OutOfRangeErrorf("%s: cluster not found for %+v", constants.RangeLeaseInvalidMsg, req.GetHeader())
 		}
 		return nil, err
 	}
 	return rbuilder.NewBatchResponseFromProto(rsp).SetMultiResponse(0)
-}
-
-func (s *Store) Metadata(ctx context.Context, req *rfpb.MetadataRequest) (*rfpb.MetadataResponse, error) {
-	_, err := s.LeasedRange(req.GetHeader())
-	if err != nil {
-		return nil, err
-	}
-	shardID := req.GetHeader().GetReplica().GetShardId()
-	batch, err := rbuilder.NewBatchBuilder().Add(req).ToProto()
-	if err != nil {
-		return nil, err
-	}
-	batch.Header = req.GetHeader()
-	rsp, err := client.SyncReadLocal(ctx, s.nodeHost, shardID, batch)
-	if err != nil {
-		if err == dragonboat.ErrShardNotFound {
-			return nil, status.OutOfRangeErrorf("%s: cluster %d not found", constants.RangeLeaseInvalidMsg, shardID)
-		}
-		return nil, err
-	}
-	return rbuilder.NewBatchResponseFromProto(rsp).MetadataResponse(0)
 }
 
 func (s *Store) OnEvent(updateType serf.EventType, event serf.Event) {
