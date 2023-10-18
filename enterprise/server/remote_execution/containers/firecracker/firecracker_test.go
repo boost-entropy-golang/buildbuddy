@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/buildbuddy-io/buildbuddy/enterprise/server/remote_execution/commandutil"
 	"github.com/buildbuddy-io/buildbuddy/enterprise/server/remote_execution/container"
 	"github.com/buildbuddy-io/buildbuddy/enterprise/server/remote_execution/containers/firecracker"
 	"github.com/buildbuddy-io/buildbuddy/enterprise/server/remote_execution/filecache"
@@ -96,10 +97,10 @@ func init() {
 // See README.md for more details on the filesystem layout.
 func cleanExecutorRoot(t *testing.T, path string) {
 	if os.Getuid() == 0 {
-		// Clean up stubborn VBD mounts that might've been left around from
-		// previous tests that were interrupted. Otherwise we won't be able to
-		// clean up old firecracker workspaces.
-		err := vbd.UnmountAll()
+		// Clean up VBD mounts that might've been left around from previous
+		// tests that were interrupted. Otherwise we won't be able to clean up
+		// old firecracker workspaces.
+		err := vbd.CleanStaleMounts()
 		require.NoError(t, err)
 	}
 
@@ -1755,7 +1756,7 @@ func TestFirecrackerExec_Timeout_DebugOutputIsAvailable(t *testing.T) {
 		require.Equal(t, expectedStderr, string(b))
 	}()
 
-	res := c.Exec(ctx, cmd, &container.Stdio{
+	res := c.Exec(ctx, cmd, &commandutil.Stdio{
 		// Write stderr to the pipe but buffer stdout in the result as usual.
 		Stderr: stderrWriter,
 	})

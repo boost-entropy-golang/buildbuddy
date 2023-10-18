@@ -732,7 +732,7 @@ func (np *nodePool) SampleUnclaimedTasks(ctx context.Context, n int) ([]string, 
 	rand.Shuffle(len(unclaimed), func(i, j int) {
 		unclaimed[i], unclaimed[j] = unclaimed[j], unclaimed[i]
 	})
-	return unclaimed[:minInt(n, len(unclaimed))], nil
+	return unclaimed[:min(n, len(unclaimed))], nil
 }
 
 type persistedTask struct {
@@ -1503,7 +1503,7 @@ func (s *SchedulerServer) LeaseTask(stream scpb.Scheduler_LeaseTaskServer) error
 		// return a shut down error early, rather than waiting until we're
 		// hard-stopped. The client should retry the lease with the reconnect
 		// token we sent earlier.
-		if s.isShuttingDown() && reconnectToken != "" {
+		if s.isShuttingDown() && reconnectToken != "" && claimed {
 			return status.UnavailableError("server is shutting down")
 		}
 		rsp.ClosedCleanly = !claimed
@@ -1517,13 +1517,6 @@ func (s *SchedulerServer) LeaseTask(stream scpb.Scheduler_LeaseTaskServer) error
 	}
 
 	return nil
-}
-
-func minInt(i, j int) int {
-	if i < j {
-		return i
-	}
-	return j
 }
 
 type enqueueTaskReservationOpts struct {
@@ -1562,7 +1555,7 @@ func (s *SchedulerServer) enqueueTaskReservations(ctx context.Context, enqueueRe
 		}
 	}
 
-	probeCount := minInt(opts.numReplicas, nodeCount)
+	probeCount := min(opts.numReplicas, nodeCount)
 	probesSent := 0
 
 	startTime := time.Now()

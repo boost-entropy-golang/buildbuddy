@@ -757,6 +757,10 @@ func (c *FirecrackerContainer) LoadSnapshot(ctx context.Context) error {
 	c.rmOnce = &sync.Once{}
 	c.rmErr = nil
 
+	vmCtx, cancelVmCtx := context.WithCancelCause(background.ToBackground(ctx))
+	c.vmCtx = vmCtx
+	c.cancelVmCtx = cancelVmCtx
+
 	if err := c.newID(ctx); err != nil {
 		return err
 	}
@@ -806,13 +810,6 @@ func (c *FirecrackerContainer) LoadSnapshot(ctx context.Context) error {
 		return err
 	}
 
-	vmCtx, cancelVmCtx := context.WithCancelCause(context.Background())
-	c.vmCtx = vmCtx
-	c.cancelVmCtx = cancelVmCtx
-
-	ctx, cancel := c.monitorVMContext(ctx)
-	defer cancel()
-
 	var snapOpt fcclient.Opt
 	if *enableUFFD {
 		uffdType := fcclient.MemoryBackendType(fcmodels.MemoryBackendBackendTypeUffdPrivileged)
@@ -837,7 +834,9 @@ func (c *FirecrackerContainer) LoadSnapshot(ctx context.Context) error {
 	if err != nil {
 		return status.WrapError(err, "failed to get snapshot")
 	}
-	unpacked, err := c.loader.UnpackSnapshot(ctx, snap, c.getChroot())
+
+	// Use vmCtx for COWs since IO may be done outside of the task ctx.
+	unpacked, err := c.loader.UnpackSnapshot(vmCtx, snap, c.getChroot())
 	if err != nil {
 		return status.WrapError(err, "failed to unpack snapshot")
 	}
@@ -867,18 +866,29 @@ func (c *FirecrackerContainer) LoadSnapshot(ctx context.Context) error {
 		return err
 	}
 
+	ctx, cancel := c.monitorVMContext(ctx)
+	defer cancel()
+
 	err = (func() error {
 		_, span := tracing.StartSpan(ctx)
 		defer span.End()
 		span.SetName("StartMachine")
+		// Note: using vmCtx here, which outlives the ctx above and is not
+		// cancelled until calling Remove().
 		return machine.Start(vmCtx)
 	})()
 	if err != nil {
-		return status.InternalErrorf("Failed starting machine: %s", err)
+		if cause := context.Cause(ctx); cause != nil {
+			return cause
+		}
+		return status.InternalErrorf("failed to start machine: %s", err)
 	}
 	c.machine = machine
 
 	if err := c.machine.ResumeVM(ctx); err != nil {
+		if cause := context.Cause(ctx); cause != nil {
+			return cause
+		}
 		return status.InternalErrorf("error resuming VM: %s", err)
 	}
 
@@ -924,7 +934,7 @@ func (c *FirecrackerContainer) initRootfsStore(ctx context.Context) error {
 		return status.InternalErrorf("failed to create rootfs chunk dir: %s", err)
 	}
 	containerExt4Path := filepath.Join(c.getChroot(), containerFSName)
-	cf, err := snaploader.UnpackContainerImage(ctx, c.loader, c.containerImage, containerExt4Path, c.getChroot(), cowChunkSizeBytes())
+	cf, err := snaploader.UnpackContainerImage(c.vmCtx, c.loader, c.containerImage, containerExt4Path, c.getChroot(), cowChunkSizeBytes())
 	if err != nil {
 		return status.WrapError(err, "unpack container image")
 	}
@@ -1004,7 +1014,8 @@ func (c *FirecrackerContainer) convertToCOW(ctx context.Context, filePath, chunk
 	if err := os.Mkdir(chunkDir, 0755); err != nil {
 		return nil, status.WrapError(err, "make chunk dir")
 	}
-	cow, err := copy_on_write.ConvertFileToCOW(ctx, c.env, filePath, cowChunkSizeBytes(), chunkDir, c.snapshotKey.InstanceName)
+	// Use vmCtx for the COW since IO may be done outside of the task ctx.
+	cow, err := copy_on_write.ConvertFileToCOW(c.vmCtx, c.env, filePath, cowChunkSizeBytes(), chunkDir, c.snapshotKey.InstanceName)
 	if err != nil {
 		return nil, status.WrapError(err, "convert file to COW")
 	}
@@ -1652,7 +1663,7 @@ func (c *FirecrackerContainer) Run(ctx context.Context, command *repb.Command, a
 		}
 	}()
 
-	cmdResult := c.Exec(ctx, command, &container.Stdio{})
+	cmdResult := c.Exec(ctx, command, &commandutil.Stdio{})
 	return cmdResult
 }
 
@@ -1684,6 +1695,10 @@ func (c *FirecrackerContainer) create(ctx context.Context) error {
 	c.currentTaskInitTimeUsec = time.Now().UnixMicro()
 	c.rmOnce = &sync.Once{}
 	c.rmErr = nil
+
+	vmCtx, cancel := context.WithCancelCause(background.ToBackground(ctx))
+	c.vmCtx = vmCtx
+	c.cancelVmCtx = cancel
 
 	if err := os.MkdirAll(c.getChroot(), 0755); err != nil {
 		return status.InternalErrorf("failed to create chroot dir: %s", err)
@@ -1742,10 +1757,6 @@ func (c *FirecrackerContainer) create(ctx context.Context) error {
 		return status.WrapError(err, "failed to init VBD mounts")
 	}
 
-	vmCtx, cancel := context.WithCancelCause(context.Background())
-	c.vmCtx = vmCtx
-	c.cancelVmCtx = cancel
-
 	machineOpts := []fcclient.Opt{
 		fcclient.WithLogger(getLogrusLogger()),
 	}
@@ -1769,7 +1780,7 @@ func (c *FirecrackerContainer) create(ctx context.Context) error {
 	return nil
 }
 
-func (c *FirecrackerContainer) SendExecRequestToGuest(ctx context.Context, cmd *repb.Command, workDir string, stdio *container.Stdio) *interfaces.CommandResult {
+func (c *FirecrackerContainer) SendExecRequestToGuest(ctx context.Context, cmd *repb.Command, workDir string, stdio *commandutil.Stdio) *interfaces.CommandResult {
 	ctx, span := tracing.StartSpan(ctx)
 	defer span.End()
 
@@ -1869,7 +1880,7 @@ func (c *FirecrackerContainer) monitorVMContext(ctx context.Context) (context.Co
 // the executed process.
 // If stdout is non-nil, the stdout of the executed process will be written to the
 // stdout writer.
-func (c *FirecrackerContainer) Exec(ctx context.Context, cmd *repb.Command, stdio *container.Stdio) *interfaces.CommandResult {
+func (c *FirecrackerContainer) Exec(ctx context.Context, cmd *repb.Command, stdio *commandutil.Stdio) *interfaces.CommandResult {
 	log.CtxInfof(ctx, "Executing command.")
 
 	ctx, span := tracing.StartSpan(ctx)
@@ -1949,14 +1960,13 @@ func (c *FirecrackerContainer) Exec(ctx context.Context, cmd *repb.Command, stdi
 			return result
 		}
 
-		copyOutputsErr := c.copyOutputsToWorkspace(ctx)
-		if err := c.machine.ResumeVM(ctx); err != nil {
-			result.Error = status.InternalErrorf("error resuming VM: %s", err)
+		if err := c.copyOutputsToWorkspace(ctx); err != nil {
+			result.Error = status.WrapError(err, "failed to copy action outputs from VM workspace")
 			return result
 		}
 
-		if copyOutputsErr != nil {
-			result.Error = status.WrapError(copyOutputsErr, "failed to copy action outputs from VM workspace")
+		if err := c.machine.ResumeVM(ctx); err != nil {
+			result.Error = status.InternalErrorf("error resuming VM after copying workspace outputs: %s", err)
 			return result
 		}
 	}

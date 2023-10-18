@@ -66,6 +66,8 @@ var (
 	// can't be added to the pool and must be cleaned up instead.
 	maxRunnerMemoryUsageBytes = flag.Int64("executor.runner_pool.max_runner_memory_usage_bytes", 0, "Maximum memory usage for a recycled runner; runners exceeding this threshold are not recycled.")
 	podmanWarmupDefaultImages = flag.Bool("executor.podman.warmup_default_images", true, "Whether to warmup the default podman images or not.")
+
+	enableAnonymousRecycling = flag.Bool("debug_enable_anonymous_runner_recycling", false, "Whether to enable runner recycling for unauthenticated requests. For debugging purposes only - do not use in production.")
 )
 
 const (
@@ -378,7 +380,7 @@ func (r *commandRunner) Run(ctx context.Context) *interfaces.CommandResult {
 		return r.sendPersistentWorkRequest(ctx, command)
 	}
 
-	return r.Container.Exec(ctx, command, &container.Stdio{})
+	return r.Container.Exec(ctx, command, &commandutil.Stdio{})
 }
 
 func (r *commandRunner) UploadOutputs(ctx context.Context, ioStats *repb.IOStats, actionResult *repb.ActionResult, cmdResult *interfaces.CommandResult) error {
@@ -491,7 +493,7 @@ func (r *commandRunner) cleanupCIRunner(ctx context.Context) error {
 	cleanupCmd := proto.Clone(r.task.GetCommand()).(*repb.Command)
 	cleanupCmd.Arguments = append(cleanupCmd.Arguments, "--shutdown_and_exit")
 
-	res := commandutil.Run(ctx, cleanupCmd, r.Workspace.Path(), nil /*=statsListener*/, &container.Stdio{})
+	res := commandutil.Run(ctx, cleanupCmd, r.Workspace.Path(), nil /*=statsListener*/, &commandutil.Stdio{})
 	return res.Error
 }
 
@@ -883,7 +885,7 @@ func (p *pool) Get(ctx context.Context, st *repb.ScheduledTask) (interfaces.Runn
 	if user != nil {
 		groupID = user.GetGroupID()
 	}
-	if props.RecycleRunner && err != nil {
+	if !*enableAnonymousRecycling && (props.RecycleRunner && err != nil) {
 		return nil, status.InvalidArgumentError(
 			"runner recycling is not supported for anonymous builds " +
 				`(recycling was requested via platform property "recycle-runner=true")`)
@@ -1485,7 +1487,7 @@ func (r *commandRunner) startPersistentWorker(command *repb.Command, workerArgs,
 		defer stdinReader.Close()
 		defer stdoutWriter.Close()
 
-		stdio := &container.Stdio{
+		stdio := &commandutil.Stdio{
 			Stdin:  stdinReader,
 			Stdout: stdoutWriter,
 			Stderr: &r.stderr,
