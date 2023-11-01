@@ -15,6 +15,7 @@ go_library(
         ],
         "//conditions:default": [],
     }),
+    embedsrcs = ["guest_api_hash.sha256"],
     importpath = "github.com/buildbuddy-io/buildbuddy/enterprise/server/remote_execution/containers/firecracker",
     target_compatible_with = [
         "@platforms//os:linux",
@@ -37,6 +38,7 @@ go_library(
         "//enterprise/server/util/vsock",
         "//enterprise/vmsupport:bundle",
         "//proto:firecracker_go_proto",
+        "//proto:health_go_proto",
         "//proto:remote_execution_go_proto",
         "//proto:runner_go_proto",
         "//proto:vmexec_go_proto",
@@ -66,6 +68,16 @@ go_library(
         "@org_golang_x_sync//errgroup",
         "@org_golang_x_sys//unix",
     ],
+)
+
+genrule(
+    name = "guest_api_hash",
+    srcs = [
+        "//enterprise/server/cmd/goinit:main.go",
+        "//enterprise/server/vmexec:vmexec.go",
+    ],
+    outs = ["guest_api_hash.sha256"],
+    cmd_bash = """sha256sum $(SRCS) | sha256sum | awk '{printf "%s", $$1}' > $@""",
 )
 
 go_test(
@@ -116,9 +128,11 @@ go_test(
         "//server/util/networking",
         "//server/util/status",
         "//server/util/testing/flags",
+        "@com_github_google_go_cmp//cmp",
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",
         "@org_golang_google_genproto_googleapis_bytestream//:bytestream",
+        "@org_golang_google_protobuf//testing/protocmp",
         "@org_golang_x_sync//errgroup",
     ],
 )
@@ -153,7 +167,6 @@ go_test(
     ],
     deps = [
         ":firecracker",
-        "//enterprise:bundle",
         "//enterprise/server/remote_execution/commandutil",
         "//enterprise/server/remote_execution/container",
         "//enterprise/server/remote_execution/filecache",
@@ -165,6 +178,7 @@ go_test(
         "//enterprise/server/remote_execution/workspace",
         "//enterprise/server/testutil/testcontainer",
         "//enterprise/server/util/ext4",
+        "//enterprise/server/util/oci",
         "//proto:firecracker_go_proto",
         "//proto:remote_execution_go_proto",
         "//proto:scheduler_go_proto",
@@ -175,19 +189,19 @@ go_test(
         "//server/remote_cache/content_addressable_storage_server",
         "//server/remote_cache/digest",
         "//server/testutil/testauth",
-        "//server/testutil/testcache",
         "//server/testutil/testdigest",
         "//server/testutil/testenv",
         "//server/testutil/testfs",
         "//server/util/disk",
-        "//server/util/fileresolver",
         "//server/util/log",
         "//server/util/networking",
         "//server/util/status",
         "//server/util/testing/flags",
+        "@com_github_google_go_cmp//cmp",
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",
         "@org_golang_google_genproto_googleapis_bytestream//:bytestream",
+        "@org_golang_google_protobuf//testing/protocmp",
         "@org_golang_x_sync//errgroup",
     ],
 )
