@@ -25,6 +25,7 @@ import (
 	"github.com/buildbuddy-io/buildbuddy/server/util/status"
 	"github.com/buildbuddy-io/buildbuddy/server/util/tracing"
 	"github.com/go-redis/redis/v8"
+	"github.com/jonboulle/clockwork"
 	"github.com/prometheus/client_golang/prometheus"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/peer"
@@ -135,6 +136,7 @@ var (
 
 		-- If the client supports reconnect, validate reconnectToken if
 		-- the lease is still in its reconnection grace period.
+		local isNewAttempt = true
 		if ARGV[1] == "true" then
 			local token = redis.call("hget", KEYS[1], "reconnectToken")
 			if token ~= nil and token ~= "" then
@@ -142,10 +144,12 @@ var (
 				if token ~= ARGV[2] and periodEnd > tonumber(ARGV[3]) then
 					return 12
 				end
+				isNewAttempt = false
 			end
 		end
-
-		redis.call("hincrby", KEYS[1], "attemptCount", 1)
+		if isNewAttempt then
+			redis.call("hincrby", KEYS[1], "attemptCount", 1)
+		end
 		redis.call("hset", KEYS[1], "leaseId", ARGV[4])	
 
 		return redis.call("hset", KEYS[1], "claimed", "1")
@@ -841,12 +845,14 @@ func (c *schedulerClientCache) get(hostPort string) (schedulerClient, error) {
 type Options struct {
 	LocalPortOverride            int32
 	RequireExecutorAuthorization bool
+	Clock                        clockwork.Clock
 }
 
 type SchedulerServer struct {
 	env                  environment.Env
 	rdb                  redis.UniversalClient
 	taskRouter           interfaces.TaskRouter
+	clock                clockwork.Clock
 	schedulerClientCache *schedulerClientCache
 	shuttingDown         <-chan struct{}
 	// host:port at which this scheduler can be reached
@@ -910,11 +916,17 @@ func NewSchedulerServerWithOptions(env environment.Env, options *Options) (*Sche
 		}
 	}
 
+	clock := clockwork.NewRealClock()
+	if options.Clock != nil {
+		clock = options.Clock
+	}
+
 	s := &SchedulerServer{
 		env:                               env,
 		pools:                             make(map[nodePoolKey]*nodePool),
 		rdb:                               env.GetRemoteExecutionRedisClient(),
 		taskRouter:                        taskRouter,
+		clock:                             clock,
 		shuttingDown:                      shuttingDown,
 		enableUserOwnedExecutors:          remote_execution_config.RemoteExecutionEnabled() && scheduler_server_config.UserOwnedExecutorsEnabled(),
 		forceUserOwnedDarwinExecutors:     remote_execution_config.RemoteExecutionEnabled() && scheduler_server_config.ForceUserOwnedDarwinExecutors(),
@@ -1431,7 +1443,7 @@ func (s *SchedulerServer) LeaseTask(stream scpb.Scheduler_LeaseTaskServer) error
 		}
 	}()
 
-	livenessTicker := time.NewTicker(*leaseInterval)
+	livenessTicker := s.clock.NewTicker(*leaseInterval)
 	defer livenessTicker.Stop()
 	for {
 		var req *scpb.LeaseTaskRequest
@@ -1440,8 +1452,8 @@ func (s *SchedulerServer) LeaseTask(stream scpb.Scheduler_LeaseTaskServer) error
 		case msg := <-msgs:
 			req = msg.req
 			err = msg.err
-		case <-livenessTicker.C:
-			if time.Since(lastCheckin) > (*leaseInterval + *leaseGracePeriod) {
+		case <-livenessTicker.Chan():
+			if s.clock.Since(lastCheckin) > (*leaseInterval + *leaseGracePeriod) {
 				err = status.DeadlineExceededError("lease was not renewed by executor and expired")
 			} else {
 				continue
@@ -1570,7 +1582,7 @@ func (s *SchedulerServer) LeaseTask(stream scpb.Scheduler_LeaseTaskServer) error
 			return status.UnavailableError("server is shutting down")
 		}
 		rsp.ClosedCleanly = !claimed
-		lastCheckin = time.Now()
+		lastCheckin = s.clock.Now()
 		if err := stream.Send(rsp); err != nil {
 			return err
 		}
