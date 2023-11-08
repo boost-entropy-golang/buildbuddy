@@ -38,7 +38,6 @@ write_file(
                     "asmdecl",
                     "assign",
                     "atomicalign",
-                    # "cgocall",
                     "buildtag",
                     "cgocall",
                     "composites",
@@ -109,9 +108,6 @@ nogo(
         "@org_golang_x_tools//go/analysis/passes/unusedresult",
         "@com_github_nishanths_exhaustive//:exhaustive",
     ] + staticcheck_analyzers(ANALYZERS + [
-        "-S1019",
-        "-S1023",
-        "-S1025",
         "-S1028",
         "-S1030",
         "-S1031",
@@ -207,6 +203,11 @@ config_setting(
 config_setting(
     name = "release_build",
     values = {"define": "release=true"},
+)
+
+config_setting(
+    name = "static",
+    flag_values = {"@io_bazel_rules_go//go/config:static": "true"},
 )
 
 package_group(

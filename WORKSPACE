@@ -43,6 +43,13 @@ http_archive(
     ],
 )
 
+http_archive(
+    name = "com_google_absl",
+    sha256 = "987ce98f02eefbaf930d6e38ab16aa05737234d7afbab2d5c4ea7adbe50c28ed",
+    strip_prefix = "abseil-cpp-20230802.1",
+    urls = ["https://github.com/abseil/abseil-cpp/archive/refs/tags/20230802.1.tar.gz"],
+)
+
 load(":deps.bzl", "install_go_mod_dependencies", "install_static_dependencies")
 
 install_static_dependencies()
@@ -57,6 +64,9 @@ load("@io_bazel_rules_go//go:deps.bzl", "go_download_sdk", "go_register_toolchai
 
 go_rules_dependencies()
 
+# Keep in sync with .github/workflows/checkstyle.yaml
+GO_SDK_VERSION = "1.21.4"
+
 # Register multiple Go SDKs so that we can perform cross-compilation remotely.
 # i.e. We might want to trigger a Linux AMD64 Go build remotely from a MacOS ARM64 laptop.
 #
@@ -65,42 +75,42 @@ go_download_sdk(
     name = "go_sdk_linux",
     goarch = "amd64",
     goos = "linux",
-    version = "1.21.3",  # Keep in sync with .github/workflows/checkstyle.yaml
+    version = GO_SDK_VERSION,
 )
 
 go_download_sdk(
     name = "go_sdk_linux_arm64",
     goarch = "arm64",
     goos = "linux",
-    version = "1.21.3",
+    version = GO_SDK_VERSION,
 )
 
 go_download_sdk(
     name = "go_sdk_darwin",
     goarch = "amd64",
     goos = "darwin",
-    version = "1.21.3",
+    version = GO_SDK_VERSION,
 )
 
 go_download_sdk(
     name = "go_sdk_darwin_arm64",
     goarch = "arm64",
     goos = "darwin",
-    version = "1.21.3",
+    version = GO_SDK_VERSION,
 )
 
 go_download_sdk(
     name = "go_sdk_windows",
     goarch = "amd64",
     goos = "windows",
-    version = "1.21.3",
+    version = GO_SDK_VERSION,
 )
 
 go_download_sdk(
     name = "go_sdk_windows_arm64",
     goarch = "arm64",
     goos = "windows",
-    version = "1.21.3",
+    version = GO_SDK_VERSION,
 )
 
 go_register_toolchains(
@@ -462,6 +472,24 @@ load("@rules_proto//proto:repositories.bzl", "rules_proto_dependencies", "rules_
 rules_proto_dependencies()
 
 rules_proto_toolchains()
+
+HERMETIC_CC_TOOLCHAIN_VERSION = "v2.1.2"
+
+http_archive(
+    name = "hermetic_cc_toolchain",
+    sha256 = "28fc71b9b3191c312ee83faa1dc65b38eb70c3a57740368f7e7c7a49bedf3106",
+    urls = [
+        "https://mirror.bazel.build/github.com/uber/hermetic_cc_toolchain/releases/download/{0}/hermetic_cc_toolchain-{0}.tar.gz".format(HERMETIC_CC_TOOLCHAIN_VERSION),
+        "https://github.com/uber/hermetic_cc_toolchain/releases/download/{0}/hermetic_cc_toolchain-{0}.tar.gz".format(HERMETIC_CC_TOOLCHAIN_VERSION),
+    ],
+)
+
+load("@hermetic_cc_toolchain//toolchain:defs.bzl", zig_toolchains = "toolchains")
+
+# Plain zig_toolchains() will pick reasonable defaults. See
+# toolchain/defs.bzl:toolchains on how to change the Zig SDK version and
+# download URL.
+zig_toolchains()
 
 register_toolchains(
     "//toolchains:sh_toolchain",
