@@ -34,7 +34,6 @@ import (
 	"github.com/buildbuddy-io/buildbuddy/server/util/flag"
 	"github.com/buildbuddy-io/buildbuddy/server/util/flagutil"
 	"github.com/buildbuddy-io/buildbuddy/server/util/grpc_client"
-	"github.com/buildbuddy-io/buildbuddy/server/util/healthcheck"
 	"github.com/buildbuddy-io/buildbuddy/server/util/lockingbuffer"
 	"github.com/buildbuddy-io/buildbuddy/server/util/log"
 	"github.com/buildbuddy-io/buildbuddy/server/util/lru"
@@ -83,6 +82,7 @@ var (
 	podmanRuntime           = flag.String("executor.podman.runtime", "", "Enables running podman with other runtimes, like gVisor (runsc).")
 	podmanEnableStats       = flag.Bool("executor.podman.enable_stats", false, "Whether to enable cgroup-based podman stats.")
 	transientStore          = flag.Bool("executor.podman.transient_store", false, "Enables --transient-store for podman commands.", flag.Deprecated("--transient-store is now always applied if the podman version supports it"))
+	podmanDNS               = flag.String("executor.podman.dns", "8.8.8.8", "Specifies a custom DNS server for podman to use. Defaults to 8.8.8.8. If set to empty, no --dns= flag will be passed to podman.")
 
 	// Additional time used to kill the container if the command doesn't exit cleanly
 	containerFinalizationTimeout = 10 * time.Second
@@ -154,7 +154,7 @@ type Provider struct {
 	imageStreamingEnabled   bool
 	sociArtifactStoreClient socipb.SociArtifactStoreClient
 	sociStoreKeychainClient sspb.LocalKeychainClient
-	imageExistsCache        *lru.LRU[time.Time]
+	imageExistsCache        *imageExistsCache
 }
 
 func prepareSociStore(ctx context.Context) error {
@@ -256,10 +256,7 @@ graphroot = "/var/lib/containers/storage"
 		}
 	}
 
-	imageExistsCache, err := lru.NewLRU(&lru.Config[time.Time]{
-		MaxSize: imageExistsCacheSize,
-		SizeFn:  func(time.Time) int64 { return 1 },
-	})
+	imageExistsCache, err := newImageExistsCache()
 	if err != nil {
 		return nil, err
 	}
@@ -288,8 +285,7 @@ func intializeSociArtifactStoreClient(env environment.Env, target string) (socip
 		return nil, err
 	}
 	log.Infof("Connecting to app internal target: %s", target)
-	env.GetHealthChecker().AddHealthCheck(
-		"grpc_soci_artifact_store_connection", healthcheck.NewGRPCHealthCheck(conn))
+	env.GetHealthChecker().AddHealthCheck("grpc_soci_artifact_store_connection", conn)
 	return socipb.NewSociArtifactStoreClient(conn), nil
 }
 
@@ -299,8 +295,7 @@ func initializeSociStoreKeychainClient(env environment.Env, target string) (sspb
 		return nil, err
 	}
 	log.Infof("Connecting to soci store local keychain target: %s", target)
-	env.GetHealthChecker().AddHealthCheck(
-		"grpc_soci_store_keychain_connection", healthcheck.NewGRPCHealthCheck(conn))
+	env.GetHealthChecker().AddHealthCheck("grpc_soci_store_keychain_connection", conn)
 	return sspb.NewLocalKeychainClient(conn), nil
 }
 
@@ -373,7 +368,7 @@ type PodmanOptions struct {
 // podmanCommandContainer containerizes a single command's execution using a Podman container.
 type podmanCommandContainer struct {
 	env              environment.Env
-	imageExistsCache *lru.LRU[time.Time]
+	imageExistsCache *imageExistsCache
 
 	image     string
 	buildRoot string
@@ -464,7 +459,9 @@ func (c *podmanCommandContainer) getPodmanRunArgs(workDir string) []string {
 	// "--dns" and "--dns=search" flags are invalid when --network is set to none
 	// or "container:id"
 	if networkMode != "none" && !strings.HasPrefix(networkMode, "container") {
-		args = append(args, "--dns=8.8.8.8")
+		if *podmanDNS != "" {
+			args = append(args, "--dns="+*podmanDNS)
+		}
 		args = append(args, "--dns-search=.")
 	}
 	if c.options.CapAdd != "" {
@@ -625,8 +622,7 @@ func (c *podmanCommandContainer) Exec(ctx context.Context, cmd *repb.Command, st
 }
 
 func (c *podmanCommandContainer) IsImageCached(ctx context.Context) (bool, error) {
-	t, ok := c.imageExistsCache.Get(c.image)
-	if ok && time.Since(t) < imageExistsCacheTTL {
+	if c.imageExistsCache.Exists(c.image) {
 		return true, nil
 	}
 
@@ -644,7 +640,7 @@ func (c *podmanCommandContainer) IsImageCached(ctx context.Context) (bool, error
 		return false, nil
 	}
 
-	c.imageExistsCache.Add(c.image, time.Now())
+	c.imageExistsCache.Add(c.image)
 	return true, nil
 }
 
@@ -904,7 +900,7 @@ func (c *podmanCommandContainer) pullImage(ctx context.Context, creds oci.Creden
 
 	// Since we just pulled the image, we can skip the next call to 'podman
 	// image exists'.
-	c.imageExistsCache.Add(c.image, time.Now())
+	c.imageExistsCache.Add(c.image)
 	return nil
 }
 
@@ -1179,4 +1175,39 @@ func (s *containerStats) Reset() {
 	}
 	s.last = nil
 	s.peakMemoryUsageBytes = 0
+}
+
+type imageExistsCache struct {
+	mu  sync.Mutex
+	lru *lru.LRU[time.Time]
+}
+
+func newImageExistsCache() (*imageExistsCache, error) {
+	l, err := lru.NewLRU(&lru.Config[time.Time]{
+		MaxSize: imageExistsCacheSize,
+		SizeFn:  func(time.Time) int64 { return 1 },
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &imageExistsCache{lru: l}, nil
+}
+
+func (c *imageExistsCache) Exists(image string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	t, ok := c.lru.Get(image)
+	return ok && time.Since(t) < imageExistsCacheTTL
+}
+
+func (c *imageExistsCache) Add(image string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.lru.Add(image, time.Now())
+}
+
+func (c *imageExistsCache) Remove(image string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.lru.Remove(image)
 }

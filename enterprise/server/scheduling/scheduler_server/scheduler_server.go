@@ -27,19 +27,18 @@ import (
 	"github.com/go-redis/redis/v8"
 	"github.com/jonboulle/clockwork"
 	"github.com/prometheus/client_golang/prometheus"
-	"google.golang.org/grpc"
 	"google.golang.org/grpc/peer"
 	"google.golang.org/protobuf/encoding/prototext"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/durationpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	remote_execution_config "github.com/buildbuddy-io/buildbuddy/enterprise/server/remote_execution/config"
 	scheduler_server_config "github.com/buildbuddy-io/buildbuddy/enterprise/server/scheduling/scheduler_server/config"
 	akpb "github.com/buildbuddy-io/buildbuddy/proto/api_key"
 	repb "github.com/buildbuddy-io/buildbuddy/proto/remote_execution"
 	scpb "github.com/buildbuddy-io/buildbuddy/proto/scheduler"
 	tpb "github.com/buildbuddy-io/buildbuddy/proto/trace"
+	remote_execution_config "github.com/buildbuddy-io/buildbuddy/server/remote_execution/config"
 )
 
 var (
@@ -767,7 +766,7 @@ type schedulerClient struct {
 
 	localServer *SchedulerServer
 	rpcClient   scpb.SchedulerClient
-	rpcConn     *grpc.ClientConn
+	rpcConn     *grpc_client.ClientConnPool
 
 	lastAccess time.Time
 }
@@ -1454,7 +1453,7 @@ func (s *SchedulerServer) LeaseTask(stream scpb.Scheduler_LeaseTaskServer) error
 			err = msg.err
 		case <-livenessTicker.Chan():
 			if s.clock.Since(lastCheckin) > (*leaseInterval + *leaseGracePeriod) {
-				err = status.DeadlineExceededError("lease was not renewed by executor and expired")
+				err = status.DeadlineExceededErrorf("lease was not renewed by executor and expired (last renewal: %s)", lastCheckin)
 			} else {
 				continue
 			}

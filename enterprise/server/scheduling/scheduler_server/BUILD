@@ -12,7 +12,6 @@ go_library(
     srcs = ["scheduler_server.go"],
     importpath = "github.com/buildbuddy-io/buildbuddy/enterprise/server/scheduling/scheduler_server",
     deps = [
-        "//enterprise/server/remote_execution/config",
         "//enterprise/server/remote_execution/platform",
         "//enterprise/server/scheduling/scheduler_server/config",
         "//enterprise/server/tasksize",
@@ -23,6 +22,7 @@ go_library(
         "//server/environment",
         "//server/interfaces",
         "//server/metrics",
+        "//server/remote_execution/config",
         "//server/resources",
         "//server/util/background",
         "//server/util/grpc_client",
@@ -34,7 +34,6 @@ go_library(
         "@com_github_go_redis_redis_v8//:redis",
         "@com_github_jonboulle_clockwork//:clockwork",
         "@com_github_prometheus_client_golang//prometheus",
-        "@org_golang_google_grpc//:go_default_library",
         "@org_golang_google_grpc//peer",
         "@org_golang_google_protobuf//encoding/prototext",
         "@org_golang_google_protobuf//proto",
