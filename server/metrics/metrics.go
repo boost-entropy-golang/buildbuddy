@@ -277,6 +277,16 @@ var (
 		BazelCommand,
 	})
 
+	// #### Examples
+	//
+	// ```promql
+	// # Median invocation duration in the past 5 minutes
+	// histogram_quantile(
+	//   0.5,
+	//   sum(rate(buildbuddy_invocation_duration_usec_bucket[5m])) by (le)
+	// )
+	// ```
+
 	// InvocationDurationUsExported is a simplified version of
 	// InvocationDurationUs which is exported to customers.
 	InvocationDurationUsExported = promauto.NewHistogramVec(prometheus.HistogramOpts{
@@ -289,16 +299,6 @@ var (
 		InvocationStatusLabel,
 		GroupID,
 	})
-
-	// #### Examples
-	//
-	// ```promql
-	// # Median invocation duration in the past 5 minutes
-	// histogram_quantile(
-	//   0.5,
-	//   sum(rate(buildbuddy_invocation_duration_usec_bucket[5m])) by (le)
-	// )
-	// ```
 
 	BuildEventCount = promauto.NewCounterVec(prometheus.CounterOpts{
 		Namespace: bbNamespace,
@@ -1053,6 +1053,7 @@ var (
 		Namespace: bbNamespace,
 		Subsystem: "firecracker",
 		Name:      "cow_snapshot_chunk_source_ratio",
+		Buckets:   prometheus.LinearBuckets(0, .05, 20),
 		Help:      "After a copy-on-write snapshot has been used, the percentage of chunks that were initialized by the given source.",
 	}, []string{
 		GroupID,
