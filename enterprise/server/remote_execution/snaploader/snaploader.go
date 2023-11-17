@@ -327,18 +327,8 @@ func (l *FileCacheLoader) fetchRemoteManifest(ctx context.Context, key *fcpb.Sna
 	rn := digest.NewResourceName(d, key.InstanceName, rspb.CacheType_AC, repb.DigestFunction_BLAKE3)
 	acResult, err := cachetools.GetActionResult(ctx, l.env.GetActionCacheClient(), rn)
 	if err != nil {
-		if status.IsNotFoundError(err) {
-			metrics.RecycleRunnerRequests.With(prometheus.Labels{
-				metrics.RecycleRunnerRequestStatusLabel: metrics.MissStatusLabel,
-			}).Inc()
-		}
 		return nil, err
 	}
-
-	metrics.RecycleRunnerRequests.With(prometheus.Labels{
-		metrics.RecycleRunnerRequestStatusLabel: metrics.HitStatusLabel,
-	}).Inc()
-
 	tmpDir := l.env.GetFileCache().TempDir()
 	return l.actionResultToManifest(ctx, key.InstanceName, acResult, tmpDir)
 }
@@ -854,6 +844,7 @@ func UnpackContainerImage(ctx context.Context, l *FileCacheLoader, imageRef, ima
 	opts := &CacheSnapshotOptions{
 		ChunkedFiles: map[string]*copy_on_write.COWStore{rootfsFileName: cow},
 		Recycled:     false,
+		Remote:       *snaputil.EnableRemoteSnapshotSharing,
 	}
 	if err := l.CacheSnapshot(ctx, key.GetBranchKey(), opts); err != nil {
 		return nil, status.WrapError(err, "cache containerfs snapshot")
