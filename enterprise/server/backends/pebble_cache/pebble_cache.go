@@ -1639,7 +1639,9 @@ func (p *PebbleCache) Get(ctx context.Context, r *rspb.ResourceName) ([]byte, er
 		return nil, err
 	}
 	defer rc.Close()
-	return io.ReadAll(rc)
+	var buffer bytes.Buffer
+	_, err = io.Copy(&buffer, rc)
+	return buffer.Bytes(), err
 }
 
 func (p *PebbleCache) GetMulti(ctx context.Context, resources []*rspb.ResourceName) (map[*repb.Digest][]byte, error) {
@@ -3141,12 +3143,13 @@ func (p *PebbleCache) newChunkedReader(ctx context.Context, chunkedMD *rfpb.Stor
 			if shouldDecompress && rn.GetCompressor() == repb.Compressor_ZSTD {
 				rn.Compressor = repb.Compressor_IDENTITY
 			}
-			buf, err := p.Get(ctx, rn)
+			rc, err := p.Reader(ctx, rn, 0, 0)
 			if err != nil {
 				pw.CloseWithError(err)
 				return
 			}
-			if _, err := pw.Write(buf); err != nil {
+			defer rc.Close()
+			if _, err = io.Copy(pw, rc); err != nil {
 				pw.CloseWithError(err)
 				return
 			}
