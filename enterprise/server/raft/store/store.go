@@ -26,6 +26,7 @@ import (
 	"github.com/buildbuddy-io/buildbuddy/enterprise/server/raft/sender"
 	"github.com/buildbuddy-io/buildbuddy/enterprise/server/raft/usagetracker"
 	"github.com/buildbuddy-io/buildbuddy/enterprise/server/util/pebble"
+	"github.com/buildbuddy-io/buildbuddy/server/environment"
 	"github.com/buildbuddy-io/buildbuddy/server/gossip"
 	"github.com/buildbuddy-io/buildbuddy/server/metrics"
 	"github.com/buildbuddy-io/buildbuddy/server/resources"
@@ -35,7 +36,6 @@ import (
 	"github.com/buildbuddy-io/buildbuddy/server/util/disk"
 	"github.com/buildbuddy-io/buildbuddy/server/util/grpc_server"
 	"github.com/buildbuddy-io/buildbuddy/server/util/log"
-	"github.com/buildbuddy-io/buildbuddy/server/util/retry"
 	"github.com/buildbuddy-io/buildbuddy/server/util/status"
 	"github.com/buildbuddy-io/buildbuddy/server/util/statusz"
 	"github.com/hashicorp/serf/serf"
@@ -62,6 +62,7 @@ var (
 )
 
 type Store struct {
+	env        environment.Env
 	rootDir    string
 	grpcAddr   string
 	partitions []disk.Partition
@@ -100,12 +101,13 @@ type Store struct {
 	egCancel context.CancelFunc
 }
 
-func New(rootDir string, nodeHost *dragonboat.NodeHost, gossipManager *gossip.GossipManager, sender *sender.Sender, registry registry.NodeRegistry, listener *listener.RaftListener, apiClient *client.APIClient, grpcAddress string, partitions []disk.Partition) (*Store, error) {
+func New(env environment.Env, rootDir string, nodeHost *dragonboat.NodeHost, gossipManager *gossip.GossipManager, sender *sender.Sender, registry registry.NodeRegistry, listener *listener.RaftListener, apiClient *client.APIClient, grpcAddress string, partitions []disk.Partition) (*Store, error) {
 	nodeLiveness := nodeliveness.New(nodeHost.ID(), sender)
 
 	nhLog := log.NamedSubLogger(nodeHost.ID())
 	eventsChan := make(chan events.Event, 100)
 	s := &Store{
+		env:           env,
 		rootDir:       rootDir,
 		grpcAddr:      grpcAddress,
 		nodeHost:      nodeHost,
@@ -188,7 +190,6 @@ func (s *Store) setMetaRangeBuf(buf []byte) {
 	// Update the value
 	s.metaRangeData = buf
 	s.sender.UpdateRange(new)
-	go s.renewNodeLiveness()
 }
 
 func (s *Store) queryForMetarange() {
@@ -296,7 +297,8 @@ func (s *Store) Start() error {
 	// A grpcServer is run which is responsible for presenting a meta API
 	// to manage raft nodes on each host, as well as an API to shuffle data
 	// around between nodes, outside of raft.
-	s.grpcServer = grpc.NewServer()
+	grpcOptions := grpc_server.CommonGRPCServerOptions(s.env)
+	s.grpcServer = grpc.NewServer(grpcOptions...)
 	reflection.Register(s.grpcServer)
 	grpc_prometheus.Register(s.grpcServer)
 	rfspb.RegisterApiServer(s.grpcServer, s)
@@ -317,6 +319,10 @@ func (s *Store) Start() error {
 	eg.Go(func() error {
 		return s.handleEvents(gctx)
 	})
+	eg.Go(func() error {
+		return s.acquireNodeLiveness(gctx)
+	})
+
 	s.leaseKeeper.Start()
 	return nil
 }
@@ -815,17 +821,31 @@ func (s *Store) OnEvent(updateType serf.EventType, event serf.Event) {
 	}
 }
 
-func (s *Store) renewNodeLiveness() {
-	retrier := retry.DefaultWithContext(context.Background())
-	for retrier.Next() {
-		if s.liveness.Valid() {
-			return
+func (s *Store) acquireNodeLiveness(ctx context.Context) error {
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-ticker.C:
+			s.metaRangeMu.Lock()
+			haveMetaRange := len(s.metaRangeData) > 0
+			s.metaRangeMu.Unlock()
+
+			if !haveMetaRange {
+				continue
+			}
+			if s.liveness.Valid() {
+				return nil
+			}
+			err := s.liveness.Lease()
+			if err == nil {
+				return nil
+			}
+			s.log.Errorf("Error leasing node liveness record: %s", err)
 		}
-		err := s.liveness.Lease()
-		if err == nil {
-			return
-		}
-		s.log.Errorf("Error leasing node liveness record: %s", err)
 	}
 }
 
