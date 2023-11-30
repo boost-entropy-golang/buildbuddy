@@ -80,6 +80,9 @@ genrule(
     ],
 )
 
+# To remotely execute this test, a couple of tag_filters are needed:
+# bazel test --config=remote --test_tag_filters=+bare \
+# //enterprise/server/remote_execution/containers/firecracker:firecracker_test
 go_test(
     name = "firecracker_test",
     timeout = "long",
@@ -122,6 +125,7 @@ go_test(
         "//server/remote_cache/byte_stream_server",
         "//server/remote_cache/content_addressable_storage_server",
         "//server/remote_cache/digest",
+        "//server/resources",
         "//server/testutil/testauth",
         "//server/testutil/testdigest",
         "//server/testutil/testenv",
@@ -195,6 +199,7 @@ go_test(
         "//server/remote_cache/byte_stream_server",
         "//server/remote_cache/content_addressable_storage_server",
         "//server/remote_cache/digest",
+        "//server/resources",
         "//server/testutil/testauth",
         "//server/testutil/testdigest",
         "//server/testutil/testenv",

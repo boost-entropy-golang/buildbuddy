@@ -105,25 +105,16 @@ func (h *Liveness) Release() error {
 // Returns a channel and associated close function. rfpb.NodeLivenessUpdates
 // will be published on the channel when the liveness record changes.
 // Listeners *must not block* or they risk dropping updates.
-func (h *Liveness) AddListener() (<-chan *rfpb.NodeLivenessRecord, func()) {
+func (h *Liveness) AddListener() <-chan *rfpb.NodeLivenessRecord {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
 	ch := make(chan *rfpb.NodeLivenessRecord, 5)
 	h.livenessListeners = append(h.livenessListeners, ch)
-	closeFunc := func() {
-		h.mu.Lock()
-		defer h.mu.Unlock()
-		for i, l := range h.livenessListeners {
-			if l == ch {
-				h.livenessListeners = append(h.livenessListeners[:i], h.livenessListeners[:i+1]...)
-			}
-		}
-	}
 	if err := h.verifyLease(h.lastLivenessRecord); err == nil {
 		ch <- h.lastLivenessRecord
 	}
-	return ch, closeFunc
+	return ch
 }
 
 func (h *Liveness) BlockingGetCurrentNodeLiveness() (*rfpb.RangeLeaseRecord_NodeLiveness, error) {
@@ -339,8 +330,7 @@ func (h *Liveness) string(replicaID []byte, llr *rfpb.NodeLivenessRecord) string
 }
 
 func (h *Liveness) String() string {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-
+	h.mu.RLock()
+	defer h.mu.RUnlock()
 	return h.string(h.nhid, h.lastLivenessRecord)
 }
