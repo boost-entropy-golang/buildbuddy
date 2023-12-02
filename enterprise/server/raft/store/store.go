@@ -392,7 +392,7 @@ func (s *Store) updateUsages(r *replica.Replica) error {
 		return err
 	}
 	rangeID := usage.GetRangeId()
-	if !s.haveLease(rangeID) {
+	if !s.HaveLease(rangeID) {
 		s.usages.RemoveRange(rangeID)
 		return nil
 	}
@@ -535,11 +535,11 @@ func (s *Store) validatedRange(header *rfpb.Header) (*replica.Replica, *rfpb.Ran
 	return r, rd, nil
 }
 
-func (s *Store) haveLease(rangeID uint64) bool {
+func (s *Store) HaveLease(rangeID uint64) bool {
 	if r, err := s.GetReplica(rangeID); err == nil {
 		return s.leaseKeeper.HaveLease(r.ShardID)
 	}
-	s.log.Warningf("haveLease check for unheld range: %d", rangeID)
+	s.log.Warningf("HaveLease check for unheld range: %d", rangeID)
 	return false
 }
 
@@ -557,7 +557,7 @@ func (s *Store) LeasedRange(header *rfpb.Header) (*replica.Replica, error) {
 		return r, nil
 	}
 
-	if s.haveLease(header.GetRangeId()) {
+	if s.HaveLease(header.GetRangeId()) {
 		return r, nil
 	}
 	return nil, status.OutOfRangeErrorf("%s: no lease found for range: %d", constants.RangeLeaseInvalidMsg, header.GetRangeId())
@@ -957,18 +957,18 @@ func (s *Store) SplitRange(ctx context.Context, req *rfpb.SplitRangeRequest) (*r
 		return nil, status.FailedPreconditionError("Splitting not enabled")
 	}
 
-	sourceRange := req.GetRange()
-	if sourceRange == nil {
+	leftRange := req.GetRange()
+	if leftRange == nil {
 		return nil, status.FailedPreconditionErrorf("no range provided to split: %+v", req)
 	}
-	if len(sourceRange.GetReplicas()) == 0 {
-		return nil, status.FailedPreconditionErrorf("no replicas in range: %+v", sourceRange)
+	if len(leftRange.GetReplicas()) == 0 {
+		return nil, status.FailedPreconditionErrorf("no replicas in range: %+v", leftRange)
 	}
 
-	// Copy source range, because it's a pointer and will change when we
+	// Copy left range, because it's a pointer and will change when we
 	// propose the split.
-	sourceRange = proto.Clone(sourceRange).(*rfpb.RangeDescriptor)
-	shardID := sourceRange.GetReplicas()[0].GetShardId()
+	leftRange = proto.Clone(leftRange).(*rfpb.RangeDescriptor)
+	shardID := leftRange.GetReplicas()[0].GetShardId()
 
 	// Reserve new IDs for this cluster.
 	newShardID, newRangeID, err := s.reserveClusterAndRangeID(ctx)
@@ -989,7 +989,7 @@ func (s *Store) SplitRange(ctx context.Context, req *rfpb.SplitRangeRequest) (*r
 
 	// Bringup new peers.
 	servers := make(map[string]string)
-	for _, r := range sourceRange.GetReplicas() {
+	for _, r := range leftRange.GetReplicas() {
 		nhid, _, err := s.registry.ResolveNHID(r.GetShardId(), r.GetReplicaId())
 		if err != nil {
 			return nil, err
@@ -1006,47 +1006,50 @@ func (s *Store) SplitRange(ctx context.Context, req *rfpb.SplitRangeRequest) (*r
 	}
 
 	// Assemble new range descriptor.
-	destRange := proto.Clone(sourceRange).(*rfpb.RangeDescriptor)
-	destRange.Start = splitPointResponse.GetSplitKey()
-	destRange.RangeId = newRangeID
-	destRange.Generation += 1
-	for i, r := range destRange.GetReplicas() {
+	newRightRange := proto.Clone(leftRange).(*rfpb.RangeDescriptor)
+	newRightRange.Start = splitPointResponse.GetSplitKey()
+	newRightRange.RangeId = newRangeID
+	newRightRange.Generation += 1
+	for i, r := range newRightRange.GetReplicas() {
 		r.ReplicaId = uint64(i + 1)
 		r.ShardId = newShardID
 	}
-	destRangeBuf, err := proto.Marshal(destRange)
+	newRightRangeBuf, err := proto.Marshal(newRightRange)
 	if err != nil {
 		return nil, err
 	}
 
-	newSourceRange := proto.Clone(sourceRange).(*rfpb.RangeDescriptor)
-	newSourceRange.End = splitPointResponse.GetSplitKey()
-	newSourceRange.Generation += 1
+	updatedLeftRange := proto.Clone(leftRange).(*rfpb.RangeDescriptor)
+	updatedLeftRange.End = splitPointResponse.GetSplitKey()
+	updatedLeftRange.Generation += 1
 
 	leftBatch := rbuilder.NewBatchBuilder()
-	if err := addLocalRangeEdits(sourceRange, newSourceRange, leftBatch); err != nil {
+	if err := addLocalRangeEdits(leftRange, updatedLeftRange, leftBatch); err != nil {
 		return nil, err
 	}
 	leftBatch.AddPostCommitHook(&rfpb.SnapshotClusterHook{})
 	rightBatch := rbuilder.NewBatchBuilder().Add(&rfpb.DirectWriteRequest{
 		Kv: &rfpb.KV{
 			Key:   constants.LocalRangeKey,
-			Value: destRangeBuf,
+			Value: newRightRangeBuf,
 		},
 	})
 	rightBatch.AddPostCommitHook(&rfpb.SnapshotClusterHook{})
 	metaBatch := rbuilder.NewBatchBuilder()
-	if err := addMetaRangeEdits(sourceRange, newSourceRange, destRange, metaBatch); err != nil {
+	if err := addMetaRangeEdits(leftRange, updatedLeftRange, newRightRange, metaBatch); err != nil {
 		return nil, err
 	}
 
 	txn := rbuilder.NewTxn().AddStatement(shardID, leftBatch)
 	txn = txn.AddStatement(newShardID, rightBatch)
-	txn = txn.AddStatement(1, metaBatch)
+	txn = txn.AddStatement(constants.MetaRangeID, metaBatch)
 	if err := client.RunTxn(ctx, s.nodeHost, txn); err != nil {
 		return nil, err
 	}
-	return &rfpb.SplitRangeResponse{}, nil
+	return &rfpb.SplitRangeResponse{
+		Left:  updatedLeftRange,
+		Right: newRightRange,
+	}, nil
 }
 
 func (s *Store) getLastAppliedIndex(header *rfpb.Header) (uint64, error) {
@@ -1402,7 +1405,6 @@ func (s *Store) updateMetarange(ctx context.Context, oldStart, start, end *rfpb.
 }
 
 func (s *Store) updateRangeDescriptor(ctx context.Context, shardID uint64, old, new *rfpb.RangeDescriptor) error {
-	// TODO(tylerw): this should use 2PC.
 	oldBuf, err := proto.Marshal(old)
 	if err != nil {
 		return err
@@ -1412,7 +1414,6 @@ func (s *Store) updateRangeDescriptor(ctx context.Context, shardID uint64, old, 
 		return err
 	}
 
-	metaRangeBatch := rbuilder.NewBatchBuilder()
 	localBatch := rbuilder.NewBatchBuilder()
 	if err := addLocalRangeEdits(old, new, localBatch); err != nil {
 		return err
@@ -1425,48 +1426,12 @@ func (s *Store) updateRangeDescriptor(ctx context.Context, shardID uint64, old, 
 		},
 		ExpectedValue: oldBuf,
 	}
+	metaRangeBatch := rbuilder.NewBatchBuilder()
+	metaRangeBatch.Add(metaRangeCasReq)
 
-	if shardID == constants.InitialShardID {
-		localBatch.Add(metaRangeCasReq)
-	} else {
-		metaRangeBatch.Add(metaRangeCasReq)
-	}
-
-	localReq, err := localBatch.ToProto()
-	if err != nil {
-		return err
-	}
-
-	// Update the local range.
-	localRsp, err := client.SyncProposeLocal(ctx, s.nodeHost, shardID, localReq)
-	if err != nil {
-		return err
-	}
-	_, err = rbuilder.NewBatchResponseFromProto(localRsp).CASResponse(0)
-	if err != nil {
-		return err
-	}
-	// If both changes (to local and metarange descriptors) applied to the
-	// MetaRange, they were applied in the localReq, and there's nothing
-	// remaining to do.
-	if metaRangeBatch.Size() == 0 {
-		return nil
-	}
-
-	// Update the metarange.
-	metaReq, err := metaRangeBatch.ToProto()
-	if err != nil {
-		return err
-	}
-	metaRangeRsp, err := s.sender.SyncPropose(ctx, metaRangeDescriptorKey, metaReq)
-	if err != nil {
-		return err
-	}
-	_, err = rbuilder.NewBatchResponseFromProto(metaRangeRsp).CASResponse(0)
-	if err != nil {
-		return err
-	}
-	return nil
+	txn := rbuilder.NewTxn().AddStatement(shardID, localBatch)
+	txn = txn.AddStatement(constants.MetaRangeID, metaRangeBatch)
+	return client.RunTxn(ctx, s.nodeHost, txn)
 }
 
 func (s *Store) addReplicaToRangeDescriptor(ctx context.Context, shardID, replicaID uint64, oldDescriptor *rfpb.RangeDescriptor) (*rfpb.RangeDescriptor, error) {
