@@ -479,6 +479,9 @@ type FirecrackerContainer struct {
 	createFromSnapshot      bool
 	supportsRemoteSnapshots bool
 
+	// If set, the snapshot used to load the VM
+	snapshot *snaploader.Snapshot
+
 	// When the VM was initialized (i.e. created or unpaused) for the command
 	// it is currently executing
 	//
@@ -605,10 +608,10 @@ func NewContainer(ctx context.Context, env environment.Env, task *repb.Execution
 			label := ""
 			if err != nil {
 				label = metrics.MissStatusLabel
-				log.CtxInfof(ctx, "Failed to get VM snapshot: %s", err)
+				log.CtxInfof(ctx, "Failed to get VM snapshot for keyset %s: %s", snaploader.KeysetDebugString(ctx, c.env, c.SnapshotKeySet()), err)
 			} else {
 				label = metrics.HitStatusLabel
-				log.CtxInfof(ctx, "Found snapshot for ref=%q", snap.GetKey().GetRef())
+				log.CtxInfof(ctx, "Found snapshot for key %s", snaploader.KeyDebugString(ctx, c.env, snap.GetKey()))
 			}
 			metrics.RecycleRunnerRequests.With(prometheus.Labels{
 				metrics.RecycleRunnerRequestStatusLabel: label,
@@ -985,6 +988,7 @@ func (c *FirecrackerContainer) LoadSnapshot(ctx context.Context) error {
 	if err != nil {
 		return status.WrapError(err, "failed to get snapshot")
 	}
+	c.snapshot = snap
 
 	// Use vmCtx for COWs since IO may be done outside of the task ctx.
 	unpacked, err := c.loader.UnpackSnapshot(vmCtx, snap, c.getChroot())
@@ -1086,7 +1090,7 @@ func (c *FirecrackerContainer) initRootfsStore(ctx context.Context) error {
 		return status.InternalErrorf("failed to create rootfs chunk dir: %s", err)
 	}
 	containerExt4Path := filepath.Join(c.getChroot(), containerFSName)
-	cf, err := snaploader.UnpackContainerImage(c.vmCtx, c.loader, c.containerImage, containerExt4Path, cowChunkDir, cowChunkSizeBytes())
+	cf, err := snaploader.UnpackContainerImage(c.vmCtx, c.loader, c.snapshotKeySet.GetBranchKey().GetInstanceName(), c.containerImage, containerExt4Path, cowChunkDir, cowChunkSizeBytes())
 	if err != nil {
 		return status.WrapError(err, "unpack container image")
 	}
@@ -2176,6 +2180,12 @@ func (c *FirecrackerContainer) PullImage(ctx context.Context, creds oci.Credenti
 	}
 	c.pulled = true
 
+	// If we're creating from a snapshot, we don't need to pull the base image
+	// since the rootfs image contains our full desired disk contents.
+	if c.createFromSnapshot && *EnableRootfs {
+		return nil
+	}
+
 	ctx, span := tracing.StartSpan(ctx)
 	defer span.End()
 
@@ -2563,6 +2573,17 @@ func (c *FirecrackerContainer) observeStageDuration(ctx context.Context, taskSta
 		metrics.RecycledRunnerStatus:     recycleStatus,
 		metrics.GroupID:                  groupID,
 	}).Observe(float64(durationUsec))
+}
+
+func (c *FirecrackerContainer) SnapshotDebugString(ctx context.Context) string {
+	if c.snapshot == nil {
+		return ""
+	}
+	return snaploader.KeyDebugString(ctx, c.env, c.snapshot.GetKey())
+}
+
+func (c *FirecrackerContainer) VMConfig() *fcpb.VMConfiguration {
+	return c.vmConfig
 }
 
 func isExitErrorSIGTERM(err error) bool {
