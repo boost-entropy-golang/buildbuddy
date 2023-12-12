@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"encoding/base64"
+	"flag"
 	"fmt"
 	"net"
 	"sort"
@@ -13,7 +14,6 @@ import (
 	"github.com/buildbuddy-io/buildbuddy/enterprise/server/raft/client"
 	"github.com/buildbuddy-io/buildbuddy/enterprise/server/raft/constants"
 	"github.com/buildbuddy-io/buildbuddy/enterprise/server/raft/events"
-	"github.com/buildbuddy-io/buildbuddy/enterprise/server/raft/filestore"
 	"github.com/buildbuddy-io/buildbuddy/enterprise/server/raft/keys"
 	"github.com/buildbuddy-io/buildbuddy/enterprise/server/raft/leasekeeper"
 	"github.com/buildbuddy-io/buildbuddy/enterprise/server/raft/listener"
@@ -52,8 +52,9 @@ import (
 	dbsm "github.com/lni/dragonboat/v4/statemachine"
 )
 
-const (
-	readBufSizeBytes = 1000000 // 1MB
+var (
+	zombieNodeScanInterval = flag.Duration("cache.raft.zombie_node_scan_interval", 10*time.Second, "Check if one replica is a zombie every this often. 0 to disable.")
+	maxRangeSizeBytes      = flag.Int64("cache.raft.max_range_size_bytes", 1e8, "If set to a value greater than 0, ranges will be split until smaller than this size")
 )
 
 type Store struct {
@@ -84,13 +85,12 @@ type Store struct {
 	eventsMu       sync.Mutex
 	events         chan events.Event
 	eventListeners []chan events.Event
+	splitRequests  chan *rfpb.RangeDescriptor
 
 	usages *usagetracker.Tracker
 
 	metaRangeMu   sync.Mutex
 	metaRangeData []byte
-
-	fileStorer filestore.Store
 
 	eg       *errgroup.Group
 	egCancel context.CancelFunc
@@ -124,10 +124,10 @@ func New(env environment.Env, rootDir string, nodeHost *dragonboat.NodeHost, gos
 		eventsMu:       sync.Mutex{},
 		events:         eventsChan,
 		eventListeners: make([]chan events.Event, 0),
+		splitRequests:  make(chan *rfpb.RangeDescriptor, 100),
 
 		metaRangeMu:   sync.Mutex{},
 		metaRangeData: make([]byte, 0),
-		fileStorer:    filestore.New(),
 	}
 
 	db, err := pebble.Open(rootDir, "raft_store", &pebble.Options{})
@@ -146,7 +146,6 @@ func New(env environment.Env, rootDir string, nodeHost *dragonboat.NodeHost, gos
 	gossipManager.AddListener(s)
 	statusz.AddSection("raft_store", "Store", s)
 
-	go s.queryForMetarange()
 	go s.updateTags()
 
 	return s, nil
@@ -187,17 +186,23 @@ func (s *Store) setMetaRangeBuf(buf []byte) {
 	s.sender.UpdateRange(new)
 }
 
-func (s *Store) queryForMetarange() {
+func (s *Store) queryForMetarange(ctx context.Context) {
 	start := time.Now()
 	stream, err := s.gossipManager.Query(constants.MetaRangeTag, nil, nil)
 	if err != nil {
 		s.log.Errorf("Error querying for metarange: %s", err)
 	}
-	for p := range stream.ResponseCh() {
-		s.setMetaRangeBuf(p.Payload)
-		stream.Close()
-		s.log.Infof("Discovered metarange in %s", time.Since(start))
-		return
+	for {
+		select {
+		case p := <-stream.ResponseCh():
+			s.setMetaRangeBuf(p.Payload)
+			stream.Close()
+			s.log.Infof("Discovered metarange in %s", time.Since(start))
+			return
+		case <-ctx.Done():
+			stream.Close()
+			return
+		}
 	}
 }
 
@@ -309,6 +314,23 @@ func (s *Store) Start() error {
 		s.acquireNodeLiveness(gctx)
 		return nil
 	})
+	eg.Go(func() error {
+		s.queryForMetarange(gctx)
+		return nil
+	})
+	eg.Go(func() error {
+		s.cleanupZombieNodes(gctx)
+		return nil
+	})
+	eg.Go(func() error {
+		s.checkIfReplicasNeedSplitting(gctx)
+		return nil
+	})
+	eg.Go(func() error {
+		s.processSplitRequests(gctx)
+		return nil
+	})
+
 	s.leaseKeeper.Start()
 
 	return nil
@@ -815,6 +837,150 @@ func (s *Store) acquireNodeLiveness(ctx context.Context) {
 	}
 }
 
+func (s *Store) isRangelessNode(shardID uint64) bool {
+	if rd := s.lookupRange(shardID); rd != nil {
+		for _, r := range rd.GetReplicas() {
+			if r.GetShardId() == shardID {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// If the replica is behind: don’t kill
+// If the replica is one of the replicas specified in the range: don’t kill
+// Otherwise: kill
+func (s *Store) isZombieNode(ctx context.Context, shardInfo dragonboat.ShardInfo) bool {
+	// Get the config change index for this shard.
+	membership, err := s.getMembership(ctx, shardInfo.ShardID)
+	if err != nil {
+		s.log.Errorf("Error gettting membership for shard %d: %s", shardInfo.ShardID, err)
+		return false
+	}
+
+	if shardInfo.ConfigChangeIndex > 0 && shardInfo.ConfigChangeIndex <= membership.ConfigChangeID {
+		return false
+	}
+
+	for replicaID := range membership.Nodes {
+		if replicaID == shardInfo.ReplicaID {
+			return false
+		}
+	}
+	for replicaID := range membership.NonVotings {
+		if replicaID == shardInfo.ReplicaID {
+			return false
+		}
+	}
+	for replicaID := range membership.Witnesses {
+		if replicaID == shardInfo.ReplicaID {
+			return false
+		}
+	}
+	return true
+}
+
+func (s *Store) cleanupZombieNodes(ctx context.Context) {
+	if *zombieNodeScanInterval == 0 {
+		return
+	}
+	timer := time.NewTicker(*zombieNodeScanInterval)
+	defer timer.Stop()
+
+	nInfo := s.nodeHost.GetNodeHostInfo(dragonboat.NodeHostInfoOption{SkipLogInfo: true})
+	idx := 0
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-timer.C:
+			if idx == len(nInfo.ShardInfoList) {
+				idx = 0
+				nInfo = s.nodeHost.GetNodeHostInfo(dragonboat.NodeHostInfoOption{SkipLogInfo: true})
+				continue
+			}
+			sInfo := nInfo.ShardInfoList[idx]
+			idx += 1
+
+			if s.isZombieNode(ctx, sInfo) || s.isRangelessNode(sInfo.ShardID) {
+				s.log.Debugf("Removing zombie node: %+v...", sInfo)
+				if err := s.nodeHost.StopReplica(sInfo.ShardID, sInfo.ReplicaID); err != nil {
+					s.log.Errorf("Error stopping zombie replica: %s", err)
+				} else {
+					if _, err := s.RemoveData(ctx, &rfpb.RemoveDataRequest{
+						ShardId:   sInfo.ShardID,
+						ReplicaId: sInfo.ReplicaID,
+					}); err != nil {
+						s.log.Errorf("Error removing zombie replica data: %s", err)
+					} else {
+						s.log.Infof("Successfully removed zombie node: %+v", sInfo)
+					}
+				}
+			}
+		}
+	}
+}
+
+func (s *Store) checkIfReplicasNeedSplitting(ctx context.Context) {
+	eventsCh := s.AddEventListener()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case e := <-eventsCh:
+			switch e.EventType() {
+			case events.EventRangeUsageUpdated:
+				rangeUsageEvent := e.(events.RangeUsageEvent)
+				if !s.leaseKeeper.HaveLease(rangeUsageEvent.RangeDescriptor.GetRangeId()) {
+					continue
+				}
+				if rangeUsageEvent.ReplicaUsage.GetEstimatedDiskBytesUsed() <= *maxRangeSizeBytes {
+					continue
+				}
+				rd := proto.Clone(rangeUsageEvent.RangeDescriptor).(*rfpb.RangeDescriptor)
+				s.log.Infof("Requesting split for range: %+v", rd)
+				select {
+				case s.splitRequests <- rd:
+					break
+				default:
+					s.log.Debugf("Split queue full. Dropping message.")
+				}
+			default:
+				break
+			}
+		}
+	}
+}
+
+func makeHeader(rangeDescriptor *rfpb.RangeDescriptor) *rfpb.Header {
+	return &rfpb.Header{
+		RangeId:         rangeDescriptor.GetRangeId(),
+		Generation:      rangeDescriptor.GetGeneration(),
+		ConsistencyMode: rfpb.Header_LINEARIZABLE,
+	}
+}
+
+func (s *Store) processSplitRequests(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case rd := <-s.splitRequests:
+			splitReq := &rfpb.SplitRangeRequest{
+				Header: makeHeader(rd),
+				Range:  rd,
+			}
+			if rsp, err := s.SplitRange(ctx, splitReq); err != nil {
+				s.log.Errorf("Error splitting range: %s", err)
+			} else {
+				s.log.Infof("Successfully split range: %+v", rsp)
+			}
+		}
+	}
+}
+
 func (s *Store) Usage() *rfpb.StoreUsage {
 	su := &rfpb.StoreUsage{
 		Node: s.NodeDescriptor(),
@@ -1047,7 +1213,7 @@ func (s *Store) waitForReplicaToCatchUp(ctx context.Context, shardID uint64, des
 	return nil
 }
 
-func (s *Store) getConfigChangeID(ctx context.Context, shardID uint64) (uint64, error) {
+func (s *Store) getMembership(ctx context.Context, shardID uint64) (*dragonboat.Membership, error) {
 	var membership *dragonboat.Membership
 	var err error
 	err = client.RunNodehostFn(ctx, func(ctx context.Context) error {
@@ -1064,10 +1230,18 @@ func (s *Store) getConfigChangeID(ctx context.Context, shardID uint64) (uint64, 
 		return nil
 	})
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 	if membership == nil {
-		return 0, status.InternalErrorf("null cluster membership for cluster: %d", shardID)
+		return nil, status.InternalErrorf("nil cluster membership for cluster: %d", shardID)
+	}
+	return membership, nil
+}
+
+func (s *Store) getConfigChangeID(ctx context.Context, shardID uint64) (uint64, error) {
+	membership, err := s.getMembership(ctx, shardID)
+	if err != nil {
+		return 0, err
 	}
 	return membership.ConfigChangeID, nil
 }
