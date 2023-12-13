@@ -26,6 +26,18 @@ export type FileEncoding = "gzip" | "zstd" | "";
 
 export type FetchResponseType = "arraybuffer" | "stream" | "text" | "";
 
+/**
+ * Optional parameters for bytestream downloads.
+ *
+ * filename:
+ *     the file will be downloaded with this filename rather than the digest.
+ * zip:
+ *     a serialized, base64-encoded zip.ManifestEntry that instructs which
+ *     sub-file in a zip file should be extracted and downloaded (the file
+ *     referenced by the digest must be a valid zip file).
+ */
+export type BytestreamFileOptions = { filename?: string; zip?: string };
+
 class RpcService {
   service: ExtendedBuildBuddyService;
   regionalServices = new Map<string, ExtendedBuildBuddyService>();
@@ -106,10 +118,11 @@ class RpcService {
     bytestreamURL: string,
     invocationId: string,
     responseType?: T,
-    init: RequestInit = {}
+    init: RequestInit = {},
+    options: BytestreamFileOptions = {}
   ): Promise<FetchPromiseType<T>> {
     return this.fetch(
-      this.getBytestreamUrl(bytestreamURL, invocationId),
+      this.getBytestreamUrl(bytestreamURL, invocationId, options),
       (responseType || "") as FetchResponseType,
       init
     ) as Promise<FetchPromiseType<T>>;
@@ -163,6 +176,26 @@ class RpcService {
     }
     init.headers = { "Content-Type": "application/proto" };
     try {
+      if (capabilities.config.streamingHttpEnabled) {
+        init.headers["Content-Type"] = "application/grpc+proto";
+        init.body = lengthPrefixMessage(requestData);
+
+        const reader = (await this.fetch(url, "stream", init))?.getReader();
+        while (true) {
+          let result = await reader?.read();
+          if (result?.done) {
+            return;
+          }
+
+          // Ignore the first 5 byte length-prefix, see the comment for lengthPrefixMessage for more info.
+          // TODO(siggisim): Support messages that come across flushes, though I'm not sure if this will
+          // happen much (if at all) in practice.
+          let value = result?.value.slice(5) || new Uint8Array();
+          callback(null, value);
+          this.events.next(method.name);
+        }
+      }
+
       const arrayBuffer = await this.fetch(url, "arraybuffer", init);
       callback(null, new Uint8Array(arrayBuffer));
       this.events.next(method.name);
@@ -184,6 +217,20 @@ class RpcService {
     }
     return extendedService;
   }
+}
+
+// GRPC over HTTP requires protobuf messages to be sent in a series of `Length-Prefixed-Message`s
+// Here's what a Length-Prefixed-Message looks like:
+// 		Length-Prefixed-Message → Compressed-Flag Message-Length Message
+// 		Compressed-Flag → 0 / 1 # encoded as 1 byte unsigned integer
+// 		Message-Length → {length of Message} # encoded as 4 byte unsigned integer (big endian)
+// 		Message → *{binary octet}
+// For more info, see: https://github.com/grpc/grpc/blob/master/doc/PROTOCOL-HTTP2.md
+function lengthPrefixMessage(requestData: Uint8Array) {
+  const frame = new ArrayBuffer(requestData.byteLength + 5);
+  new DataView(frame, 1, 4).setUint32(0, requestData.length, false /* big endian */);
+  new Uint8Array(frame, 5).set(requestData);
+  return new Uint8Array(frame);
 }
 
 function uint8ArrayToBase64(array: Uint8Array): string {
