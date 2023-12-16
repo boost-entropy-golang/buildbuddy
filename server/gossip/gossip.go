@@ -8,19 +8,25 @@ import (
 	"sync"
 	"time"
 
+	"github.com/buildbuddy-io/buildbuddy/server/hostid"
+	"github.com/buildbuddy-io/buildbuddy/server/interfaces"
+	"github.com/buildbuddy-io/buildbuddy/server/real_environment"
+	"github.com/buildbuddy-io/buildbuddy/server/util/flag"
 	"github.com/buildbuddy-io/buildbuddy/server/util/log"
 	"github.com/buildbuddy-io/buildbuddy/server/util/network"
 	"github.com/buildbuddy-io/buildbuddy/server/util/retry"
+	"github.com/buildbuddy-io/buildbuddy/server/util/status"
 	"github.com/buildbuddy-io/buildbuddy/server/util/statusz"
 
 	"github.com/hashicorp/memberlist"
 	"github.com/hashicorp/serf/serf"
 )
 
-// A Broker listens for serf events.
-type Listener interface {
-	OnEvent(eventType serf.EventType, event serf.Event)
-}
+var (
+	listenAddr = flag.String("gossip.listen_addr", "", "The address to listen for gossip traffic on. Ex. 'localhost:1991'")
+	join       = flag.Slice("gossip.join", []string{}, "The nodes to join/gossip with. Ex. '1.2.3.4:1991,2.3.4.5:1991...'")
+	nodeName   = flag.String("gossip.node_name", "", "The gossip node's name. If empty will default to host_id.'")
+)
 
 // A GossipManager will listen (on `advertiseAddress`), connect to `seeds`,
 // and gossip any information provided via the broker interface. To leave
@@ -31,11 +37,11 @@ type GossipManager struct {
 	serfInstance  *serf.Serf
 	serfEventChan chan serf.Event
 
-	ListenAddr string
-	Join       []string
+	listenAddr string
+	join       []string
 
 	mu        sync.Mutex
-	listeners []Listener
+	listeners []interfaces.GossipListener
 	tags      map[string]string
 }
 
@@ -52,7 +58,17 @@ func (gm *GossipManager) processEvents() {
 	}
 }
 
-func (gm *GossipManager) AddListener(listener Listener) {
+func (gm *GossipManager) ListenAddr() string {
+	return gm.listenAddr
+}
+
+func (gm *GossipManager) JoinList() []string {
+	joinList := make([]string, len(gm.join))
+	copy(joinList, gm.join)
+	return joinList
+}
+
+func (gm *GossipManager) AddListener(listener interfaces.GossipListener) {
 	if listener == nil {
 		log.Error("listener cannot be nil")
 		return
@@ -180,10 +196,32 @@ func (lw *logWriter) Write(d []byte) (int, error) {
 	return len(d), nil
 }
 
-func NewGossipManager(name, listenAddress string, join []string) (*GossipManager, error) {
-	log.Printf("Starting GossipManager on %q", listenAddress)
+func Register(env *real_environment.RealEnv) error {
+	if *listenAddr == "" {
+		return nil
+	}
+	if len(*join) == 0 {
+		return status.FailedPreconditionError("Gossip listen address specified but no join target set")
+	}
+	name := *nodeName
+	if name == "" {
+		name = hostid.GetFailsafeHostID("")
+	}
 
-	subLog := log.NamedSubLogger(fmt.Sprintf("GossipManager(%s)", name))
+	// Initialize a gossip manager, which will contact other nodes
+	// and exchange information.
+	gossipManager, err := New(name, *listenAddr, *join)
+	if err != nil {
+		return err
+	}
+	env.SetGossipService(gossipManager)
+	return nil
+}
+
+func New(nodeName, listenAddress string, join []string) (*GossipManager, error) {
+	log.Infof("Starting GossipManager on %q", listenAddress)
+
+	subLog := log.NamedSubLogger(fmt.Sprintf("GossipManager(%s)", nodeName))
 
 	bindAddr, bindPort, err := network.ParseAddress(listenAddress)
 	if err != nil {
@@ -195,7 +233,7 @@ func NewGossipManager(name, listenAddress string, join []string) (*GossipManager
 	memberlistConfig.LogOutput = &logWriter{subLog}
 
 	serfConfig := serf.DefaultConfig()
-	serfConfig.NodeName = name
+	serfConfig.NodeName = nodeName
 	serfConfig.MemberlistConfig = memberlistConfig
 	serfConfig.LogOutput = &logWriter{subLog}
 	// this is the maximum value that serf supports.
@@ -213,11 +251,11 @@ func NewGossipManager(name, listenAddress string, join []string) (*GossipManager
 	// spoiler: gossip girl was actually a:
 	gossipMan := &GossipManager{
 		cancelFunc:    cancel,
-		ListenAddr:    listenAddress,
-		Join:          join,
+		listenAddr:    listenAddress,
+		join:          join,
 		serfEventChan: make(chan serf.Event, 16),
 		mu:            sync.Mutex{},
-		listeners:     make([]Listener, 0),
+		listeners:     make([]interfaces.GossipListener, 0),
 		tags:          make(map[string]string, 0),
 	}
 	serfConfig.EventCh = gossipMan.serfEventChan

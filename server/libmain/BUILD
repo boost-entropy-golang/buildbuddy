@@ -1,5 +1,6 @@
 load("@io_bazel_rules_go//go:def.bzl", "go_library")
 
+# gazelle:resolve go github.com/planetscale/vtprotobuf/vtproto @com_github_planetscale_vtprotobuf//include/github.com/planetscale/vtprotobuf/vtproto:vtproto_go_proto
 go_library(
     name = "libmain",
     srcs = ["libmain.go"],
@@ -28,7 +29,7 @@ go_library(
         "//server/build_event_protocol/webhooks",
         "//server/buildbuddy_server",
         "//server/endpoint_urls/build_buddy_url",
-        "//server/environment",
+        "//server/gossip",
         "//server/http/interceptors",
         "//server/http/protolet",
         "//server/interfaces",
@@ -56,6 +57,7 @@ go_library(
         "//server/util/tracing",
         "//server/util/usageutil",
         "//static:bundle",
+        "@com_github_planetscale_vtprotobuf//include/github.com/planetscale/vtprotobuf/vtproto:vtproto_go_proto",
         "@org_golang_google_genproto_googleapis_api//annotations",
         "@org_golang_google_genproto_googleapis_bytestream//:bytestream",
         "@org_golang_google_grpc//:go_default_library",

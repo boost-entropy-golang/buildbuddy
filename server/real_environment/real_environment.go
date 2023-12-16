@@ -9,6 +9,7 @@ import (
 	"github.com/buildbuddy-io/buildbuddy/server/interfaces"
 	"github.com/go-redis/redis/v8"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/test/bufconn"
 
 	pepb "github.com/buildbuddy-io/buildbuddy/proto/publish_build_event"
 	rapb "github.com/buildbuddy-io/buildbuddy/proto/remote_asset"
@@ -117,6 +118,8 @@ type RealEnv struct {
 	serverNotificationService        interfaces.ServerNotificationService
 	gcpService                       interfaces.GCPService
 	scimService                      interfaces.SCIMService
+	localBufconnListener             *bufconn.Listener
+	gossipService                    interfaces.GossipService
 }
 
 // NewRealEnv returns an environment for use in servers.
@@ -205,6 +208,13 @@ func (r *RealEnv) GetUsageService() interfaces.UsageService {
 }
 func (r *RealEnv) SetUsageService(s interfaces.UsageService) {
 	r.usageService = s
+}
+
+func (r *RealEnv) GetLocalBufconnListener() *bufconn.Listener {
+	return r.localBufconnListener
+}
+func (r *RealEnv) SetLocalBufconnListener(l *bufconn.Listener) {
+	r.localBufconnListener = l
 }
 
 func (r *RealEnv) GetUsageTracker() interfaces.UsageTracker {
@@ -692,4 +702,12 @@ func (r *RealEnv) GetSCIMService() interfaces.SCIMService {
 
 func (r *RealEnv) SetSCIMService(val interfaces.SCIMService) {
 	r.scimService = val
+}
+
+func (r *RealEnv) GetGossipService() interfaces.GossipService {
+	return r.gossipService
+}
+
+func (r *RealEnv) SetGossipService(g interfaces.GossipService) {
+	r.gossipService = g
 }

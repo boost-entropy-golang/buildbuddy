@@ -14,6 +14,8 @@ go_library(
         "//proto:workflow_go_proto",
         "//server/backends/github",
         "//server/environment",
+        "//server/interfaces",
+        "//server/real_environment",
         "//server/tables",
         "//server/util/authutil",
         "//server/util/db",

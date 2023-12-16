@@ -8,6 +8,7 @@ import (
 	"github.com/buildbuddy-io/buildbuddy/enterprise/server/util/keystore"
 	"github.com/buildbuddy-io/buildbuddy/server/environment"
 	"github.com/buildbuddy-io/buildbuddy/server/interfaces"
+	"github.com/buildbuddy-io/buildbuddy/server/real_environment"
 	"github.com/buildbuddy-io/buildbuddy/server/tables"
 	"github.com/buildbuddy-io/buildbuddy/server/util/db"
 	"github.com/buildbuddy-io/buildbuddy/server/util/hash"
@@ -35,7 +36,7 @@ func New(env environment.Env) *SecretService {
 	}
 }
 
-func Register(env environment.Env) error {
+func Register(env *real_environment.RealEnv) error {
 	if !*enableSecretService {
 		return nil
 	}
@@ -82,24 +83,17 @@ func (s *SecretService) listSecretsIncludingValues(ctx context.Context) (*skpb.L
 	q.AddWhereClause("group_id = ?", u.GetGroupID())
 	q.SetOrderBy("name", true /*ascending*/)
 	queryStr, args := q.Build()
-	query := dbHandle.DB(ctx).Raw(queryStr, args...)
-	rows, err := query.Rows()
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
+	rq := dbHandle.NewQuery(ctx, "secrets_list").Raw(queryStr, args...)
 	rsp := &skpb.ListSecretsResponse{}
-
-	for rows.Next() {
-		k := &tables.Secret{}
-		if err := dbHandle.DB(ctx).ScanRows(rows, k); err != nil {
-			return nil, err
-		}
+	err = db.ScanEach(rq, func(ctx context.Context, k *tables.Secret) error {
 		rsp.Secret = append(rsp.Secret, &skpb.Secret{
 			Name:  k.Name,
 			Value: k.Value,
 		})
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 	return rsp, nil
 }
@@ -212,7 +206,8 @@ func (s *SecretService) DeleteSecret(ctx context.Context, req *skpb.DeleteSecret
 		return nil, status.InvalidArgumentError("A non-empty secret name is required")
 	}
 
-	err = dbHandle.DB(ctx).Exec(`DELETE FROM "Secrets" WHERE group_id = ? AND name = ?`, u.GetGroupID(), req.GetSecret().GetName()).Error
+	err = dbHandle.NewQuery(ctx, "secrets_delete").Raw(
+		`DELETE FROM "Secrets" WHERE group_id = ? AND name = ?`, u.GetGroupID(), req.GetSecret().GetName()).Exec().Error
 	if err != nil {
 		return nil, err
 	}

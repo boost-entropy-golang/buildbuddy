@@ -19,6 +19,7 @@ go_library(
         "//server/environment",
         "//server/interfaces",
         "//server/metrics",
+        "//server/real_environment",
         "//server/remote_execution/config",
         "//server/resources",
         "//server/scheduling/scheduler_server/config",
@@ -62,5 +63,6 @@ go_test(
         "@com_github_jonboulle_clockwork//:clockwork",
         "@com_github_stretchr_testify//require",
         "@org_golang_google_protobuf//proto",
+        "@org_golang_google_protobuf//types/known/durationpb",
     ],
 )

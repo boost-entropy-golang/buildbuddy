@@ -22,6 +22,7 @@ import (
 	"github.com/buildbuddy-io/buildbuddy/server/environment"
 	"github.com/buildbuddy-io/buildbuddy/server/interfaces"
 	"github.com/buildbuddy-io/buildbuddy/server/metrics"
+	"github.com/buildbuddy-io/buildbuddy/server/real_environment"
 	"github.com/buildbuddy-io/buildbuddy/server/remote_cache/digest"
 	"github.com/buildbuddy-io/buildbuddy/server/util/alert"
 	"github.com/buildbuddy-io/buildbuddy/server/util/approxlru"
@@ -67,10 +68,10 @@ var (
 	dirDeletionDelay          = flag.Duration("cache.pebble.dir_deletion_delay", time.Hour, "How old directories must be before being eligible for deletion when empty")
 	atimeUpdateThresholdFlag  = flag.Duration("cache.pebble.atime_update_threshold", DefaultAtimeUpdateThreshold, "Don't update atime if it was updated more recently than this")
 	atimeBufferSizeFlag       = flag.Int("cache.pebble.atime_buffer_size", DefaultAtimeBufferSize, "Buffer up to this many atime updates in a channel before dropping atime updates")
-	sampleBufferSize          = flag.Int("cache.pebbles.sample_buffer_size", DefaultSampleBufferSize, "Buffer up to this many samples for eviction sampling")
-	deleteBufferSize          = flag.Int("cache.pebbles.delete_buffer_size", DefaultDeleteBufferSize, "Buffer up to this many samples for eviction eviction")
-	numDeleteWorkers          = flag.Int("cache.pebbles.num_delete_workers", DefaultNumDeleteWorkers, "Number of deletes in parallel")
-	samplesPerBatch           = flag.Int("cache.pebbles.samples_per_batch", DefaultSamplesPerBatch, "How many keys we read forward every time we get a random key.")
+	sampleBufferSize          = flag.Int("cache.pebble.sample_buffer_size", DefaultSampleBufferSize, "Buffer up to this many samples for eviction sampling")
+	deleteBufferSize          = flag.Int("cache.pebble.delete_buffer_size", DefaultDeleteBufferSize, "Buffer up to this many samples for eviction eviction")
+	numDeleteWorkers          = flag.Int("cache.pebble.num_delete_workers", DefaultNumDeleteWorkers, "Number of deletes in parallel")
+	samplesPerBatch           = flag.Int("cache.pebble.samples_per_batch", DefaultSamplesPerBatch, "How many keys we read forward every time we get a random key.")
 	minEvictionAgeFlag        = flag.Duration("cache.pebble.min_eviction_age", DefaultMinEvictionAge, "Don't evict anything unless it's been idle for at least this long")
 	forceCompaction           = flag.Bool("cache.pebble.force_compaction", false, "If set, compact the DB when it's created")
 	forceCalculateMetadata    = flag.Bool("cache.pebble.force_calculate_metadata", false, "If set, partition size and counts will be calculated even if cached information is available.")
@@ -343,7 +344,7 @@ func (m *v4ToV5Migrator) Migrate(val []byte) []byte             { return val }
 
 // Register creates a new PebbleCache from the configured flags and sets it in
 // the provided env.
-func Register(env environment.Env) error {
+func Register(env *real_environment.RealEnv) error {
 	if *rootDirectoryFlag == "" {
 		return nil
 	}
@@ -1048,13 +1049,13 @@ func (p *PebbleCache) copyPartitionData(srcPartitionID, dstPartitionID string) e
 	ctx := context.Background()
 	numKeysCopied := 0
 	lastUpdate := time.Now()
+	fileMetadata := &rfpb.FileMetadata{}
 	for iter.First(); iter.Valid(); iter.Next() {
 		if bytes.HasPrefix(iter.Key(), SystemKeyPrefix) {
 			continue
 		}
 		dstKey := append(dstKeyPrefix, bytes.TrimPrefix(iter.Key(), srcKeyPrefix)...)
 
-		fileMetadata := &rfpb.FileMetadata{}
 		if err := proto.Unmarshal(iter.Value(), fileMetadata); err != nil {
 			return status.UnknownErrorf("Error unmarshalling metadata: %s", err)
 		}
@@ -2534,6 +2535,7 @@ func (e *partitionEvictor) generateSamplesForEviction(quitChan chan struct{}) er
 
 	totalCount := 0
 	shouldCreateNewIter := true
+	fileMetadata := &rfpb.FileMetadata{}
 
 	// Files are kept in random order (because they are keyed by digest), so
 	// instead of doing a new seek for every random sample we will seek once
@@ -2592,7 +2594,6 @@ func (e *partitionEvictor) generateSamplesForEviction(quitChan chan struct{}) er
 			continue
 		}
 
-		fileMetadata := &rfpb.FileMetadata{}
 		err = proto.Unmarshal(iter.Value(), fileMetadata)
 		if err != nil {
 			log.Warningf("[%s] cannot generate sample for eviction, skipping: failed to read proto: %s", e.cacheName, err)

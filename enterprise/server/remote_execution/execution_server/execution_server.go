@@ -21,12 +21,14 @@ import (
 	"github.com/buildbuddy-io/buildbuddy/server/interfaces"
 	"github.com/buildbuddy-io/buildbuddy/server/metrics"
 	"github.com/buildbuddy-io/buildbuddy/server/olapdbconfig"
+	"github.com/buildbuddy-io/buildbuddy/server/real_environment"
 	"github.com/buildbuddy-io/buildbuddy/server/remote_cache/action_cache_server"
 	"github.com/buildbuddy-io/buildbuddy/server/remote_cache/cachetools"
 	"github.com/buildbuddy-io/buildbuddy/server/remote_cache/digest"
 	"github.com/buildbuddy-io/buildbuddy/server/tables"
 	"github.com/buildbuddy-io/buildbuddy/server/util/background"
 	"github.com/buildbuddy-io/buildbuddy/server/util/bazel_request"
+	"github.com/buildbuddy-io/buildbuddy/server/util/db"
 	"github.com/buildbuddy-io/buildbuddy/server/util/log"
 	"github.com/buildbuddy-io/buildbuddy/server/util/perms"
 	"github.com/buildbuddy-io/buildbuddy/server/util/prefix"
@@ -142,7 +144,7 @@ type ExecutionServer struct {
 	enableRedisAvailabilityMonitoring bool
 }
 
-func Register(env environment.Env) error {
+func Register(env *real_environment.RealEnv) error {
 	if !remote_execution_config.RemoteExecutionEnabled() {
 		return nil
 	}
@@ -316,11 +318,11 @@ func (s *ExecutionServer) updateExecution(ctx context.Context, executionID strin
 
 	dbErr := s.env.GetDBHandle().Transaction(ctx, func(tx interfaces.DB) error {
 		var existing tables.Execution
-		if err := tx.GORM("execution_server_get_execution_for_update").Where(
+		if err := tx.GORM(ctx, "execution_server_get_execution_for_update").Where(
 			"execution_id = ?", executionID).First(&existing).Error; err != nil {
 			return err
 		}
-		return tx.GORM("execution_server_update_execution").Model(&existing).Where(
+		return tx.GORM(ctx, "execution_server_update_execution").Model(&existing).Where(
 			"execution_id = ? AND stage != ?", executionID, repb.ExecutionStage_COMPLETED).Updates(execution).Error
 	})
 
@@ -338,7 +340,8 @@ func (s *ExecutionServer) recordExecution(ctx context.Context, executionID strin
 	}
 	var executionPrimaryDB tables.Execution
 
-	if err := s.env.GetDBHandle().DB(ctx).Where("execution_id = ?", executionID).First(&executionPrimaryDB).Error; err != nil {
+	if err := s.env.GetDBHandle().NewQuery(ctx, "execution_server_lookup_execution").Raw(
+		`SELECT * FROM "Executions" WHERE execution_id = ?`, executionID).Take(&executionPrimaryDB); err != nil {
 		return status.InternalErrorf("failed to look up execution %q: %s", executionID, err)
 	}
 	// Always clean up invocationLinks in Collector because we are not retrying
@@ -665,6 +668,8 @@ func (s *ExecutionServer) execute(req *repb.ExecuteRequest, stream streamLike) e
 			if err != nil {
 				return err
 			}
+			tracing.AddStringAttributeToCurrentSpan(ctx, "execution_result", "cached")
+			tracing.AddStringAttributeToCurrentSpan(ctx, "execution_id", executionID)
 			stateChangeFn := operation.GetStateChangeFunc(stream, executionID, adInstanceDigest)
 			if err := stateChangeFn(repb.ExecutionStage_COMPLETED, operation.ExecuteResponseWithCachedResult(actionResult)); err != nil {
 				return err // CHECK (these errors should not happen).
@@ -684,6 +689,8 @@ func (s *ExecutionServer) execute(req *repb.ExecuteRequest, stream streamLike) e
 				ctx = log.EnrichContext(ctx, log.ExecutionIDKey, ee)
 				log.CtxInfof(ctx, "Reusing execution %q for execution request %q for invocation %q", ee, downloadString, invocationID)
 				executionID = ee
+				tracing.AddStringAttributeToCurrentSpan(ctx, "execution_result", "merged")
+				tracing.AddStringAttributeToCurrentSpan(ctx, "execution_id", executionID)
 				metrics.RemoteExecutionMergedActions.With(prometheus.Labels{metrics.GroupID: s.getGroupIDForMetrics(ctx)}).Inc()
 				if err := s.insertInvocationLink(ctx, ee, invocationID, sipb.StoredInvocationLink_MERGED); err != nil {
 					return err
@@ -704,6 +711,8 @@ func (s *ExecutionServer) execute(req *repb.ExecuteRequest, stream streamLike) e
 		ctx = log.EnrichContext(ctx, log.ExecutionIDKey, newExecutionID)
 		executionID = newExecutionID
 		log.CtxInfof(ctx, "Scheduled execution %q for request %q for invocation %q", executionID, downloadString, invocationID)
+		tracing.AddStringAttributeToCurrentSpan(ctx, "execution_result", "merged")
+		tracing.AddStringAttributeToCurrentSpan(ctx, "execution_id", executionID)
 	}
 
 	waitReq := repb.WaitExecutionRequest{
@@ -1136,21 +1145,17 @@ func (s *ExecutionServer) Cancel(ctx context.Context, invocationID string) error
 
 func (s *ExecutionServer) executionIDs(ctx context.Context, invocationID string) ([]string, error) {
 	dbh := s.env.GetDBHandle()
-	rows, err := dbh.DB(ctx).Raw(
+	rq := dbh.NewQuery(ctx, "execution_server_get_executions_for_invocation").Raw(
 		`SELECT execution_id FROM "Executions" WHERE invocation_id = ? AND stage != ?`,
 		invocationID,
-		repb.ExecutionStage_COMPLETED).Rows()
+		repb.ExecutionStage_COMPLETED)
+	ids := make([]string, 0)
+	err := db.ScanEach(rq, func(ctx context.Context, e *tables.Execution) error {
+		ids = append(ids, e.ExecutionID)
+		return nil
+	})
 	if err != nil {
 		return nil, err
-	}
-	defer rows.Close()
-	ids := make([]string, 0)
-	for rows.Next() {
-		e := &tables.Execution{}
-		if err := dbh.DB(ctx).ScanRows(rows, e); err != nil {
-			return nil, err
-		}
-		ids = append(ids, e.ExecutionID)
 	}
 	return ids, nil
 }

@@ -13,6 +13,7 @@ import (
 	"github.com/buildbuddy-io/buildbuddy/server/util/clickhouse/schema"
 	"github.com/buildbuddy-io/buildbuddy/server/util/role"
 	"github.com/golang-jwt/jwt"
+	"github.com/hashicorp/serf/serf"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/protobuf/proto"
 	"gorm.io/gorm"
@@ -318,7 +319,8 @@ type DBQuery interface {
 	// Create inserts a new row using the passed GORM-annotated struct.
 	Create(val interface{}) error
 	// Update updates an existing row using the primary key of the given
-	// GORM-annotated struct.
+	// GORM-annotated struct. Returns gorm.ErrRecordNotFound if a matching
+	// row does not exist.
 	Update(val interface{}) error
 	// Raw prepares a raw query.
 	Raw(sql string, values ...interface{}) DBRawQuery
@@ -331,7 +333,7 @@ type DB interface {
 
 	// GORM returns a raw handle to the GORM API. New code should prefer to
 	// avoid using this.
-	GORM(name string) *gorm.DB
+	GORM(ctx context.Context, name string) *gorm.DB
 
 	NowFunc() time.Time
 }
@@ -378,7 +380,6 @@ type DBHandle interface {
 
 	DB(ctx context.Context) *gorm.DB
 	RawWithOptions(ctx context.Context, opts DBOptions, sql string, values ...interface{}) *gorm.DB
-	ReadRow(ctx context.Context, out interface{}, where ...interface{}) error
 	UTCMonthFromUsecTimestamp(fieldName string) string
 	DateFromUsecTimestamp(fieldName string, timezoneOffsetMinutes int32) string
 	SelectForUpdateModifier() string
@@ -1430,4 +1431,22 @@ type ServerNotificationService interface {
 type SCIMService interface {
 	Users() http.Handler
 	Groups() http.Handler
+}
+
+type GossipListener interface {
+	OnEvent(eventType serf.EventType, event serf.Event)
+}
+
+type GossipService interface {
+	ListenAddr() string
+	JoinList() []string
+	AddListener(listener GossipListener)
+	LocalMember() serf.Member
+	Members() []serf.Member
+	SetTags(tags map[string]string) error
+	SendUserEvent(name string, payload []byte, coalesce bool) error
+	Query(name string, payload []byte, params *serf.QueryParam) (*serf.QueryResponse, error)
+	Statusz(ctx context.Context) string
+	Leave() error
+	Shutdown() error
 }

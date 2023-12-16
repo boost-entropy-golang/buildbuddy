@@ -14,6 +14,7 @@ import (
 	"github.com/buildbuddy-io/buildbuddy/server/eventlog"
 	"github.com/buildbuddy-io/buildbuddy/server/http/protolet"
 	"github.com/buildbuddy-io/buildbuddy/server/interfaces"
+	"github.com/buildbuddy-io/buildbuddy/server/real_environment"
 	"github.com/buildbuddy-io/buildbuddy/server/remote_cache/digest"
 	"github.com/buildbuddy-io/buildbuddy/server/tables"
 	"github.com/buildbuddy-io/buildbuddy/server/util/capabilities"
@@ -47,7 +48,7 @@ type APIServer struct {
 	env environment.Env
 }
 
-func Register(env environment.Env) error {
+func Register(env *real_environment.RealEnv) error {
 	if *enableAPI {
 		env.SetAPIService(NewAPIServer(env))
 	}
@@ -105,7 +106,7 @@ func (s *APIServer) GetInvocation(ctx context.Context, req *apipb.GetInvocationR
 	rq := s.env.GetDBHandle().NewQuery(ctx, "api_server_get_invocations").Raw(queryStr, args...)
 
 	invocations := []*apipb.Invocation{}
-	err = db.ScanRows(rq, func(ctx context.Context, ti *tables.Invocation) error {
+	err = db.ScanEach(rq, func(ctx context.Context, ti *tables.Invocation) error {
 		apiInvocation := &apipb.Invocation{
 			Id: &apipb.Invocation_Id{
 				InvocationId: ti.InvocationID,
