@@ -51,6 +51,7 @@ import (
 	"github.com/buildbuddy-io/buildbuddy/server/util/status"
 	"github.com/buildbuddy-io/buildbuddy/server/util/tracing"
 	"github.com/buildbuddy-io/buildbuddy/server/util/usageutil"
+	"github.com/buildbuddy-io/buildbuddy/server/util/vtprotocodec"
 
 	"google.golang.org/grpc"
 
@@ -164,7 +165,7 @@ func GetConfiguredEnvironmentOrDie(healthChecker *healthcheck.HealthChecker, app
 	if err != nil {
 		log.Fatalf("Error configuring database: %s", err)
 	}
-	log.Infof("Successfully configured %s database.", dbHandle.DB(context.Background()).Dialector.Name())
+	log.Infof("Successfully configured %s database.", dbHandle.GORM(context.Background(), "dialector").Dialector.Name())
 	realEnv.SetDBHandle(dbHandle)
 	realEnv.SetInvocationDB(invocationdb.NewInvocationDB(realEnv, dbHandle))
 
@@ -341,6 +342,9 @@ func StartAndRunServices(env *real_environment.RealEnv) {
 	if err := capabilities_server.Register(env); err != nil {
 		log.Fatalf("%v", err)
 	}
+
+	// Register the codec for all RPC servers and clients.
+	vtprotocodec.Register()
 
 	if err := grpc_server.RegisterInternalGRPCServer(env, registerInternalGRPCServices); err != nil {
 		log.Fatalf("%v", err)

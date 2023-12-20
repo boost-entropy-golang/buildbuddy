@@ -22,18 +22,22 @@ type Handle struct {
 	invIDs              sync.Map // map of invocationID => struct{}
 }
 
+func (h *Handle) NewQuery(ctx context.Context, name string) interfaces.DBQuery {
+	return nil
+}
+
+func (h *Handle) GORM(ctx context.Context, name string) *gorm.DB {
+	return nil
+}
+
+func (h *Handle) NowFunc() time.Time {
+	return time.Time{}
+}
+
 func NewHandle() *Handle {
 	return &Handle{
 		executionIDsByInvID: sync.Map{},
 	}
-}
-
-func (h *Handle) DB(ctx context.Context) *gorm.DB {
-	return nil
-}
-
-func (h *Handle) RawWithOptions(ctx context.Context, opts interfaces.OLAPDBOptions, sql string, values ...interface{}) *gorm.DB {
-	return nil
 }
 
 func (h *Handle) BucketFromUsecTimestamp(fieldName string, loc *time.Location, interval string) (string, []interface{}) {

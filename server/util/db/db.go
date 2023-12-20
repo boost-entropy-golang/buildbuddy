@@ -331,7 +331,6 @@ type DBHandle struct {
 type Options struct {
 	readOnly        bool
 	allowStaleReads bool
-	queryName       string
 }
 
 func Opts() interfaces.DBOptions {
@@ -344,22 +343,12 @@ func (o *Options) WithStaleReads() interfaces.DBOptions {
 	return o
 }
 
-// WithQueryName specifies the query label to use in exported metrics.
-func (o *Options) WithQueryName(queryName string) interfaces.DBOptions {
-	o.queryName = queryName
-	return o
-}
-
 func (o *Options) ReadOnly() bool {
 	return o.readOnly
 }
 
 func (o *Options) AllowStaleReads() bool {
 	return o.allowStaleReads
-}
-
-func (o *Options) QueryName() string {
-	return o.queryName
 }
 
 type DB = gorm.DB
@@ -373,15 +362,7 @@ func (dbh *DBHandle) gormHandleForOpts(ctx context.Context, opts interfaces.DBOp
 	if opts.ReadOnly() && opts.AllowStaleReads() && dbh.readReplicaDB != nil {
 		db = dbh.readReplicaDB
 	}
-
-	if opts.QueryName() != "" {
-		db = db.Set(gormQueryNameKey, opts.QueryName())
-	}
 	return db
-}
-
-func (dbh *DBHandle) RawWithOptions(ctx context.Context, opts interfaces.DBOptions, sql string, values ...interface{}) *gorm.DB {
-	return dbh.gormHandleForOpts(ctx, opts).Raw(sql, values...)
 }
 
 func IsRecordNotFound(err error) bool {
@@ -1021,6 +1002,10 @@ func (r *rawQuery) Scan(dest interface{}) error {
 	return r.db.Raw(r.sql, r.values...).Scan(dest).Error
 }
 
+func (r *rawQuery) DB() *gorm.DB {
+	return r.db
+}
+
 // TODO(vadim): check if there are any uses cases where ScanEach can't be used directly
 func (r *rawQuery) IterateRaw(fn func(ctx context.Context, row *sql.Rows) error) error {
 	rows, err := r.db.Raw(r.sql, r.values...).Rows()
@@ -1085,6 +1070,10 @@ func (dbh *DBHandle) NewQuery(ctx context.Context, name string) interfaces.DBQue
 	return &query{ctx: ctx, name: name, db: dbh.db}
 }
 
+func (dbh *DBHandle) NewQueryWithOpts(ctx context.Context, name string, opts interfaces.DBOptions) interfaces.DBQuery {
+	return &query{ctx: ctx, name: name, db: dbh.gormHandleForOpts(ctx, opts)}
+}
+
 func (dbh *DBHandle) Transaction(ctx context.Context, txn interfaces.NewTxRunner) error {
 	return dbh.DB(ctx).Transaction(func(tx *gorm.DB) error {
 		return txn(&transaction{tx, ctx})
@@ -1107,6 +1096,10 @@ func TableSchema(db *DB, model any) (*schema.Schema, error) {
 	return stmt.Schema, nil
 }
 
+type gormGetter interface {
+	DB() *gorm.DB
+}
+
 // ScanEach executes the given query and iterates over the result,
 // automatically scanning each row into a struct of the specified type.
 //
@@ -1119,7 +1112,7 @@ func TableSchema(db *DB, model any) (*schema.Schema, error) {
 func ScanEach[T any](rq interfaces.DBRawQuery, fn func(ctx context.Context, val *T) error) error {
 	return rq.IterateRaw(func(ctx context.Context, row *sql.Rows) error {
 		var val T
-		if err := rq.(*rawQuery).db.ScanRows(row, &val); err != nil {
+		if err := rq.(gormGetter).DB().ScanRows(row, &val); err != nil {
 			return err
 		}
 		if err := fn(ctx, &val); err != nil {
@@ -1141,7 +1134,7 @@ func ScanAll[T any](rq interfaces.DBRawQuery, t *T) ([]*T, error) {
 	var vals []*T
 	err := rq.IterateRaw(func(ctx context.Context, row *sql.Rows) error {
 		var val T
-		if err := rq.(*rawQuery).db.ScanRows(row, &val); err != nil {
+		if err := rq.(gormGetter).DB().ScanRows(row, &val); err != nil {
 			return err
 		}
 		vals = append(vals, &val)
