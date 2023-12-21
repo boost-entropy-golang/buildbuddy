@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rsa"
 	"crypto/x509"
+	"encoding/json"
 	"encoding/pem"
 	"fmt"
 	"io"
@@ -12,6 +13,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/buildbuddy-io/buildbuddy/enterprise/server/webhooks/webhook_data"
@@ -34,6 +36,7 @@ import (
 	"github.com/golang-jwt/jwt"
 	"github.com/google/go-github/v43/github"
 	"golang.org/x/oauth2"
+	"golang.org/x/sync/errgroup"
 
 	gh_webhooks "github.com/buildbuddy-io/buildbuddy/enterprise/server/webhooks/github"
 	ghpb "github.com/buildbuddy-io/buildbuddy/proto/github"
@@ -1341,4 +1344,222 @@ func (a *GitHubApp) CreateGithubRef(ctx context.Context, req *ghpb.CreateGithubR
 	}
 
 	return &ghpb.CreateGithubRefResponse{}, nil
+}
+
+func (a *GitHubApp) GetGithubPullRequest(ctx context.Context, req *ghpb.GetGithubPullRequestRequest) (*ghpb.GetGithubPullRequestResponse, error) {
+	client, err := a.getGithubClient(ctx)
+	if err != nil {
+		return nil, err
+	}
+	incoming, outgoing, user, err := a.getIncomingAndOutgoingPRs(ctx, client)
+	if err != nil {
+		return nil, err
+	}
+	allIssues := append(outgoing.Issues, incoming.Issues...)
+	prs, err := a.populatePRMetadata(ctx, client, allIssues, user)
+	if err != nil {
+		return nil, err
+	}
+	resp := &ghpb.GetGithubPullRequestResponse{
+		Outgoing: []*ghpb.PullRequest{},
+		Incoming: []*ghpb.PullRequest{},
+	}
+	for _, i := range outgoing.Issues {
+		resp.Outgoing = append(resp.Outgoing, prs[i.GetNodeID()])
+	}
+	for _, i := range incoming.Issues {
+		resp.Incoming = append(resp.Incoming, prs[i.GetNodeID()])
+	}
+	return resp, nil
+}
+
+func (a *GitHubApp) getIncomingAndOutgoingPRs(ctx context.Context, client *github.Client) (*github.IssuesSearchResult, *github.IssuesSearchResult, *github.User, error) {
+	var incoming *github.IssuesSearchResult
+	var outgoing *github.IssuesSearchResult
+	var user *github.User
+	eg, gCtx := errgroup.WithContext(ctx)
+	eg.Go(func() error {
+		r, err := a.cachedSearch(gCtx, client, "is:open is:pr user-review-requested:@me archived:false draft:false")
+		if err != nil {
+			return err
+		}
+		incoming = r
+		return nil
+	})
+	eg.Go(func() error {
+		r, err := a.cachedSearch(gCtx, client, "is:open is:pr author:@me -review:none archived:false draft:false")
+		if err != nil {
+			return err
+		}
+		outgoing = r
+		return nil
+	})
+	eg.Go(func() error {
+		u, err := a.cachedUser(gCtx, client)
+		if err != nil {
+			return err
+		}
+		user = u
+		return nil
+	})
+	if err := eg.Wait(); err != nil {
+		return nil, nil, nil, err
+	}
+	return incoming, outgoing, user, nil
+}
+
+func (a *GitHubApp) populatePRMetadata(ctx context.Context, client *github.Client, prIssues []*github.Issue, currentUser *github.User) (map[string]*ghpb.PullRequest, error) {
+	prsMu := &sync.Mutex{}
+	prs := make(map[string]*ghpb.PullRequest, len(prIssues))
+	eg, gCtx := errgroup.WithContext(ctx)
+	for _, i := range prIssues {
+		i := i
+		prsMu.Lock()
+		prs[i.GetNodeID()] = issueToPullRequestProto(i)
+		prsMu.Unlock()
+		urlParts := strings.Split(*i.URL, "/")
+		if len(urlParts) < 6 {
+			return nil, status.FailedPreconditionErrorf("invalid github url: %q", *i.URL)
+		}
+		eg.Go(func() error {
+			pr, err := a.cachedPullRequests(gCtx, client, urlParts[4], urlParts[5], i.GetNumber(), i.GetUpdatedAt())
+			if err != nil {
+				return err
+			}
+			prsMu.Lock()
+			p := prs[i.GetNodeID()]
+			p.Additions = int64(pr.GetAdditions())
+			p.Deletions = int64(pr.GetDeletions())
+			p.ChangedFiles = int64(pr.GetChangedFiles())
+			for _, r := range pr.RequestedReviewers {
+				review, ok := prs[i.GetNodeID()].Reviews[r.GetLogin()]
+				if !ok {
+					review = &ghpb.Review{}
+					prs[i.GetNodeID()].Reviews[r.GetLogin()] = review
+				}
+				review.Requested = true
+				if r.GetLogin() == currentUser.GetLogin() {
+					review.IsCurrentUser = true
+				}
+			}
+			prsMu.Unlock()
+			return nil
+		})
+		eg.Go(func() error {
+			reviews, err := a.cachedReviews(gCtx, client, urlParts[4], urlParts[5], i.GetNumber(), i.GetUpdatedAt())
+			if err != nil {
+				return err
+			}
+			for _, r := range *reviews {
+				prsMu.Lock()
+				review, ok := prs[i.GetNodeID()].Reviews[r.GetUser().GetLogin()]
+				if !ok {
+					review = &ghpb.Review{}
+					prs[i.GetNodeID()].Reviews[r.GetUser().GetLogin()] = review
+				}
+				review.Status = strings.ToLower(r.GetState())
+				review.SubmittedAtUsec = r.GetSubmittedAt().UnixMicro()
+				if r.GetUser().GetLogin() == currentUser.GetLogin() {
+					review.IsCurrentUser = true
+				}
+				prsMu.Unlock()
+			}
+			return nil
+		})
+	}
+	if err := eg.Wait(); err != nil {
+		return nil, err
+	}
+	return prs, nil
+}
+
+func (a *GitHubApp) cachedUser(ctx context.Context, client *github.Client) (*github.User, error) {
+	key := "user"
+	pr, err := a.cached(ctx, key, &github.User{}, time.Hour*24, func() (any, any, error) {
+		return client.Users.Get(ctx, "")
+	})
+	if err != nil {
+		return nil, err
+	}
+	return pr.(*github.User), nil
+}
+
+func (a *GitHubApp) cachedSearch(ctx context.Context, client *github.Client, query string) (*github.IssuesSearchResult, error) {
+	key := fmt.Sprintf("search/%s", query)
+	pr, err := a.cached(ctx, key, &github.IssuesSearchResult{}, time.Second*5, func() (any, any, error) {
+		return client.Search.Issues(ctx, query, &github.SearchOptions{ListOptions: github.ListOptions{PerPage: 100}})
+	})
+	if err != nil {
+		return nil, err
+	}
+	return pr.(*github.IssuesSearchResult), nil
+}
+
+func (a *GitHubApp) cachedPullRequests(ctx context.Context, client *github.Client, owner, repo string, number int, updatedAt time.Time) (*github.PullRequest, error) {
+	key := fmt.Sprintf("pr/%s/%s/%d/%d", owner, repo, number, updatedAt.Unix())
+
+	pr, err := a.cached(ctx, key, &github.PullRequest{}, time.Hour*24, func() (any, any, error) {
+		return client.PullRequests.Get(ctx, owner, repo, number)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return pr.(*github.PullRequest), nil
+}
+
+func (a *GitHubApp) cachedReviews(ctx context.Context, client *github.Client, owner, repo string, number int, updatedAt time.Time) (*[]*github.PullRequestReview, error) {
+	key := fmt.Sprintf("pr-reviews/%s/%s/%d/%d", owner, repo, number, updatedAt.Unix())
+	pr, err := a.cached(ctx, key, &[]*github.PullRequestReview{}, time.Hour*24, func() (any, any, error) {
+		rev, res, err := client.PullRequests.ListReviews(ctx, owner, repo, number, &github.ListOptions{PerPage: 100})
+		return &rev, res, err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return pr.(*[]*github.PullRequestReview), nil
+}
+
+type fetchFunction func() (any, any, error)
+
+func (a *GitHubApp) cached(ctx context.Context, key string, v any, exp time.Duration, fetch fetchFunction) (any, error) {
+	if a.env.GetDefaultRedisClient() == nil {
+		pr, _, err := fetch()
+		return pr, err
+	}
+	u, err := a.env.GetAuthenticator().AuthenticatedUser(ctx)
+	if err != nil {
+		return nil, err
+	}
+	key = fmt.Sprintf("githubapp/0/%s/%s", u.GetUserID(), key)
+	if cachedVal, err := a.env.GetDefaultRedisClient().Get(ctx, key).Result(); err == nil {
+		if err := json.Unmarshal([]byte(cachedVal), &v); err == nil {
+			log.Debugf("got cached github result for key: %s", key)
+			return v, nil
+		} else {
+			log.Errorf("error unmarshalling cached github redis result for key %s: %s", key, err)
+		}
+	}
+	log.Debugf("making github request for key: %s", key)
+	pr, _, err := fetch()
+	if err != nil {
+		return nil, err
+	}
+	b, err := json.Marshal(pr)
+	if err != nil {
+		return nil, err
+	}
+	a.env.GetDefaultRedisClient().Set(ctx, key, string(b), exp)
+	return pr, nil
+}
+
+func issueToPullRequestProto(i *github.Issue) *ghpb.PullRequest {
+	return &ghpb.PullRequest{
+		Number:        uint64(i.GetNumber()),
+		Title:         i.GetTitle(),
+		Body:          i.GetBody(),
+		Author:        i.GetUser().GetLogin(),
+		Url:           i.GetHTMLURL(),
+		UpdatedAtUsec: i.GetUpdatedAt().UnixMicro(),
+		Reviews:       map[string]*ghpb.Review{},
+	}
 }
