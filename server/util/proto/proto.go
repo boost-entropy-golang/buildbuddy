@@ -1,12 +1,9 @@
 package proto
 
 import (
-	"fmt"
-
 	gproto "google.golang.org/protobuf/proto"
 )
 
-var Clone = gproto.Clone
 var Size = gproto.Size
 var Merge = gproto.Merge
 var Equal = gproto.Equal
@@ -25,30 +22,30 @@ type MarshalOptions = gproto.MarshalOptions
 type vtprotoMessage interface {
 	MarshalVT() ([]byte, error)
 	UnmarshalVT([]byte) error
+	CloneMessageVT() Message
 }
 
-func Marshal(v interface{}) ([]byte, error) {
+func Marshal(v Message) ([]byte, error) {
 	vt, ok := v.(vtprotoMessage)
 	if ok {
 		return vt.MarshalVT()
 	}
-
-	msg, ok := v.(Message)
-	if !ok {
-		return nil, fmt.Errorf("failed to marshal, message is %T, want proto.Message", v)
-	}
-	return MarshalOld(msg)
+	return MarshalOld(v)
 }
 
-func Unmarshal(b []byte, v interface{}) error {
+func Unmarshal(b []byte, v Message) error {
 	vt, ok := v.(vtprotoMessage)
 	if ok {
 		return vt.UnmarshalVT(b)
 	}
 
-	msg, ok := v.(Message)
-	if !ok {
-		return fmt.Errorf("failed to unmarshal, message is %T, want proto.Message", v)
+	return UnmarshalOld(b, v)
+}
+
+func Clone(v Message) Message {
+	vt, ok := v.(vtprotoMessage)
+	if ok {
+		return vt.CloneMessageVT()
 	}
-	return UnmarshalOld(b, msg)
+	return gproto.Clone(v)
 }

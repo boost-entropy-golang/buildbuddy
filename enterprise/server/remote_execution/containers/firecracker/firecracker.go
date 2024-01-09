@@ -48,7 +48,6 @@ import (
 	"github.com/buildbuddy-io/buildbuddy/server/util/log"
 	"github.com/buildbuddy-io/buildbuddy/server/util/networking"
 	"github.com/buildbuddy-io/buildbuddy/server/util/perms"
-	"github.com/buildbuddy-io/buildbuddy/server/util/proto"
 	"github.com/buildbuddy-io/buildbuddy/server/util/status"
 	"github.com/buildbuddy-io/buildbuddy/server/util/tracing"
 	"github.com/firecracker-microvm/firecracker-go-sdk/client/operations"
@@ -103,7 +102,7 @@ const (
 	//
 	// NOTE: this is part of the snapshot cache key, so bumping this version
 	// will make existing cached snapshots unusable.
-	GuestAPIVersion = "5"
+	GuestAPIVersion = "6"
 
 	// How long to wait when dialing the vmexec server inside the VM.
 	vSocketDialTimeout = 60 * time.Second
@@ -137,6 +136,8 @@ const (
 	// Size of machine log tail to retain in memory so that we can parse logs for
 	// errors.
 	vmLogTailBufSize = 1024 * 12 // 12 KB
+	// File name of the VM logs in CommandResult.AuxiliaryLogs
+	vmLogTailFileName = "vm_log_tail.txt"
 	// Log prefix used by goinit when logging fatal errors.
 	fatalInitLogPrefix = "die: "
 
@@ -431,6 +432,10 @@ func (p *Provider) New(ctx context.Context, props *platform.Properties, task *re
 			InitDockerd:       props.InitDockerd,
 			EnableDockerdTcp:  props.EnableDockerdTCP,
 		}
+	} else if *snaputil.EnableLocalSnapshotSharing {
+		// When local snapshot sharing is enabled, reject old-style persisted
+		// snapshots, since these aren't shareable (i.e. COW-formatted).
+		return nil, status.UnavailableError("ignoring persisted snapshot; this functionality has been replaced by local snapshot sharing")
 	} else {
 		vmConfig = state.GetContainerState().GetFirecrackerState().GetVmConfiguration()
 	}
@@ -553,7 +558,7 @@ func NewContainer(ctx context.Context, env environment.Env, task *repb.Execution
 	}
 
 	c := &FirecrackerContainer{
-		vmConfig:           proto.Clone(opts.VMConfiguration).(*fcpb.VMConfiguration),
+		vmConfig:           opts.VMConfiguration.CloneVT(),
 		executorConfig:     opts.ExecutorConfig,
 		jailerRoot:         opts.ExecutorConfig.JailerRoot,
 		dockerClient:       opts.DockerClient,
@@ -771,7 +776,7 @@ func alignToMultiple(n int64, multiple int64) int64 {
 }
 
 func (c *FirecrackerContainer) SnapshotKeySet() *fcpb.SnapshotKeySet {
-	return proto.Clone(c.snapshotKeySet).(*fcpb.SnapshotKeySet)
+	return c.snapshotKeySet.CloneVT()
 }
 
 // State returns the container state to be persisted to disk so that this
@@ -989,6 +994,10 @@ func (c *FirecrackerContainer) LoadSnapshot(ctx context.Context) error {
 		return status.WrapError(err, "failed to get snapshot")
 	}
 	c.snapshot = snap
+
+	if err := os.MkdirAll(c.getChroot(), 0777); err != nil {
+		return err
+	}
 
 	// Use vmCtx for COWs since IO may be done outside of the task ctx.
 	unpacked, err := c.loader.UnpackSnapshot(vmCtx, snap, c.getChroot())
@@ -1331,6 +1340,9 @@ func (c *FirecrackerContainer) getConfig(ctx context.Context, rootFS, containerF
 	}
 	if *EnableRootfs {
 		bootArgs = "-enable_rootfs " + bootArgs
+	}
+	if c.fsLayout != nil {
+		bootArgs = "-enable_vfs " + bootArgs
 	}
 	cgroupVersion, err := getCgroupVersion()
 	if err != nil {
@@ -1695,6 +1707,9 @@ func (c *FirecrackerContainer) setupVBDMounts(ctx context.Context) error {
 }
 
 func (c *FirecrackerContainer) setupVFSServer(ctx context.Context) error {
+	if c.fsLayout == nil {
+		return nil
+	}
 	if c.vfsServer != nil {
 		return nil
 	}
@@ -2078,6 +2093,12 @@ func (c *FirecrackerContainer) Exec(ctx context.Context, cmd *repb.Command, stdi
 
 	result := &interfaces.CommandResult{ExitCode: commandutil.NoExitCode}
 	defer func() {
+		// Attach VM logs to the result
+		if result.AuxiliaryLogs == nil {
+			result.AuxiliaryLogs = map[string][]byte{}
+		}
+		result.AuxiliaryLogs[vmLogTailFileName] = c.vmLog.Tail()
+
 		execDuration := time.Since(start)
 		log.CtxDebugf(ctx, "Exec took %s", execDuration)
 

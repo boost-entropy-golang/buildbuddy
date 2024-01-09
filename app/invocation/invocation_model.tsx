@@ -19,6 +19,8 @@ import { durationToMillisWithFallback, timestampToDateWithFallback } from "../ut
 import rpcService from "../service/rpc_service";
 import capabilities from "../capabilities/capabilities";
 import { exitCode } from "../util/exit_codes";
+import { resourceNameToString } from "../util/cache";
+import { resource } from "../../proto/resource_ts_proto";
 
 export const CI_RUNNER_ROLE = "CI_RUNNER";
 export const HOSTED_BAZEL_ROLE = "HOSTED_BAZEL";
@@ -213,10 +215,13 @@ export default class InvocationModel {
     for (let log of this.buildToolLogs?.log || []) {
       this.toolLogMap.set(log.name, new TextDecoder().decode(log.contents || new Uint8Array()));
     }
-    for (let commandLine of this.structuredCommandLine) {
-      if (commandLine.commandLineLabel != "canonical") {
-        continue;
-      }
+    // Treat "canonical" command line as the source of truth if present,
+    // otherwise just use any command line (e.g. at the time of writing, for
+    // workflows we only send "original")
+    let commandLine =
+      this.structuredCommandLine.find((commandLine) => commandLine.commandLineLabel === "canonical") ??
+      this.structuredCommandLine[0];
+    if (commandLine) {
       for (let section of commandLine.sections || []) {
         for (let option of section.optionList?.option || []) {
           this.optionsMap.set(option.optionName, option.optionValue);
@@ -368,43 +373,79 @@ export default class InvocationModel {
     return "Cache on";
   }
 
-  getCacheAddress() {
+  /**
+   * Returns the hostname or hostname:port of the cache address used as the
+   * remote cache target for this invocation.
+   */
+  private getCacheAddress(): string | undefined {
     const orderedOptions = ["remote_cache", "remote_executor", "cache_backend", "rbe_backend"];
-    let address = "";
+
     for (const optionName of orderedOptions) {
       const option = this.optionsMap.get(optionName);
       if (!option) continue;
+      return option.replace("grpc://", "").replace("grpcs://", "");
+    }
 
-      address = option.replace("grpc://", "").replace("grpcs://", "");
-      break;
-    }
-    if (this.optionsMap.get("remote_instance_name")) {
-      address = address + "/" + this.optionsMap.get("remote_instance_name");
-    }
-    return address;
+    return undefined;
   }
 
   getRemoteInstanceName() {
     return this.optionsMap.get("remote_instance_name") ?? "";
   }
 
+  getCompressor() {
+    if (this.isCacheCompressionEnabled()) {
+      return build.bazel.remote.execution.v2.Compressor.Value.ZSTD;
+    }
+    return build.bazel.remote.execution.v2.Compressor.Value.IDENTITY;
+  }
+
   getDigestFunction() {
     const digestFnName = this.optionsMap.get("digest_function");
     if (!digestFnName) {
-      return undefined;
+      return build.bazel.remote.execution.v2.DigestFunction.Value.SHA256;
     }
     const digestFnEnum =
       build.bazel.remote.execution.v2.DigestFunction.Value[
         digestFnName as keyof typeof build.bazel.remote.execution.v2.DigestFunction.Value
       ];
-    return digestFnEnum || undefined;
+    return digestFnEnum || build.bazel.remote.execution.v2.DigestFunction.Value.SHA256;
   }
 
-  getDigestFunctionDir() {
-    if (this.optionsMap.get("digest_function")?.toLowerCase() == "blake3") {
-      return "blake3/";
-    }
-    return "";
+  /**
+   * Returns the base resource name under which all artifacts associated with
+   * the invocation are stored.
+   */
+  private getCacheBaseResourceName(): resource.IResourceName {
+    return {
+      instanceName: this.getRemoteInstanceName(),
+      compressor: this.getCompressor(),
+      digestFunction: this.getDigestFunction(),
+    };
+  }
+
+  /**
+   * Returns a URL pointing to a CAS artifact associated with this invocation.
+   * The returned URL can be used with RpcService to fetch the blob.
+   */
+  getBytestreamURL(digest: build.bazel.remote.execution.v2.IDigest): string {
+    return resourceNameToString(this.getCacheAddress() ?? "", {
+      ...this.getCacheBaseResourceName(),
+      cacheType: resource.CacheType.CAS,
+      digest: new build.bazel.remote.execution.v2.Digest(digest),
+    });
+  }
+
+  /**
+   * Returns a URL pointing to an AC artifact associated with this invocation.
+   * The returned URL can be used with RpcService to fetch the ActionResult.
+   */
+  getActionCacheURL(digest: build.bazel.remote.execution.v2.IDigest): string {
+    return resourceNameToString(this.getCacheAddress() ?? "", {
+      ...this.getCacheBaseResourceName(),
+      cacheType: resource.CacheType.AC,
+      digest: new build.bazel.remote.execution.v2.Digest(digest),
+    });
   }
 
   getIsRBEEnabled() {

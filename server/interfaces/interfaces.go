@@ -493,6 +493,13 @@ type UserDB interface {
 	// a UserToken given the provided context.
 	GetUser(ctx context.Context) (*tables.User, error)
 	GetUserByID(ctx context.Context, id string) (*tables.User, error)
+	// GetUserByEmail lookups a user with the given e-mail address within the
+	// currently authenticated group.
+	//
+	// An error will be returned if there are multiple users with the same
+	// e-mail address. Normally this should not be the case, but it can occur
+	// if a user transitions between auth providers (e.g. oidc to saml).
+	GetUserByEmail(ctx context.Context, email string) (*tables.User, error)
 	// GetImpersonatedUser will return the authenticated user's information
 	// with a single group membership corresponding to the group they are trying
 	// to impersonate. It requires that the authenticated user has impersonation
@@ -646,6 +653,7 @@ type GitHubApp interface {
 	UpdateGithubRef(ctx context.Context, req *ghpb.UpdateGithubRefRequest) (*ghpb.UpdateGithubRefResponse, error)
 	CreateGithubRef(ctx context.Context, req *ghpb.CreateGithubRefRequest) (*ghpb.CreateGithubRefResponse, error)
 	GetGithubPullRequest(ctx context.Context, req *ghpb.GetGithubPullRequestRequest) (*ghpb.GetGithubPullRequestResponse, error)
+	GetGithubPullRequestDetails(ctx context.Context, req *ghpb.GetGithubPullRequestDetailsRequest) (*ghpb.GetGithubPullRequestDetailsResponse, error)
 }
 
 type RunnerService interface {
@@ -890,11 +898,11 @@ type Runner interface {
 	// Run runs the task that is currently assigned to the runner.
 	Run(ctx context.Context) *CommandResult
 
-	// UploadOutputs uploads any output files associated with the task assigned to
-	// the runner, as well as the result of the run.
+	// UploadOutputs uploads any output files and auxiliary logs associated with
+	// the task assigned to the runner, as well as the result of the run.
 	//
 	// It populates the upload stat fields in the given IOStats.
-	UploadOutputs(ctx context.Context, ioStats *repb.IOStats, ar *repb.ActionResult, cr *CommandResult) error
+	UploadOutputs(ctx context.Context, ioStats *repb.IOStats, executeResponse *repb.ExecuteResponse, cr *CommandResult) error
 
 	// GetIsolationType returns the runner's effective isolation type as a
 	// string, such as "none" or "podman".
@@ -975,6 +983,9 @@ type CommandResult struct {
 	Stdout []byte
 	// Stderr from the command. This may contain data even if there was an Error.
 	Stderr []byte
+	// AuxiliaryLogs contain extra logs associated with the task that may be
+	// useful to present to the user.
+	AuxiliaryLogs map[string][]byte
 
 	// ExitCode is one of the following:
 	// * The exit code returned by the executed command

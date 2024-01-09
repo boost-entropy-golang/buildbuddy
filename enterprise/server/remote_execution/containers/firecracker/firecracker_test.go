@@ -139,8 +139,8 @@ func TestGuestAPIVersion(t *testing.T) {
 	// Note that if you go with option 1, ALL VM snapshots will be invalidated
 	// which will negatively affect customer experience. Be careful!
 	const (
-		expectedHash    = "dba052af79775a1d586dfcd32c4b841a4ccb363139bf8469c5706a66d91700f4"
-		expectedVersion = "5"
+		expectedHash    = "7796aefdcbcda98399a962d0a3f9f2909e39dba10f5cf2e6050f960cf021bb9e"
+		expectedVersion = "6"
 	)
 	assert.Equal(t, expectedHash, firecracker.GuestAPIHash)
 	assert.Equal(t, expectedVersion, firecracker.GuestAPIVersion)
@@ -228,7 +228,7 @@ func getTestEnv(ctx context.Context, t *testing.T, opts envOpts) *testenv.TestEn
 	if err != nil {
 		t.Error(err)
 	}
-	grpcServer, runFunc := testenv.LocalGRPCServer(env)
+	grpcServer, runFunc := testenv.RegisterLocalGRPCServer(env)
 	repb.RegisterContentAddressableStorageServer(grpcServer, casServer)
 	repb.RegisterActionCacheServer(grpcServer, actionCacheServer)
 	bspb.RegisterByteStreamServer(grpcServer, byteStreamServer)
@@ -329,8 +329,8 @@ func TestFirecrackerRunSimple(t *testing.T) {
 	if res.Error != nil {
 		t.Fatal(res.Error)
 	}
-	res.UsageStats = nil
-	assert.Equal(t, expectedResult, res)
+
+	assertCommandResult(t, expectedResult, res)
 }
 
 func TestFirecrackerLifecycle(t *testing.T) {
@@ -393,8 +393,7 @@ func TestFirecrackerLifecycle(t *testing.T) {
 	if res.Error != nil {
 		t.Fatal(res.Error)
 	}
-	res.UsageStats = nil
-	assert.Equal(t, expectedResult, res)
+	assertCommandResult(t, expectedResult, res)
 }
 
 func TestFirecrackerSnapshotAndResume(t *testing.T) {
@@ -1016,9 +1015,7 @@ func TestFirecrackerComplexFileMapping(t *testing.T) {
 			"total scratch disk size")
 	}
 
-	res.UsageStats = nil
-
-	assert.Equal(t, expectedResult, res)
+	assertCommandResult(t, expectedResult, res)
 
 	for _, fullPath := range files {
 		if exists, err := disk.FileExists(ctx, fullPath); err != nil || !exists {
@@ -2317,4 +2314,17 @@ func appendToLog(message string) *repb.Command {
 				cat ./log
 			`},
 	}
+}
+
+// Compares a CommandResult against an expected one, ignoring non-deterministic
+// fields.
+func assertCommandResult(t testing.TB, expected *interfaces.CommandResult, actual *interfaces.CommandResult) {
+	{
+		// Shallow copy
+		a := *actual
+		actual = &a
+	}
+	actual.UsageStats = nil
+	actual.AuxiliaryLogs = nil
+	assert.Equal(t, expected, actual)
 }
