@@ -784,6 +784,32 @@ func (d *UserDB) GetUserByID(ctx context.Context, id string) (*tables.User, erro
 		user = u
 		return err
 	})
+	if err != nil {
+		return nil, err
+	}
+
+	authUser, err := perms.AuthenticatedUser(ctx, d.env)
+	if err != nil {
+		return nil, err
+	}
+	for _, g := range user.Groups {
+		if err := authutil.AuthorizeGroupRole(authUser, g.Group.GroupID, role.Admin); err == nil {
+			return user, nil
+		}
+	}
+	return nil, status.NotFoundError("user not found")
+}
+
+func (d *UserDB) GetUserByIDWithoutAuthCheck(ctx context.Context, id string) (*tables.User, error) {
+	var user *tables.User
+	err := d.h.Transaction(ctx, func(tx interfaces.DB) error {
+		u, err := d.getUser(ctx, tx, id)
+		if err != nil {
+			return err
+		}
+		user = u
+		return err
+	})
 	return user, err
 }
 
@@ -901,6 +927,9 @@ func (d *UserDB) getUser(ctx context.Context, tx interfaces.DB, userID string) (
 	rq := tx.NewQuery(ctx, "userdb_get_user").Raw(
 		`SELECT * FROM "Users" WHERE user_id = ?`, userID)
 	if err := rq.Take(user); err != nil {
+		if db.IsRecordNotFound(err) {
+			return nil, status.NotFoundError("user not found")
+		}
 		return nil, err
 	}
 	if err := fillUserGroups(ctx, tx, user); err != nil {
@@ -981,6 +1010,32 @@ func (d *UserDB) GetImpersonatedUser(ctx context.Context) (*tables.User, error) 
 		return nil
 	})
 	return user, err
+}
+
+func (d *UserDB) DeleteUser(ctx context.Context, userID string) error {
+	// Permission check.
+	_, err := d.GetUserByID(ctx, userID)
+	if err != nil {
+		return err
+	}
+	return d.h.Transaction(ctx, func(tx interfaces.DB) error {
+		rq := tx.NewQuery(ctx, "userdb_delete_user_memberships").Raw(`
+			DELETE FROM "UserGroups" WHERE user_user_id = ?`, userID)
+		if err := rq.Exec().Error; err != nil {
+			return err
+		}
+		rq = tx.NewQuery(ctx, "userdb_delete_user_all_keys").Raw(`
+			DELETE FROM "APIKeys" WHERE user_id = ?`, userID)
+		if err := rq.Exec().Error; err != nil {
+			return err
+		}
+		rq = tx.NewQuery(ctx, "userdb_delete_user").Raw(`
+			DELETE FROM "Users" WHERE user_id = ?`, userID)
+		if err := rq.Exec().Error; err != nil {
+			return err
+		}
+		return nil
+	})
 }
 
 func (d *UserDB) FillCounts(ctx context.Context, stat *telpb.TelemetryStat) error {

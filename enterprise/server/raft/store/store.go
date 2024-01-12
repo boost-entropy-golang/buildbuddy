@@ -342,10 +342,12 @@ func (s *Store) Stop(ctx context.Context) error {
 		s.log.Infof("Store shutdown finished in %s", time.Since(now))
 	}()
 
-	s.egCancel()
-	s.leaseKeeper.Stop()
-	s.liveness.Release()
-	s.eg.Wait()
+	if s.egCancel != nil {
+		s.egCancel()
+		s.leaseKeeper.Stop()
+		s.liveness.Release()
+		s.eg.Wait()
+	}
 
 	s.log.Info("Store: waitgroups finished")
 	return grpc_server.GRPCShutdown(ctx, s.grpcServer)
@@ -738,15 +740,23 @@ func (s *Store) RemoveData(ctx context.Context, req *rfpb.RemoveDataRequest) (*r
 }
 
 func (s *Store) SyncPropose(ctx context.Context, req *rfpb.SyncProposeRequest) (*rfpb.SyncProposeResponse, error) {
-	if _, err := s.LeasedRange(req.GetHeader()); err != nil {
-		return nil, err
+	var shardID uint64
+	header := req.GetHeader()
+
+	// Proxied SyncPropose requests don't need a lease, so don't bother
+	// checking for one. If the referenced shard is not present on this
+	// node, the request will fail in client.SyncProposeLocal().
+	if header.GetRangeId() == 0 && header.GetReplica() != nil {
+		shardID = header.GetReplica().GetShardId()
+	} else {
+		r, err := s.LeasedRange(req.GetHeader())
+		if err != nil {
+			return nil, err
+		}
+		shardID = r.ShardID
 	}
-	shardID := req.GetHeader().GetReplica().GetShardId()
 
-	batch := req.GetBatch()
-	batch.Header = req.GetHeader()
-
-	batchResponse, err := client.SyncProposeLocal(ctx, s.nodeHost, shardID, batch)
+	batchResponse, err := client.SyncProposeLocal(ctx, s.nodeHost, shardID, req.GetBatch())
 	if err != nil {
 		if err == dragonboat.ErrShardNotFound {
 			return nil, status.OutOfRangeErrorf("%s: cluster %d not found", constants.RangeLeaseInvalidMsg, shardID)
@@ -924,6 +934,9 @@ func (s *Store) cleanupZombieNodes(ctx context.Context) {
 }
 
 func (s *Store) checkIfReplicasNeedSplitting(ctx context.Context) {
+	if *maxRangeSizeBytes == 0 {
+		return
+	}
 	eventsCh := s.AddEventListener()
 	for {
 		select {
@@ -936,7 +949,7 @@ func (s *Store) checkIfReplicasNeedSplitting(ctx context.Context) {
 				if !s.leaseKeeper.HaveLease(rangeUsageEvent.RangeDescriptor.GetRangeId()) {
 					continue
 				}
-				if rangeUsageEvent.ReplicaUsage.GetEstimatedDiskBytesUsed() <= *maxRangeSizeBytes {
+				if rangeUsageEvent.ReplicaUsage.GetEstimatedDiskBytesUsed() < *maxRangeSizeBytes {
 					continue
 				}
 				rd := rangeUsageEvent.RangeDescriptor.CloneVT()
@@ -956,6 +969,7 @@ func (s *Store) checkIfReplicasNeedSplitting(ctx context.Context) {
 
 func makeHeader(rangeDescriptor *rfpb.RangeDescriptor) *rfpb.Header {
 	return &rfpb.Header{
+		Replica:         rangeDescriptor.GetReplicas()[0],
 		RangeId:         rangeDescriptor.GetRangeId(),
 		Generation:      rangeDescriptor.GetGeneration(),
 		ConsistencyMode: rfpb.Header_LINEARIZABLE,
@@ -1115,6 +1129,25 @@ func (s *Store) SplitRange(ctx context.Context, req *rfpb.SplitRangeRequest) (*r
 		return nil, err
 	}
 
+	stubRightRange := proto.Clone(leftRange).(*rfpb.RangeDescriptor)
+	stubRightRange.Start = nil
+	stubRightRange.End = nil
+	stubRightRange.RangeId = newRangeID
+	stubRightRange.Generation += 1
+	for i, r := range stubRightRange.GetReplicas() {
+		r.ReplicaId = uint64(i + 1)
+		r.ShardId = newShardID
+	}
+	stubRightRangeBuf, err := proto.Marshal(stubRightRange)
+	if err != nil {
+		return nil, err
+	}
+	stubBatch := rbuilder.NewBatchBuilder().Add(&rfpb.DirectWriteRequest{
+		Kv: &rfpb.KV{
+			Key:   constants.LocalRangeKey,
+			Value: stubRightRangeBuf,
+		},
+	})
 	// Bringup new peers.
 	servers := make(map[string]string)
 	for _, r := range leftRange.GetReplicas() {
@@ -1129,7 +1162,7 @@ func (s *Store) SplitRange(ctx context.Context, req *rfpb.SplitRangeRequest) (*r
 		servers[nhid] = grpcAddr
 	}
 	bootstrapInfo := bringup.MakeBootstrapInfo(newShardID, 1, servers)
-	if err := bringup.StartShard(ctx, s.apiClient, bootstrapInfo, rbuilder.NewBatchBuilder()); err != nil {
+	if err := bringup.StartShard(ctx, s.apiClient, bootstrapInfo, stubBatch); err != nil {
 		return nil, err
 	}
 
@@ -1167,11 +1200,11 @@ func (s *Store) SplitRange(ctx context.Context, req *rfpb.SplitRangeRequest) (*r
 	if err := addMetaRangeEdits(leftRange, updatedLeftRange, newRightRange, metaBatch); err != nil {
 		return nil, err
 	}
-
-	txn := rbuilder.NewTxn().AddStatement(shardID, leftBatch)
-	txn = txn.AddStatement(newShardID, rightBatch)
-	txn = txn.AddStatement(constants.MetaRangeID, metaBatch)
-	if err := client.RunTxn(ctx, s.nodeHost, txn); err != nil {
+	mrd := s.sender.GetMetaRangeDescriptor()
+	txn := rbuilder.NewTxn().AddStatement(leftRange.GetReplicas()[0], leftBatch)
+	txn = txn.AddStatement(newRightRange.GetReplicas()[0], rightBatch)
+	txn = txn.AddStatement(mrd.GetReplicas()[0], metaBatch)
+	if err := s.sender.RunTxn(ctx, txn); err != nil {
 		return nil, err
 	}
 	return &rfpb.SplitRangeResponse{
@@ -1367,6 +1400,13 @@ func (s *Store) RemoveReplica(ctx context.Context, req *rfpb.RemoveReplicaReques
 		return nil, status.FailedPreconditionErrorf("No node with id %d found in range: %+v", req.GetReplicaId(), req.GetRange())
 	}
 
+	// First, update the range descriptor information to reflect the
+	// the node being removed.
+	rd, err := s.removeReplicaFromRangeDescriptor(ctx, shardID, replicaID, req.GetRange())
+	if err != nil {
+		return nil, err
+	}
+
 	configChangeID, err := s.getConfigChangeID(ctx, shardID)
 	if err != nil {
 		return nil, err
@@ -1374,7 +1414,11 @@ func (s *Store) RemoveReplica(ctx context.Context, req *rfpb.RemoveReplicaReques
 
 	// Propose the config change (this removes the node from the raft cluster).
 	err = client.RunNodehostFn(ctx, func(ctx context.Context) error {
-		return s.nodeHost.SyncRequestDeleteReplica(ctx, shardID, replicaID, configChangeID)
+		err := s.nodeHost.SyncRequestDeleteReplica(ctx, shardID, replicaID, configChangeID)
+		if err == dragonboat.ErrShardClosed {
+			return nil
+		}
+		return err
 	})
 	if err != nil {
 		return nil, err
@@ -1400,18 +1444,12 @@ func (s *Store) RemoveReplica(ctx context.Context, req *rfpb.RemoveReplicaReques
 		return nil, err
 	}
 
-	// Finally, update the range descriptor information to reflect the
-	// new membership of this range without the removed node.
-	rd, err = s.removeReplicaFromRangeDescriptor(ctx, shardID, replicaID, req.GetRange())
-	if err != nil {
-		return nil, err
-	}
-
 	metrics.RaftMoves.With(prometheus.Labels{
 		metrics.RaftNodeHostIDLabel: s.nodeHost.ID(),
 		metrics.RaftMoveLabel:       "remove",
 	}).Inc()
 
+	s.log.Infof("Removed shard: s%dr%d", shardID, replicaID)
 	return &rfpb.RemoveReplicaResponse{
 		Range: rd,
 	}, nil
@@ -1565,9 +1603,10 @@ func (s *Store) updateRangeDescriptor(ctx context.Context, shardID uint64, old, 
 	metaRangeBatch := rbuilder.NewBatchBuilder()
 	metaRangeBatch.Add(metaRangeCasReq)
 
-	txn := rbuilder.NewTxn().AddStatement(shardID, localBatch)
-	txn = txn.AddStatement(constants.MetaRangeID, metaRangeBatch)
-	return client.RunTxn(ctx, s.nodeHost, txn)
+	mrd := s.sender.GetMetaRangeDescriptor()
+	txn := rbuilder.NewTxn().AddStatement(new.GetReplicas()[0], localBatch)
+	txn = txn.AddStatement(mrd.GetReplicas()[0], metaRangeBatch)
+	return s.sender.RunTxn(ctx, txn)
 }
 
 func (s *Store) addReplicaToRangeDescriptor(ctx context.Context, shardID, replicaID uint64, oldDescriptor *rfpb.RangeDescriptor) (*rfpb.RangeDescriptor, error) {

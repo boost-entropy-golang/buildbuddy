@@ -407,7 +407,7 @@ export default class InvocationModel {
     }
     const digestFnEnum =
       build.bazel.remote.execution.v2.DigestFunction.Value[
-        digestFnName as keyof typeof build.bazel.remote.execution.v2.DigestFunction.Value
+        digestFnName.toUpperCase() as keyof typeof build.bazel.remote.execution.v2.DigestFunction.Value
       ];
     return digestFnEnum || build.bazel.remote.execution.v2.DigestFunction.Value.SHA256;
   }
@@ -419,8 +419,9 @@ export default class InvocationModel {
   private getCacheBaseResourceName(): resource.IResourceName {
     return {
       instanceName: this.getRemoteInstanceName(),
-      compressor: this.getCompressor(),
       digestFunction: this.getDigestFunction(),
+      // Note: we don't set compressor for now because the UI cannot decompress
+      // zstd blobs.
     };
   }
 
@@ -699,7 +700,7 @@ export default class InvocationModel {
         return "k8";
       }
       if (this.workflowConfigured.os === "darwin" && this.workflowConfigured.arch === "amd64") {
-        return "darwin";
+        return "darwin_x86_64";
       }
       if (this.workflowConfigured.os === "darwin" && this.workflowConfigured.arch === "arm64") {
         return "darwin_arm64";

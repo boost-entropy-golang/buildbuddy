@@ -187,10 +187,9 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--auto', default=False, action='store_true')
     parser.add_argument('--allow_dirty', default=False, action='store_true')
-    parser.add_argument('--skip_version_bump', default=False, action='store_true')
     parser.add_argument('--skip_latest_tag', default=False, action='store_true')
     parser.add_argument('--force', default=False, action='store_true')
-    parser.add_argument('--bump_version_type', default='minor', choices=['major', 'minor', 'patch'])
+    parser.add_argument('--bump_version_type', default='minor', choices=['major', 'minor', 'patch', 'none'])
     args = parser.parse_args()
 
     if workspace_is_clean():
@@ -204,15 +203,13 @@ def main():
     old_version = get_latest_remote_version()
     is_old_version_published = is_published_release(old_version)
 
-    skip_version_bump = args.skip_version_bump
     if not is_old_version_published and not args.force:
-        print(f"Skipping version bump.\nThe latest tag {old_version} does not correspond to a published github release." +
+        die(f"The latest tag {old_version} does not correspond to a published github release." +
         " It may be a draft release or it may have never been created." +
         " If you still want to upgrade the version, rerun the script with --force.")
-        skip_version_bump = True
 
     new_version = old_version
-    if not skip_version_bump:
+    if args.bump_version_type != 'none':
         if args.bump_version_type == 'patch':
             new_version = bump_patch_version(old_version)
         elif args.bump_version_type == 'minor':

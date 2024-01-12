@@ -55,12 +55,15 @@ proto_library(
 
 go_proto_library(
     name = "api_v1_go_proto",
-    compilers = ["@io_bazel_rules_go//proto:go_grpc"],
+    compilers = [
+        "@io_bazel_rules_go//proto:go_proto",
+        "@io_bazel_rules_go//proto:go_grpc_v2",
+    ],
     importpath = "github.com/buildbuddy-io/buildbuddy/proto/api/v1",
     proto = ":api_v1_proto",
     visibility = ["//visibility:public"],
     deps = [
         ":common_go_proto",
-        "@org_golang_google_genproto_googleapis_rpc//status",
+        "//proto:grpc_status_go_proto",
     ],
 )

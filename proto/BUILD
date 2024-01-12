@@ -13,6 +13,16 @@ go_proto_compiler(
     plugin = "@com_github_planetscale_vtprotobuf//cmd/protoc-gen-go-vtproto",
     suffix = "_vtproto.pb.go",
     valid_archive = False,
+    deps = [
+        "@com_github_planetscale_vtprotobuf//protohelpers",
+        "@com_github_planetscale_vtprotobuf//types/known/anypb",
+        "@com_github_planetscale_vtprotobuf//types/known/durationpb",
+        "@com_github_planetscale_vtprotobuf//types/known/emptypb",
+        "@com_github_planetscale_vtprotobuf//types/known/fieldmaskpb",
+        "@com_github_planetscale_vtprotobuf//types/known/structpb",
+        "@com_github_planetscale_vtprotobuf//types/known/timestamppb",
+        "@com_github_planetscale_vtprotobuf//types/known/wrapperspb",
+    ],
 )
 
 proto_library(
@@ -658,6 +668,15 @@ proto_library(
 )
 
 # Go proto rules below here
+go_proto_library(
+    name = "grpc_status_go_proto",
+    compilers = [
+        "@io_bazel_rules_go//proto:go_proto",
+        "//proto:vtprotobuf_compiler",
+    ],
+    importpath = "google.golang.org/genproto/googleapis/rpc/status",
+    proto = "@googleapis//google/rpc:status_proto",
+)
 
 go_proto_library(
     name = "acl_go_proto",
@@ -772,7 +791,8 @@ go_proto_library(
 go_proto_library(
     name = "health_go_proto",
     compilers = [
-        "@io_bazel_rules_go//proto:go_grpc",
+        "@io_bazel_rules_go//proto:go_proto",
+        "@io_bazel_rules_go//proto:go_grpc_v2",
         "//proto:vtprotobuf_compiler",
     ],
     importpath = "github.com/buildbuddy-io/buildbuddy/proto/health",
@@ -790,12 +810,12 @@ go_proto_library(
     deps = [
         ":acl_go_proto",
         ":context_go_proto",
+        ":grpc_status_go_proto",
         ":invocation_status_go_proto",
         ":remote_execution_go_proto",
         ":resource_go_proto",
         ":scheduler_go_proto",
         ":stat_filter_go_proto",
-        "@org_golang_google_genproto_googleapis_rpc//status",
     ],
 )
 
@@ -871,7 +891,8 @@ go_proto_library(
 go_proto_library(
     name = "publish_build_event_go_proto",
     compilers = [
-        "@io_bazel_rules_go//proto:go_grpc",
+        "@io_bazel_rules_go//proto:go_proto",
+        "@io_bazel_rules_go//proto:go_grpc_v2",
         "//proto:vtprotobuf_compiler",
     ],
     importpath = "github.com/buildbuddy-io/buildbuddy/proto/publish_build_event",
@@ -941,7 +962,8 @@ go_proto_library(
 go_proto_library(
     name = "soci_go_proto",
     compilers = [
-        "@io_bazel_rules_go//proto:go_grpc",
+        "@io_bazel_rules_go//proto:go_proto",
+        "@io_bazel_rules_go//proto:go_grpc_v2",
         "//proto:vtprotobuf_compiler",
     ],
     importpath = "github.com/buildbuddy-io/buildbuddy/proto/soci",
@@ -1018,21 +1040,23 @@ go_proto_library(
 go_proto_library(
     name = "vmexec_go_proto",
     compilers = [
-        "@io_bazel_rules_go//proto:go_grpc",
+        "@io_bazel_rules_go//proto:go_proto",
+        "@io_bazel_rules_go//proto:go_grpc_v2",
         "//proto:vtprotobuf_compiler",
     ],
     importpath = "github.com/buildbuddy-io/buildbuddy/proto/vmexec",
     proto = ":vmexec_proto",
     deps = [
+        ":grpc_status_go_proto",
         ":remote_execution_go_proto",
-        "@org_golang_google_genproto_googleapis_rpc//status",
     ],
 )
 
 go_proto_library(
     name = "vmvfs_go_proto",
     compilers = [
-        "@io_bazel_rules_go//proto:go_grpc",
+        "@io_bazel_rules_go//proto:go_proto",
+        "@io_bazel_rules_go//proto:go_grpc_v2",
         "//proto:vtprotobuf_compiler",
     ],
     importpath = "github.com/buildbuddy-io/buildbuddy/proto/vmvfs",
@@ -1046,7 +1070,8 @@ go_proto_library(
     name = "vfs_go_proto",
     compilers = [
         "//proto:vtprotobuf_compiler",
-        "@io_bazel_rules_go//proto:go_grpc",
+        "@io_bazel_rules_go//proto:go_proto",
+        "@io_bazel_rules_go//proto:go_grpc_v2",
     ],
     importpath = "github.com/buildbuddy-io/buildbuddy/proto/vfs",
     proto = ":vfs_proto",
@@ -1062,8 +1087,8 @@ go_proto_library(
     proto = ":workflow_proto",
     deps = [
         ":context_go_proto",
+        ":grpc_status_go_proto",
         ":invocation_status_go_proto",
-        "@org_golang_google_genproto_googleapis_rpc//status",
     ],
 )
 
@@ -1076,10 +1101,10 @@ go_proto_library(
     importpath = "github.com/buildbuddy-io/buildbuddy/proto/raft",
     proto = ":raft_proto",
     deps = [
+        ":grpc_status_go_proto",
         ":remote_execution_go_proto",
         ":resource_go_proto",
         "@com_github_planetscale_vtprotobuf//include/github.com/planetscale/vtprotobuf/vtproto:vtproto_go_proto",
-        "@org_golang_google_genproto_googleapis_rpc//status",
     ],
 )
 
@@ -1191,7 +1216,8 @@ go_proto_library(
 go_proto_library(
     name = "raft_service_go_proto",
     compilers = [
-        "@io_bazel_rules_go//proto:go_grpc",
+        "@io_bazel_rules_go//proto:go_proto",
+        "@io_bazel_rules_go//proto:go_grpc_v2",
         "//proto:vtprotobuf_compiler",
     ],
     importpath = "github.com/buildbuddy-io/buildbuddy/proto/raft_service",
@@ -1204,7 +1230,8 @@ go_proto_library(
 go_proto_library(
     name = "ping_service_go_proto",
     compilers = [
-        "@io_bazel_rules_go//proto:go_grpc",
+        "@io_bazel_rules_go//proto:go_proto",
+        "@io_bazel_rules_go//proto:go_grpc_v2",
         "//proto:vtprotobuf_compiler",
     ],
     importpath = "github.com/buildbuddy-io/buildbuddy/proto/ping_service",
@@ -1214,7 +1241,8 @@ go_proto_library(
 go_proto_library(
     name = "buildbuddy_service_go_proto",
     compilers = [
-        "@io_bazel_rules_go//proto:go_grpc",
+        "@io_bazel_rules_go//proto:go_proto",
+        "@io_bazel_rules_go//proto:go_grpc_v2",
         "//proto:vtprotobuf_compiler",
     ],
     importpath = "github.com/buildbuddy-io/buildbuddy/proto/buildbuddy_service",
@@ -1261,7 +1289,8 @@ go_proto_library(
 go_proto_library(
     name = "sidecar_go_proto",
     compilers = [
-        "@io_bazel_rules_go//proto:go_grpc",
+        "@io_bazel_rules_go//proto:go_proto",
+        "@io_bazel_rules_go//proto:go_grpc_v2",
         "//proto:vtprotobuf_compiler",
     ],
     importpath = "github.com/buildbuddy-io/buildbuddy/proto/sidecar",
@@ -1271,7 +1300,8 @@ go_proto_library(
 go_proto_library(
     name = "registry_go_proto",
     compilers = [
-        "@io_bazel_rules_go//proto:go_grpc",
+        "@io_bazel_rules_go//proto:go_proto",
+        "@io_bazel_rules_go//proto:go_grpc_v2",
         "//proto:vtprotobuf_compiler",
     ],
     importpath = "github.com/buildbuddy-io/buildbuddy/proto/registry",
@@ -1328,9 +1358,9 @@ go_proto_library(
     proto = ":cache_proto",
     deps = [
         ":context_go_proto",
+        ":grpc_status_go_proto",
         ":remote_execution_go_proto",
         ":resource_go_proto",
-        "@org_golang_google_genproto_googleapis_rpc//status",
     ],
 )
 
@@ -1365,7 +1395,8 @@ go_proto_library(
     name = "distributed_cache_go_proto",
     compilers = [
         "//proto:vtprotobuf_compiler",
-        "@io_bazel_rules_go//proto:go_grpc",
+        "@io_bazel_rules_go//proto:go_proto",
+        "@io_bazel_rules_go//proto:go_grpc_v2",
     ],
     importpath = "github.com/buildbuddy-io/buildbuddy/proto/distributed_cache",
     proto = ":distributed_cache_proto",
@@ -1379,16 +1410,17 @@ go_proto_library(
     name = "remote_asset_go_proto",
     compilers = [
         "//proto:vtprotobuf_compiler",
-        "@io_bazel_rules_go//proto:go_grpc",
+        "@io_bazel_rules_go//proto:go_proto",
+        "@io_bazel_rules_go//proto:go_grpc_v2",
     ],
     importpath = "github.com/buildbuddy-io/buildbuddy/proto/remote_asset",
     proto = ":remote_asset_proto",
     deps = [
+        ":grpc_status_go_proto",
         ":remote_execution_go_proto",
         ":semver_go_proto",
         "@org_golang_google_genproto//googleapis/longrunning",
         "@org_golang_google_genproto_googleapis_api//annotations",
-        "@org_golang_google_genproto_googleapis_rpc//status",
     ],
 )
 
@@ -1401,11 +1433,11 @@ go_proto_library(
     importpath = "github.com/buildbuddy-io/buildbuddy/proto/remote_execution_log",
     proto = ":remote_execution_log_proto",
     deps = [
+        ":grpc_status_go_proto",
         ":remote_execution_go_proto",
         "@org_golang_google_genproto//googleapis/longrunning",
         "@org_golang_google_genproto_googleapis_api//annotations",
         "@org_golang_google_genproto_googleapis_bytestream//:bytestream",
-        "@org_golang_google_genproto_googleapis_rpc//status",
     ],
 )
 
@@ -1413,16 +1445,17 @@ go_proto_library(
     name = "remote_execution_go_proto",
     compilers = [
         "//proto:vtprotobuf_compiler",
-        "@io_bazel_rules_go//proto:go_grpc",
+        "@io_bazel_rules_go//proto:go_proto",
+        "@io_bazel_rules_go//proto:go_grpc_v2",
     ],
     importpath = "github.com/buildbuddy-io/buildbuddy/proto/remote_execution",
     proto = ":remote_execution_proto",
     deps = [
+        ":grpc_status_go_proto",
         ":scheduler_go_proto",
         ":semver_go_proto",
         "@org_golang_google_genproto//googleapis/longrunning",
         "@org_golang_google_genproto_googleapis_api//annotations",
-        "@org_golang_google_genproto_googleapis_rpc//status",
     ],
 )
 
@@ -1443,12 +1476,13 @@ go_proto_library(
     name = "telemetry_go_proto",
     compilers = [
         "//proto:vtprotobuf_compiler",
-        "@io_bazel_rules_go//proto:go_grpc",
+        "@io_bazel_rules_go//proto:go_proto",
+        "@io_bazel_rules_go//proto:go_grpc_v2",
     ],
     importpath = "github.com/buildbuddy-io/buildbuddy/proto/telemetry",
     proto = ":telemetry_proto",
     deps = [
-        "@org_golang_google_genproto_googleapis_rpc//status",
+        ":grpc_status_go_proto",
     ],
 )
 
@@ -1456,15 +1490,16 @@ go_proto_library(
     name = "scheduler_go_proto",
     compilers = [
         "//proto:vtprotobuf_compiler",
-        "@io_bazel_rules_go//proto:go_grpc",
+        "@io_bazel_rules_go//proto:go_proto",
+        "@io_bazel_rules_go//proto:go_grpc_v2",
     ],
     importpath = "github.com/buildbuddy-io/buildbuddy/proto/scheduler",
     proto = ":scheduler_proto",
     deps = [
         ":acl_go_proto",
         ":context_go_proto",
+        ":grpc_status_go_proto",
         ":trace_go_proto",
-        "@org_golang_google_genproto_googleapis_rpc//status",
     ],
 )
 
@@ -1472,7 +1507,8 @@ go_proto_library(
     name = "suggestion_go_proto",
     compilers = [
         "//proto:vtprotobuf_compiler",
-        "@io_bazel_rules_go//proto:go_grpc",
+        "@io_bazel_rules_go//proto:go_proto",
+        "@io_bazel_rules_go//proto:go_grpc_v2",
     ],
     importpath = "github.com/buildbuddy-io/buildbuddy/proto/suggestion",
     proto = ":suggestion_proto",
@@ -1485,7 +1521,8 @@ go_proto_library(
     name = "trace_go_proto",
     compilers = [
         "//proto:vtprotobuf_compiler",
-        "@io_bazel_rules_go//proto:go_grpc",
+        "@io_bazel_rules_go//proto:go_proto",
+        "@io_bazel_rules_go//proto:go_grpc_v2",
     ],
     importpath = "github.com/buildbuddy-io/buildbuddy/proto/trace",
     proto = ":trace_proto",
@@ -1495,7 +1532,8 @@ go_proto_library(
     name = "worker_go_proto",
     compilers = [
         "//proto:vtprotobuf_compiler",
-        "@io_bazel_rules_go//proto:go_grpc",
+        "@io_bazel_rules_go//proto:go_proto",
+        "@io_bazel_rules_go//proto:go_grpc_v2",
     ],
     importpath = "github.com/buildbuddy-io/buildbuddy/proto/worker",
     proto = ":worker_proto",
