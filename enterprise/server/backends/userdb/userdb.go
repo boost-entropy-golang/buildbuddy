@@ -460,7 +460,7 @@ func (d *UserDB) RequestToJoinGroup(ctx context.Context, groupID string) (grpb.G
 		// If the org has an owned domain that matches the user's email,
 		// the user can join directly as a member.
 		membershipStatus = grpb.GroupMembershipStatus_REQUESTED
-		if group.OwnedDomain != "" && group.OwnedDomain == getEmailDomain(tu.Email) {
+		if !u.IsSAML() && group.OwnedDomain != "" && group.OwnedDomain == getEmailDomain(tu.Email) {
 			membershipStatus = grpb.GroupMembershipStatus_MEMBER
 			return d.addUserToGroup(ctx, tx, userID, groupID)
 		}
@@ -1036,6 +1036,15 @@ func (d *UserDB) DeleteUser(ctx context.Context, userID string) error {
 		}
 		return nil
 	})
+}
+
+func (d *UserDB) UpdateUser(ctx context.Context, u *tables.User) error {
+	// Permission check.
+	_, err := d.GetUserByID(ctx, u.UserID)
+	if err != nil {
+		return err
+	}
+	return d.h.NewQuery(ctx, "userdb_update_user").Update(u)
 }
 
 func (d *UserDB) FillCounts(ctx context.Context, stat *telpb.TelemetryStat) error {
