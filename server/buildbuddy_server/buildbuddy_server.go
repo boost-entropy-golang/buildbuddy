@@ -236,7 +236,7 @@ func (s *BuildBuddyServer) CancelExecutions(ctx context.Context, req *inpb.Cance
 
 func getGroupUrl(g *tables.Group) string {
 	gURL := build_buddy_url.String()
-	if g.URLIdentifier != nil && *g.URLIdentifier != "" {
+	if g.URLIdentifier != "" {
 		gURL = subdomain.ReplaceURLSubdomainForGroup(build_buddy_url.String(), g)
 	}
 	return gURL
@@ -246,10 +246,6 @@ func makeGroups(groupRoles []*tables.GroupRole) []*grpb.Group {
 	r := make([]*grpb.Group, 0)
 	for _, gr := range groupRoles {
 		g := gr.Group
-		urlIdentifier := ""
-		if g.URLIdentifier != nil {
-			urlIdentifier = *g.URLIdentifier
-		}
 		githubToken := ""
 		if g.GithubToken != nil {
 			githubToken = *g.GithubToken
@@ -260,12 +256,12 @@ func makeGroups(groupRoles []*tables.GroupRole) []*grpb.Group {
 			Role:                              role.ToProto(role.Role(gr.Role)),
 			OwnedDomain:                       g.OwnedDomain,
 			GithubLinked:                      githubToken != "",
-			UrlIdentifier:                     urlIdentifier,
+			UrlIdentifier:                     g.URLIdentifier,
 			SharingEnabled:                    g.SharingEnabled,
 			UserOwnedKeysEnabled:              g.UserOwnedKeysEnabled,
 			BotSuggestionsEnabled:             g.BotSuggestionsEnabled,
 			DeveloperOrgCreationEnabled:       g.DeveloperOrgCreationEnabled,
-			UseGroupOwnedExecutors:            g.UseGroupOwnedExecutors != nil && *g.UseGroupOwnedExecutors,
+			UseGroupOwnedExecutors:            g.UseGroupOwnedExecutors,
 			RestrictCleanWorkflowRunsToAdmins: g.RestrictCleanWorkflowRunsToAdmins,
 			EnforceIpRules:                    g.EnforceIPRules,
 			SuggestionPreference:              g.SuggestionPreference,
@@ -436,7 +432,7 @@ func (s *BuildBuddyServer) GetGroup(ctx context.Context, req *grpb.GetGroupReque
 		// info should not be exposed here.
 		Name:                   group.Name,
 		OwnedDomain:            group.OwnedDomain,
-		SsoEnabled:             group.SamlIdpMetadataUrl != nil && *group.SamlIdpMetadataUrl != "",
+		SsoEnabled:             group.SamlIdpMetadataUrl != "",
 		Url:                    getGroupUrl(group),
 		ExternalUserManagement: group.ExternalUserManagement,
 	}, nil
@@ -491,7 +487,6 @@ func (s *BuildBuddyServer) CreateGroup(ctx context.Context, req *grpb.CreateGrou
 		groupOwnedDomain = userEmailDomain
 	}
 
-	useGroupOwnedExecutors := req.GetUseGroupOwnedExecutors()
 	group := &tables.Group{
 		UserID:                      user.UserID,
 		Name:                        groupName,
@@ -500,10 +495,9 @@ func (s *BuildBuddyServer) CreateGroup(ctx context.Context, req *grpb.CreateGrou
 		UserOwnedKeysEnabled:        req.GetUserOwnedKeysEnabled(),
 		BotSuggestionsEnabled:       req.GetBotSuggestionsEnabled(),
 		DeveloperOrgCreationEnabled: req.GetDeveloperOrgCreationEnabled(),
-		UseGroupOwnedExecutors:      &useGroupOwnedExecutors,
+		UseGroupOwnedExecutors:      req.GetUseGroupOwnedExecutors(),
 	}
-	urlIdentifier := strings.TrimSpace(req.GetUrlIdentifier())
-	group.URLIdentifier = &urlIdentifier
+	group.URLIdentifier = strings.TrimSpace(req.GetUrlIdentifier())
 	group.SuggestionPreference = grpb.SuggestionPreference_ENABLED
 
 	groupID, err := userDB.CreateGroup(ctx, group)
@@ -524,7 +518,6 @@ func (s *BuildBuddyServer) UpdateGroup(ctx context.Context, req *grpb.UpdateGrou
 	}
 	var group *tables.Group
 	var err error
-	urlIdentifier := strings.TrimSpace(req.GetUrlIdentifier())
 
 	if group == nil {
 		if req.GetRequestContext().GetGroupId() == "" {
@@ -536,8 +529,8 @@ func (s *BuildBuddyServer) UpdateGroup(ctx context.Context, req *grpb.UpdateGrou
 		}
 	}
 	group.Name = req.GetName()
-	if urlIdentifier != "" {
-		group.URLIdentifier = &urlIdentifier
+	if ui := strings.TrimSpace(req.GetUrlIdentifier()); ui != "" {
+		group.URLIdentifier = ui
 	}
 	if req.GetAutoPopulateFromOwnedDomain() {
 		user, err := userDB.GetUser(ctx)
@@ -549,11 +542,10 @@ func (s *BuildBuddyServer) UpdateGroup(ctx context.Context, req *grpb.UpdateGrou
 		group.OwnedDomain = ""
 	}
 	group.SharingEnabled = req.GetSharingEnabled()
-	useGroupOwnedExecutors := req.GetUseGroupOwnedExecutors()
 	group.UserOwnedKeysEnabled = req.GetUserOwnedKeysEnabled()
 	group.BotSuggestionsEnabled = req.GetBotSuggestionsEnabled()
 	group.DeveloperOrgCreationEnabled = req.GetDeveloperOrgCreationEnabled()
-	group.UseGroupOwnedExecutors = &useGroupOwnedExecutors
+	group.UseGroupOwnedExecutors = req.GetUseGroupOwnedExecutors()
 	group.SuggestionPreference = req.GetSuggestionPreference()
 	group.RestrictCleanWorkflowRunsToAdmins = req.GetRestrictCleanWorkflowRunsToAdmins()
 	if group.SuggestionPreference == grpb.SuggestionPreference_UNKNOWN_SUGGESTION_PREFERENCE {
@@ -894,7 +886,7 @@ func (s *BuildBuddyServer) DeleteUserApiKey(ctx context.Context, req *akpb.Delet
 func selectedGroup(ctx context.Context, preferredGroupID string, groupRoles []*tables.GroupRole) *tables.GroupRole {
 	if sd := subdomain.Get(ctx); sd != "" {
 		for _, gr := range groupRoles {
-			if gr.Group.URLIdentifier != nil && *gr.Group.URLIdentifier == sd {
+			if gr.Group.URLIdentifier == sd {
 				return gr
 			}
 		}
@@ -908,7 +900,7 @@ func selectedGroup(ctx context.Context, preferredGroupID string, groupRoles []*t
 		}
 	}
 	for _, gr := range groupRoles {
-		if gr.Group.URLIdentifier != nil && *gr.Group.URLIdentifier != "" {
+		if gr.Group.URLIdentifier != "" {
 			return gr
 		}
 	}

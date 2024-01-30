@@ -100,11 +100,11 @@ func newUserResource(u *tables.User, authGroup *tables.Group) (*UserResource, er
 }
 
 type ListResponseResource struct {
-	Schemas      []string `json:"schemas"`
-	TotalResults int      `json:"totalResults"`
-	StartIndex   int      `json:"startIndex"`
-	ItemsPerPage int      `json:"itemsPerPage"`
-	Resources    []*UserResource
+	Schemas      []string        `json:"schemas"`
+	TotalResults int             `json:"totalResults"`
+	StartIndex   int             `json:"startIndex"`
+	ItemsPerPage int             `json:"itemsPerPage"`
+	Resources    []*UserResource `json:"resources,omitempty"`
 }
 
 type OperationResource struct {
@@ -168,7 +168,7 @@ func (s *SCIMServer) RegisterHandlers(mux interfaces.HttpServeMux) {
 			w.Write([]byte("could not lookup group information"))
 			return
 		}
-		if g.SamlIdpMetadataUrl == nil || *g.SamlIdpMetadataUrl == "" {
+		if g.SamlIdpMetadataUrl == "" {
 			w.WriteHeader(http.StatusBadRequest)
 			w.Write([]byte("SCIM API can only be used in conjunction with SAML"))
 			return
@@ -379,7 +379,7 @@ func (s *SCIMServer) createUser(ctx context.Context, r *http.Request, g *tables.
 	if err != nil {
 		return nil, err
 	}
-	entityURL := build_buddy_url.WithPath("saml/metadata?slug=" + *g.URLIdentifier)
+	entityURL := build_buddy_url.WithPath("saml/metadata?slug=" + g.URLIdentifier)
 	u := &tables.User{
 		UserID:    pk,
 		SubID:     fmt.Sprintf("%s/%s", entityURL, ur.UserName),
