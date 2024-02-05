@@ -980,10 +980,13 @@ func (ar *actionRunner) Run(ctx context.Context, ws *workspace) error {
 		if *workflowID != "" && (exitCode == bazelOOMErrorExitCode || exitCode == bazelInternalErrorExitCode) {
 			jvmOutPath := filepath.Join(ar.rootDir, outputBaseDirName, "server/jvm.out")
 			if err := os.Link(jvmOutPath, filepath.Join(artifactsDir, "jvm.out")); err != nil {
-				ar.reporter.Printf("%sjvm.out preserved%s\n", ansiGray, ansiReset)
-			} else {
 				ar.reporter.Printf("%sfailed to preserve jvm.out: %s\n", ansiGray, err, ansiReset)
 			}
+		}
+
+		// Kick off background uploads for the action that just completed
+		if uploader != nil {
+			uploader.UploadDirectory(namedSetID, artifactsDir) // does not return an error
 		}
 
 		// If this is a successfully "bazel run" invocation from which we are extracting run information via
@@ -1049,11 +1052,6 @@ func (ar *actionRunner) Run(ctx context.Context, ws *workspace) error {
 		// Stop execution early on BEP failure, but ignore error -- it will surface in `bep.Finish()`.
 		if err := ar.reporter.FlushProgress(); err != nil {
 			break
-		}
-
-		// Kick off background uploads for the action that just completed
-		if uploader != nil {
-			uploader.UploadDirectory(namedSetID, artifactsDir) // does not return an error
 		}
 	}
 	return nil
