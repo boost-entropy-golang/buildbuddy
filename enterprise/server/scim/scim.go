@@ -44,6 +44,7 @@ const (
 	ActiveAttribute     = "active"
 	GivenNameAttribute  = "name.givenName"
 	FamilyNameAttribute = "name.familyName"
+	UserNameAttribute   = "userName"
 	RoleAttribute       = `roles[primary eq "True"].value`
 )
 
@@ -119,12 +120,39 @@ func newUserResource(u *tables.User, authGroup *tables.Group) (*UserResource, er
 	}, nil
 }
 
-type ListResponseResource struct {
+type GroupMemberResource struct {
+	Value string `json:"value"`
+}
+
+type GroupResource struct {
+	Schemas     []string              `json:"schemas"`
+	ID          string                `json:"id"`
+	DisplayName string                `json:"displayName"`
+	Members     []GroupMemberResource `json:"members,omitempty"`
+}
+
+func newGroupResource(g *tables.Group) *GroupResource {
+	return &GroupResource{
+		Schemas:     []string{UserResourceSchema},
+		ID:          g.GroupID,
+		DisplayName: g.Name,
+	}
+}
+
+type UserListResponseResource struct {
 	Schemas      []string        `json:"schemas"`
 	TotalResults int             `json:"totalResults"`
 	StartIndex   int             `json:"startIndex"`
 	ItemsPerPage int             `json:"itemsPerPage"`
 	Resources    []*UserResource `json:"resources,omitempty"`
+}
+
+type GroupListResponseResource struct {
+	Schemas      []string         `json:"schemas"`
+	TotalResults int              `json:"totalResults"`
+	StartIndex   int              `json:"startIndex"`
+	ItemsPerPage int              `json:"itemsPerPage"`
+	Resources    []*GroupResource `json:"resources,omitempty"`
 }
 
 type OperationResource struct {
@@ -166,68 +194,74 @@ func mapErrorCode(err error) int {
 	return http.StatusInternalServerError
 }
 
+func (s *SCIMServer) handleRequest(w http.ResponseWriter, r *http.Request, handler handlerFunc) {
+	u, err := s.env.GetAuthenticator().AuthenticatedUser(r.Context())
+	if err != nil {
+		w.WriteHeader(http.StatusForbidden)
+		return
+	}
+	if !u.HasCapability(akpb.ApiKey_ORG_ADMIN_CAPABILITY) {
+		w.WriteHeader(http.StatusForbidden)
+		return
+	}
+	g, err := s.env.GetUserDB().GetGroupByID(r.Context(), u.GetGroupID())
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte("could not lookup group information"))
+		return
+	}
+	if g.SamlIdpMetadataUrl == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte("SCIM API can only be used in conjunction with SAML"))
+		return
+	}
+	val, err := handler(r.Context(), r, g)
+	if err != nil {
+		log.CtxWarningf(r.Context(), "SCIM request %s %q failed: %s", r.Method, r.RequestURI, err)
+		w.WriteHeader(mapErrorCode(err))
+		w.Write([]byte(err.Error()))
+		return
+	}
+	out, err := json.Marshal(val)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(err.Error()))
+		return
+	}
+	w.Write(out)
+}
+
+func (s *SCIMServer) getRequestHandler(r *http.Request) (handlerFunc, error) {
+	if strings.HasPrefix(r.URL.Path, usersPath) {
+		switch r.Method {
+		case http.MethodGet:
+			if r.URL.Path == usersPath {
+				return s.getUsers, nil
+			} else {
+				return s.getUser, nil
+			}
+		case http.MethodPost:
+			return s.createUser, nil
+		case http.MethodPut:
+			return s.updateUser, nil
+		case http.MethodPatch:
+			return s.patchUser, nil
+		case http.MethodDelete:
+			return s.deleteUser, nil
+		}
+	}
+
+	return nil, status.NotFoundError("not found")
+}
+
 func (s *SCIMServer) RegisterHandlers(mux interfaces.HttpServeMux) {
 	fn := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !strings.HasPrefix(r.URL.Path, usersPath) {
+		h, err := s.getRequestHandler(r)
+		if err != nil {
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
-
-		u, err := s.env.GetAuthenticator().AuthenticatedUser(r.Context())
-		if err != nil {
-			w.WriteHeader(http.StatusForbidden)
-			return
-		}
-		if !u.HasCapability(akpb.ApiKey_ORG_ADMIN_CAPABILITY) {
-			w.WriteHeader(http.StatusForbidden)
-			return
-		}
-		g, err := s.env.GetUserDB().GetGroupByID(r.Context(), u.GetGroupID())
-		if err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			w.Write([]byte("could not lookup group information"))
-			return
-		}
-		if g.SamlIdpMetadataUrl == "" {
-			w.WriteHeader(http.StatusBadRequest)
-			w.Write([]byte("SCIM API can only be used in conjunction with SAML"))
-			return
-		}
-
-		var h handlerFunc
-		switch r.Method {
-		case "GET":
-			if r.URL.Path == usersPath {
-				h = s.getUsers
-			} else {
-				h = s.getUser
-			}
-		case "POST":
-			h = s.createUser
-		case "PUT":
-			h = s.updateUser
-		case "PATCH":
-			h = s.patchUser
-		case "DELETE":
-			h = s.deleteUser
-		default:
-			w.WriteHeader(http.StatusBadRequest)
-			return
-		}
-		val, err := h(r.Context(), r, g)
-		if err != nil {
-			log.CtxWarningf(r.Context(), "SCIM request %s %q failed: %s", r.Method, r.RequestURI, err)
-			w.WriteHeader(mapErrorCode(err))
-			w.Write([]byte(err.Error()))
-			return
-		}
-		out, err := json.Marshal(val)
-		if err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			w.Write([]byte(err.Error()))
-			return
-		}
-		w.Write(out)
+		s.handleRequest(w, r, h)
 	})
 	mux.Handle("/scim/", interceptors.WrapAuthenticatedExternalHandler(s.env, fn))
 }
@@ -336,7 +370,7 @@ func (s *SCIMServer) getUsers(ctx context.Context, r *http.Request, g *tables.Gr
 	}
 	users = users[:count]
 
-	return &ListResponseResource{
+	return &UserListResponseResource{
 		Schemas:      []string{ListResponseSchema},
 		TotalResults: totalResults,
 		StartIndex:   startIndex + 1,
@@ -489,8 +523,14 @@ func (s *SCIMServer) patchUser(ctx context.Context, r *http.Request, g *tables.G
 				return status.InvalidArgumentErrorf("expected string attribute for role but got %T", value)
 			}
 			newRole = &v
+		case UserNameAttribute:
+			v, ok := value.(string)
+			if !ok {
+				return status.InvalidArgumentErrorf("expected string attribute for username but got %T", value)
+			}
+			u.Email = v
 		default:
-			return status.InvalidArgumentErrorf("unsupported attribute %q", value)
+			return status.InvalidArgumentErrorf("unsupported attribute %q", name)
 		}
 		return nil
 	}
