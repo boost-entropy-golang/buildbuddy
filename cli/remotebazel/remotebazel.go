@@ -10,10 +10,12 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/AlecAivazis/survey/v2"
@@ -63,6 +65,7 @@ var (
 	containerImage = remoteFlagset.String("container_image", "", "If set, requests execution on a specific runner image. Otherwise uses the default hosted runner version. A `docker://` prefix is required.")
 	envInput       = bbflag.New(remoteFlagset, "env", []string{}, "Environment variables to set in the runner environment. Key-value pairs can either be separated by '=' (Ex. --env=k1=val1), or if only a key is specified, the value will be taken from the invocation environment (Ex. --env=k2). To apply multiple env vars, pass the env flag multiple times (Ex. --env=k1=v1 --env=k2). If the same key is given twice, the latest will apply.")
 	remoteRunner   = remoteFlagset.String("remote_runner", defaultRemoteExecutionURL, "The Buildbuddy grpc target the remote runner should run on.")
+	timeout        = remoteFlagset.Duration("timeout", 0, "If set, requests that have exceeded this timeout will be canceled automatically. (Ex. --timeout=15m; --timeout=2h)")
 
 	defaultBranchRefs = []string{"refs/heads/main", "refs/heads/master"}
 )
@@ -485,7 +488,7 @@ func downloadOutputs(ctx context.Context, env environment.Env, mainOutputs []*be
 }
 
 func Run(ctx context.Context, opts RunOpts, repoConfig *RepoConfig) (int, error) {
-	healthChecker := healthcheck.NewHealthChecker("ci-runner")
+	healthChecker := healthcheck.NewHealthChecker("remote-bazel-client")
 	env := real_environment.NewRealEnv(healthChecker)
 
 	conn, err := grpc_client.DialSimple(opts.Server)
@@ -552,8 +555,11 @@ func Run(ctx context.Context, opts RunOpts, repoConfig *RepoConfig) (int, error)
 		ContainerImage:     *containerImage,
 		Env:                envVars,
 	}
-
 	req.GetRepoState().Patch = append(req.GetRepoState().Patch, repoConfig.Patches...)
+
+	if *timeout != 0 {
+		req.Timeout = timeout.String()
+	}
 
 	rsp, err := bbClient.Run(ctx, req)
 	if err != nil {
@@ -561,8 +567,20 @@ func Run(ctx context.Context, opts RunOpts, repoConfig *RepoConfig) (int, error)
 	}
 
 	iid := rsp.GetInvocationId()
-
 	log.Debugf("Invocation ID: %s", iid)
+
+	// If the remote bazel process is canceled or killed, cancel the remote run
+	sigChan := make(chan os.Signal)
+	go func() {
+		<-sigChan
+		_, err = bbClient.CancelExecutions(ctx, &inpb.CancelExecutionsRequest{
+			InvocationId: iid,
+		})
+		if err != nil {
+			log.Warnf("Failed to cancel remote run: %s", err)
+		}
+	}()
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 
 	if err := streamLogs(ctx, bbClient, iid); err != nil {
 		return 0, err

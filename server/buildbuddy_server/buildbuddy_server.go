@@ -242,18 +242,22 @@ func getGroupUrl(g *tables.Group) string {
 	return gURL
 }
 
-func makeGroups(groupRoles []*tables.GroupRole) []*grpb.Group {
-	r := make([]*grpb.Group, 0)
+func makeGroups(groupRoles []*tables.GroupRole) ([]*grpb.Group, error) {
+	groups := make([]*grpb.Group, 0)
 	for _, gr := range groupRoles {
 		g := gr.Group
 		githubToken := ""
 		if g.GithubToken != nil {
 			githubToken = *g.GithubToken
 		}
-		r = append(r, &grpb.Group{
+		r, err := role.ToProto(role.Role(gr.Role))
+		if err != nil {
+			return nil, err
+		}
+		groups = append(groups, &grpb.Group{
 			Id:                                g.GroupID,
 			Name:                              g.Name,
-			Role:                              role.ToProto(role.Role(gr.Role)),
+			Role:                              r,
 			OwnedDomain:                       g.OwnedDomain,
 			GithubLinked:                      githubToken != "",
 			UrlIdentifier:                     g.URLIdentifier,
@@ -269,7 +273,7 @@ func makeGroups(groupRoles []*tables.GroupRole) []*grpb.Group {
 			ExternalUserManagement:            g.ExternalUserManagement,
 		})
 	}
-	return r
+	return groups, nil
 }
 
 func (s *BuildBuddyServer) getGroupIDForSubdomain(ctx context.Context) (string, error) {
@@ -351,10 +355,13 @@ func (s *BuildBuddyServer) GetUser(ctx context.Context, req *uspb.GetUserRequest
 			}
 		}
 	}
-
+	groups, err := makeGroups(tu.Groups)
+	if err != nil {
+		return nil, err
+	}
 	return &uspb.GetUserResponse{
 		DisplayUser:     tu.ToProto(),
-		UserGroup:       makeGroups(tu.Groups),
+		UserGroup:       groups,
 		SelectedGroupId: selectedGroupID,
 		SelectedGroup: &uspb.SelectedGroup{
 			GroupId: selectedGroupID,
@@ -1119,7 +1126,14 @@ func (s *BuildBuddyServer) GetInvocationOwner(ctx context.Context, req *inpb.Get
 	if err != nil {
 		return nil, err
 	}
-	return &inpb.GetInvocationOwnerResponse{GroupId: gid}, nil
+	g, err := s.env.GetUserDB().GetGroupByID(ctx, gid)
+	if err != nil {
+		return nil, err
+	}
+	return &inpb.GetInvocationOwnerResponse{
+		GroupId:  gid,
+		GroupUrl: getGroupUrl(g),
+	}, nil
 }
 
 func (s *BuildBuddyServer) GetExecution(ctx context.Context, req *espb.GetExecutionRequest) (*espb.GetExecutionResponse, error) {
