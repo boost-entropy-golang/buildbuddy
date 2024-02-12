@@ -1118,6 +1118,46 @@ func TestUserOwnedKeys_RemoveUserFromGroup_KeyNoLongerWorks(t *testing.T) {
 		err)
 }
 
+func TestUserOwnedKeys_ChangeRole_UpdatesCapabilities(t *testing.T) {
+	flags.Set(t, "auth.api_key_group_cache_ttl", 0)
+
+	ctx := context.Background()
+	env := newTestEnv(t)
+	udb := env.GetUserDB()
+	adb := env.GetAuthDB()
+
+	createUser(t, ctx, env, "US1", "org1.io")
+	ctx1 := authUserCtx(ctx, env, t, "US1")
+	takeOwnershipOfDomain(t, ctx1, env, "US1")
+	gr1 := getGroup(t, ctx1, env).Group
+	setUserOwnedKeysEnabled(t, ctx1, env, gr1.GroupID, true)
+	err := udb.UpdateGroupUsers(ctx1, gr1.GroupID, []*grpb.UpdateGroupUsersRequest_Update{
+		{UserId: &uidpb.UserId{Id: "US2"}, Role: grpb.Group_ADMIN_ROLE},
+	})
+	require.NoError(t, err)
+	us1Key, err := adb.CreateUserAPIKey(
+		ctx1, gr1.GroupID, "",
+		[]akpb.ApiKey_Capability{akpb.ApiKey_CACHE_WRITE_CAPABILITY})
+	require.NoError(t, err, "US1 should be able to create a user-owned key")
+
+	_, err = env.GetAuthDB().GetAPIKeyGroupFromAPIKey(ctx, us1Key.Value)
+	require.NoError(t, err, "US2 should be able to authenticate via their user-owned key")
+
+	// Now demote US2 to developer.
+	err = udb.UpdateGroupUsers(ctx1, gr1.GroupID, []*grpb.UpdateGroupUsersRequest_Update{{
+		UserId: &uidpb.UserId{Id: "US1"},
+		Role:   grpb.Group_DEVELOPER_ROLE,
+	}})
+	require.NoError(t, err)
+
+	akg, err := env.GetAuthDB().GetAPIKeyGroupFromAPIKey(ctx, us1Key.Value)
+	require.NoError(t, err)
+	assert.Equal(t, capabilities.ToInt([]akpb.ApiKey_Capability{
+		// CACHE_WRITE should have been demoted to CAS_WRITE.
+		akpb.ApiKey_CAS_WRITE_CAPABILITY,
+	}), akg.GetCapabilities())
+}
+
 func TestUserOwnedKeys_CreateAndUpdateCapabilities(t *testing.T) {
 	for _, test := range []struct {
 		Name         string
@@ -1135,11 +1175,14 @@ func TestUserOwnedKeys_CreateAndUpdateCapabilities(t *testing.T) {
 		// user-owned keys (for now, we only support setting cache capabilities
 		// on user-owned keys)
 		{Name: "Admin_OrgAdmin_Fail", Role: role.Admin, Capabilities: []akpb.ApiKey_Capability{akpb.ApiKey_ORG_ADMIN_CAPABILITY}, OK: false},
-		// TODO(bduffany): Figure out how these capabilities should work. For
-		// now, we just fail if they are assigned by these (role, capability)
-		// combinations. See http://go/b/3091#issuecomment-1932266337
-		{Name: "Writer_ACWrite_Fail", Role: role.Writer, Capabilities: []akpb.ApiKey_Capability{akpb.ApiKey_CACHE_WRITE_CAPABILITY}, OK: false},
+		// Readers and writers should be able to assign any capabilities
+		// within the max limits allowed by their role.
+		{Name: "Writer_NoCapabilities_OK", Role: role.Writer, Capabilities: nil, OK: true},
+		{Name: "Writer_CASWrite_OK", Role: role.Writer, Capabilities: []akpb.ApiKey_Capability{akpb.ApiKey_CAS_WRITE_CAPABILITY}, OK: true},
+		{Name: "Writer_ACWrite_OK", Role: role.Writer, Capabilities: []akpb.ApiKey_Capability{akpb.ApiKey_CACHE_WRITE_CAPABILITY}, OK: true},
+		{Name: "Reader_NoCapabilities_OK", Role: role.Reader, Capabilities: nil, OK: true},
 		{Name: "Reader_CASWrite_Fail", Role: role.Reader, Capabilities: []akpb.ApiKey_Capability{akpb.ApiKey_CAS_WRITE_CAPABILITY}, OK: false},
+		{Name: "Reader_ACWrite_Fail", Role: role.Reader, Capabilities: []akpb.ApiKey_Capability{akpb.ApiKey_CACHE_WRITE_CAPABILITY}, OK: false},
 	} {
 		t.Run(test.Name, func(t *testing.T) {
 			ctx := context.Background()
