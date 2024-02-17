@@ -252,15 +252,10 @@ func (h *executorHandle) authorize(ctx context.Context) (string, error) {
 	if !h.requireAuthorization {
 		return "", nil
 	}
-
-	auth := h.env.GetAuthenticator()
-	if auth == nil {
-		return "", status.FailedPreconditionError("executor authorization required, but authenticator is not set")
-	}
 	// We intentionally use AuthenticateGRPCRequest instead of AuthenticatedUser to ensure that we refresh the
 	// credentials to handle the case where the API key is deleted (or capabilities are updated) after the stream was
 	// created.
-	user, err := auth.AuthenticateGRPCRequest(ctx)
+	user, err := h.env.GetAuthenticator().AuthenticateGRPCRequest(ctx)
 	if err != nil {
 		return "", err
 	}
@@ -982,7 +977,7 @@ func (s *SchedulerServer) GetPoolInfo(ctx context.Context, os, requestedPool, wo
 		return sharedPool, nil
 	}
 
-	user, err := perms.AuthenticatedUser(ctx, s.env)
+	user, err := s.env.GetAuthenticator().AuthenticatedUser(ctx)
 	if err != nil {
 		if s.env.GetAuthenticator().AnonymousUsageEnabled(ctx) {
 			if s.forceUserOwnedDarwinExecutors && os == darwinOperatingSystemName {
@@ -1929,7 +1924,7 @@ func (s *SchedulerServer) ReEnqueueTask(ctx context.Context, req *scpb.ReEnqueue
 }
 
 func (s *SchedulerServer) getExecutionNodesFromRedis(ctx context.Context, groupID string) ([]*scpb.ExecutionNode, error) {
-	user, err := perms.AuthenticatedUser(ctx, s.env)
+	user, err := s.env.GetAuthenticator().AuthenticatedUser(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -1983,7 +1978,7 @@ func (s *SchedulerServer) GetExecutionNodes(ctx context.Context, req *scpb.GetEx
 		userOwnedExecutorsEnabled = false
 	}
 
-	u, err := perms.AuthenticatedUser(ctx, s.env)
+	u, err := s.env.GetAuthenticator().AuthenticatedUser(ctx)
 	if err != nil {
 		return nil, err
 	}

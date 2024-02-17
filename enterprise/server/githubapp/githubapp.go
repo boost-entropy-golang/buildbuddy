@@ -30,7 +30,6 @@ import (
 	"github.com/buildbuddy-io/buildbuddy/server/util/log"
 	"github.com/buildbuddy-io/buildbuddy/server/util/perms"
 	"github.com/buildbuddy-io/buildbuddy/server/util/retry"
-	"github.com/buildbuddy-io/buildbuddy/server/util/role"
 	"github.com/buildbuddy-io/buildbuddy/server/util/scratchspace"
 	"github.com/buildbuddy-io/buildbuddy/server/util/status"
 	"github.com/go-git/go-git/v5"
@@ -292,7 +291,7 @@ func (a *GitHubApp) GetRepositoryInstallationToken(ctx context.Context, repo *ta
 }
 
 func (a *GitHubApp) GetGitHubAppInstallations(ctx context.Context, req *ghpb.GetAppInstallationsRequest) (*ghpb.GetAppInstallationsResponse, error) {
-	u, err := perms.AuthenticatedUser(ctx, a.env)
+	u, err := a.env.GetAuthenticator().AuthenticatedUser(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -319,7 +318,7 @@ func (a *GitHubApp) GetGitHubAppInstallations(ctx context.Context, req *ghpb.Get
 }
 
 func (a *GitHubApp) LinkGitHubAppInstallation(ctx context.Context, req *ghpb.LinkAppInstallationRequest) (*ghpb.LinkAppInstallationResponse, error) {
-	u, err := perms.AuthenticatedUser(ctx, a.env)
+	u, err := a.env.GetAuthenticator().AuthenticatedUser(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -334,11 +333,11 @@ func (a *GitHubApp) LinkGitHubAppInstallation(ctx context.Context, req *ghpb.Lin
 }
 
 func (a *GitHubApp) linkInstallation(ctx context.Context, installation *github.Installation, groupID string) error {
-	u, err := perms.AuthenticatedUser(ctx, a.env)
+	u, err := a.env.GetAuthenticator().AuthenticatedUser(ctx)
 	if err != nil {
 		return err
 	}
-	if err := authutil.AuthorizeGroupRole(u, groupID, role.Admin); err != nil {
+	if err := authutil.AuthorizeOrgAdmin(u, groupID); err != nil {
 		return err
 	}
 	tu, err := a.env.GetUserDB().GetUser(ctx)
@@ -388,7 +387,7 @@ func (a *GitHubApp) createInstallation(ctx context.Context, in *tables.GitHubApp
 }
 
 func (a *GitHubApp) UnlinkGitHubAppInstallation(ctx context.Context, req *ghpb.UnlinkAppInstallationRequest) (*ghpb.UnlinkAppInstallationResponse, error) {
-	u, err := perms.AuthenticatedUser(ctx, a.env)
+	u, err := a.env.GetAuthenticator().AuthenticatedUser(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -407,7 +406,7 @@ func (a *GitHubApp) UnlinkGitHubAppInstallation(ctx context.Context, req *ghpb.U
 		if err != nil {
 			return err
 		}
-		if err := authutil.AuthorizeGroupRole(u, ti.GroupID, role.Admin); err != nil {
+		if err := authutil.AuthorizeOrgAdmin(u, ti.GroupID); err != nil {
 			return err
 		}
 		return tx.NewQuery(ctx, "githubapp_unlink_installation").Raw(`
@@ -422,7 +421,7 @@ func (a *GitHubApp) UnlinkGitHubAppInstallation(ctx context.Context, req *ghpb.U
 }
 
 func (a *GitHubApp) GetInstallationByOwner(ctx context.Context, owner string) (*tables.GitHubAppInstallation, error) {
-	u, err := perms.AuthenticatedUser(ctx, a.env)
+	u, err := a.env.GetAuthenticator().AuthenticatedUser(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -442,7 +441,7 @@ func (a *GitHubApp) GetInstallationByOwner(ctx context.Context, owner string) (*
 }
 
 func (a *GitHubApp) GetLinkedGitHubRepos(ctx context.Context) (*ghpb.GetLinkedReposResponse, error) {
-	u, err := perms.AuthenticatedUser(ctx, a.env)
+	u, err := a.env.GetAuthenticator().AuthenticatedUser(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -486,7 +485,7 @@ func (a *GitHubApp) LinkGitHubRepo(ctx context.Context, req *ghpb.LinkRepoReques
 		return nil, err
 	}
 
-	if _, err := perms.AuthenticatedUser(ctx, a.env); err != nil {
+	if _, err := a.env.GetAuthenticator().AuthenticatedUser(ctx); err != nil {
 		return nil, err
 	}
 	p, err := perms.ForAuthenticatedGroup(ctx, a.env)
@@ -523,7 +522,7 @@ func (a *GitHubApp) UnlinkGitHubRepo(ctx context.Context, req *ghpb.UnlinkRepoRe
 		return nil, status.InvalidArgumentErrorf("failed to parse repo URL: %s", err)
 	}
 	req.RepoUrl = norm.String()
-	u, err := perms.AuthenticatedUser(ctx, a.env)
+	u, err := a.env.GetAuthenticator().AuthenticatedUser(ctx)
 	if err != nil {
 		return nil, err
 	}

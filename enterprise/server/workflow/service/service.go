@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -44,7 +45,6 @@ import (
 	"github.com/buildbuddy-io/buildbuddy/server/util/query_builder"
 	"github.com/buildbuddy-io/buildbuddy/server/util/random"
 	"github.com/buildbuddy-io/buildbuddy/server/util/retry"
-	"github.com/buildbuddy-io/buildbuddy/server/util/role"
 	"github.com/buildbuddy-io/buildbuddy/server/util/status"
 	"github.com/buildbuddy-io/buildbuddy/server/util/subdomain"
 	"github.com/prometheus/client_golang/prometheus"
@@ -52,6 +52,7 @@ import (
 	"google.golang.org/genproto/googleapis/longrunning"
 	"google.golang.org/protobuf/types/known/durationpb"
 
+	bazelgo "github.com/bazelbuild/rules_go/go/tools/bazel"
 	ctxpb "github.com/buildbuddy-io/buildbuddy/proto/context"
 	inspb "github.com/buildbuddy-io/buildbuddy/proto/invocation_status"
 	repb "github.com/buildbuddy-io/buildbuddy/proto/remote_execution"
@@ -242,9 +243,6 @@ func (ws *workflowService) checkPreconditions(ctx context.Context) error {
 	if ws.env.GetDBHandle() == nil {
 		return status.FailedPreconditionError("database not configured")
 	}
-	if ws.env.GetAuthenticator() == nil {
-		return status.FailedPreconditionError("anonymous workflow access is not supported")
-	}
 	if _, err := ws.env.GetAuthenticator().AuthenticatedUser(ctx); err != nil {
 		return err
 	}
@@ -262,10 +260,11 @@ func (ws *workflowService) CreateWorkflow(ctx context.Context, req *wfpb.CreateW
 	}
 
 	// Ensure the request is authenticated so some group can own this workflow.
-	groupID, err := perms.AuthenticateSelectedGroupID(ctx, ws.env, req.GetRequestContext())
+	user, err := ws.env.GetAuthenticator().AuthenticatedUser(ctx)
 	if err != nil {
 		return nil, err
 	}
+	groupID := user.GetGroupID()
 	permissions := &perms.UserGroupPerm{
 		UserID:  groupID,
 		GroupID: groupID,
@@ -433,7 +432,7 @@ func (ws *workflowService) GetWorkflows(ctx context.Context) (*wfpb.GetWorkflows
 		return nil, err
 	}
 
-	u, err := perms.AuthenticatedUser(ctx, ws.env)
+	u, err := ws.env.GetAuthenticator().AuthenticatedUser(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -491,7 +490,7 @@ func (ws *workflowService) ExecuteWorkflow(ctx context.Context, req *wfpb.Execut
 	}
 
 	// Authenticate
-	user, err := perms.AuthenticatedUser(ctx, ws.env)
+	user, err := ws.env.GetAuthenticator().AuthenticatedUser(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -673,7 +672,7 @@ func (ws *workflowService) GetLegacyWorkflowIDForGitRepository(groupID string, r
 }
 
 func (ws *workflowService) checkCleanWorkflowPermissions(ctx context.Context, wf *tables.Workflow) error {
-	u, err := perms.AuthenticatedUser(ctx, ws.env)
+	u, err := ws.env.GetAuthenticator().AuthenticatedUser(ctx)
 	if err != nil {
 		return err
 	}
@@ -684,7 +683,7 @@ func (ws *workflowService) checkCleanWorkflowPermissions(ctx context.Context, wf
 	if !g.RestrictCleanWorkflowRunsToAdmins {
 		return nil
 	}
-	return authutil.AuthorizeGroupRole(u, wf.GroupID, role.Admin)
+	return authutil.AuthorizeOrgAdmin(u, wf.GroupID)
 }
 
 // To run workflow in a clean container, update the instance name suffix
@@ -1006,11 +1005,11 @@ func (ws *workflowService) gitHubTokenForAuthorizedGroup(ctx context.Context, re
 	if d == nil {
 		return "", status.FailedPreconditionError("Missing UserDB")
 	}
-	groupID, err := perms.AuthenticateSelectedGroupID(ctx, ws.env, reqCtx)
+	u, err := ws.env.GetAuthenticator().AuthenticatedUser(ctx)
 	if err != nil {
 		return "", err
 	}
-	g, err := d.GetGroupByID(ctx, groupID)
+	g, err := d.GetGroupByID(ctx, u.GetGroupID())
 	if err != nil {
 		return "", err
 	}
@@ -1278,6 +1277,14 @@ func (ws *workflowService) ciRunnerBazelCommand() string {
 	return *workflowsCIRunnerBazelCommand
 }
 
+func runnerBinaryFile() (*os.File, error) {
+	path, err := bazelgo.Runfile("enterprise/server/cmd/ci_runner/ci_runner_/ci_runner")
+	if err != nil {
+		return nil, status.FailedPreconditionErrorf("could not find runner binary runfile: %s", err)
+	}
+	return os.Open(path)
+}
+
 func (ws *workflowService) apiKeyForWorkflow(ctx context.Context, wf *tables.Workflow) (*tables.APIKey, error) {
 	k, err := ws.env.GetAuthDB().GetAPIKeyForInternalUseOnly(ctx, wf.GroupID)
 	if err != nil {
@@ -1298,9 +1305,6 @@ func (ws *workflowService) gitProviderForRequest(r *http.Request) (interfaces.Gi
 func (ws *workflowService) checkStartWorkflowPreconditions(ctx context.Context) error {
 	if ws.env.GetDBHandle() == nil {
 		return status.FailedPreconditionError("database not configured")
-	}
-	if ws.env.GetAuthenticator() == nil {
-		return status.FailedPreconditionError("anonymous workflow access is not supported")
 	}
 	if ws.env.GetRemoteExecutionClient() == nil {
 		return status.UnavailableError("Remote execution not configured.")

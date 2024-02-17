@@ -21,7 +21,6 @@ import (
 	"github.com/buildbuddy-io/buildbuddy/server/util/perms"
 	"github.com/buildbuddy-io/buildbuddy/server/util/query_builder"
 	"github.com/buildbuddy-io/buildbuddy/server/util/random"
-	"github.com/buildbuddy-io/buildbuddy/server/util/role"
 	"github.com/buildbuddy-io/buildbuddy/server/util/status"
 	"github.com/buildbuddy-io/buildbuddy/server/util/subdomain"
 	"github.com/prometheus/client_golang/prometheus"
@@ -568,11 +567,11 @@ func newAPIKeyToken() (string, error) {
 }
 
 func (d *AuthDB) authorizeGroupAdminRole(ctx context.Context, groupID string) error {
-	u, err := perms.AuthenticatedUser(ctx, d.env)
+	u, err := d.env.GetAuthenticator().AuthenticatedUser(ctx)
 	if err != nil {
 		return err
 	}
-	return authutil.AuthorizeGroupRole(u, groupID, role.Admin)
+	return authutil.AuthorizeOrgAdmin(u, groupID)
 }
 
 func (d *AuthDB) CreateAPIKey(ctx context.Context, groupID string, label string, caps []akpb.ApiKey_Capability, visibleToDevelopers bool) (*tables.APIKey, error) {
@@ -600,7 +599,7 @@ func (d *AuthDB) CreateImpersonationAPIKey(ctx context.Context, groupID string) 
 		return nil, status.InvalidArgumentError("Group ID cannot be nil.")
 	}
 
-	u, err := perms.AuthenticatedUser(ctx, d.env)
+	u, err := d.env.GetAuthenticator().AuthenticatedUser(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -612,7 +611,7 @@ func (d *AuthDB) CreateImpersonationAPIKey(ctx context.Context, groupID string) 
 		if adminGroupID == "" {
 			return nil, status.PermissionDeniedError("You do not have access to the requested organization")
 		}
-		if err := authutil.AuthorizeGroupRole(u, adminGroupID, role.Admin); err != nil {
+		if err := authutil.AuthorizeOrgAdmin(u, adminGroupID); err != nil {
 			return nil, err
 		}
 	}
@@ -677,7 +676,7 @@ func (d *AuthDB) CreateUserAPIKey(ctx context.Context, groupID, label string, ca
 		return nil, err
 	}
 
-	u, err := perms.AuthenticatedUser(ctx, d.env)
+	u, err := d.env.GetAuthenticator().AuthenticatedUser(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -737,7 +736,7 @@ func (d *AuthDB) getAPIKey(ctx context.Context, tx interfaces.DB, apiKeyID strin
 }
 
 func (d *AuthDB) GetAPIKey(ctx context.Context, apiKeyID string) (*tables.APIKey, error) {
-	user, err := perms.AuthenticatedUser(ctx, d.env)
+	user, err := d.env.GetAuthenticator().AuthenticatedUser(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -792,7 +791,7 @@ func (d *AuthDB) GetAPIKeys(ctx context.Context, groupID string) ([]*tables.APIK
 	if groupID == "" {
 		return nil, status.InvalidArgumentError("Group ID cannot be empty.")
 	}
-	u, err := perms.AuthenticatedUser(ctx, d.env)
+	u, err := d.env.GetAuthenticator().AuthenticatedUser(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -803,7 +802,10 @@ func (d *AuthDB) GetAPIKeys(ctx context.Context, groupID string) ([]*tables.APIK
 	// Select group-owned keys only
 	q.AddWhereClause(`user_id IS NULL OR user_id = ''`)
 	q.AddWhereClause(`group_id = ?`, groupID)
-	if err := authutil.AuthorizeGroupRole(u, groupID, role.Admin); err != nil {
+	if err := authutil.AuthorizeOrgAdmin(u, groupID); err != nil {
+		// If we're not an admin, restrict to keys that have only been made
+		// visible to non-admins. Note: the visible_to_developers field means "visible to
+		// non-admins" now that we have reader/writer roles.
 		q.AddWhereClause("visible_to_developers = ?", true)
 	}
 	q.AddWhereClause(`impersonation = false`)
@@ -827,7 +829,7 @@ func (d *AuthDB) authorizeAPIKeyWrite(ctx context.Context, tx interfaces.DB, api
 	if apiKeyID == "" {
 		return nil, status.InvalidArgumentError("API key ID is required")
 	}
-	user, err := perms.AuthenticatedUser(ctx, d.env)
+	user, err := d.env.GetAuthenticator().AuthenticatedUser(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -898,7 +900,7 @@ func (d *AuthDB) GetUserAPIKeys(ctx context.Context, groupID string) ([]*tables.
 	if groupID == "" {
 		return nil, status.InvalidArgumentError("Group ID cannot be empty.")
 	}
-	u, err := perms.AuthenticatedUser(ctx, d.env)
+	u, err := d.env.GetAuthenticator().AuthenticatedUser(ctx)
 	if err != nil {
 		return nil, err
 	}

@@ -8,7 +8,18 @@ import * as diff from "diff";
 import { runner } from "../../../proto/runner_ts_proto";
 import CodeBuildButton from "./code_build_button";
 import CodeEmptyStateComponent from "./code_empty";
-import { ArrowLeft, ArrowUpCircle, Code, Download, Key, Link, PlusCircle, Send, XCircle } from "lucide-react";
+import {
+  ArrowLeft,
+  ArrowUpCircle,
+  ChevronRight,
+  Code,
+  Download,
+  Key,
+  Link,
+  PlusCircle,
+  Send,
+  XCircle,
+} from "lucide-react";
 import Spinner from "../../../app/components/spinner/spinner";
 import { OutlinedButton, FilledButton } from "../../../app/components/button/button";
 import { createPullRequest, updatePullRequest } from "./code_pull_request";
@@ -39,8 +50,8 @@ interface State {
   installationsResponse: github.GetGithubUserInstallationsResponse | undefined;
   treeShaToExpanded: Map<string, boolean>;
   treeShaToChildrenMap: Map<string, github.TreeNode[]>;
-  fullPathToModelMap: Map<string, any>;
-  fullPathToDiffModelMap: Map<string, any>;
+  fullPathToModelMap: Map<string, monaco.editor.ITextModel>;
+  fullPathToDiffModelMap: Map<string, monaco.editor.IDiffEditorModel>;
   originalFileContents: Map<string, string>;
   changes: Map<string, string>;
   mergeConflicts: Map<string, string>;
@@ -71,10 +82,10 @@ export default class CodeComponent extends React.Component<Props, State> {
     treeResponse: undefined,
     installationsResponse: undefined,
     treeShaToExpanded: new Map<string, boolean>(),
-    treeShaToChildrenMap: new Map<string, any[]>(),
-    fullPathToModelMap: new Map<string, any>(),
-    fullPathToDiffModelMap: new Map<string, any>(),
-    originalFileContents: new Map<string, any>(),
+    treeShaToChildrenMap: new Map<string, Array<github.TreeNode>>(),
+    fullPathToModelMap: new Map<string, monaco.editor.ITextModel>(),
+    fullPathToDiffModelMap: new Map<string, monaco.editor.IDiffEditorModel>(),
+    originalFileContents: new Map<string, string>(),
     changes: new Map<string, string>(),
     mergeConflicts: new Map<string, string>(),
     pathToIncludeChanges: new Map<string, boolean>(),
@@ -91,8 +102,8 @@ export default class CodeComponent extends React.Component<Props, State> {
     prBody: "",
   };
 
-  editor: any;
-  diffEditor: any;
+  editor: monaco.editor.IStandaloneCodeEditor | undefined;
+  diffEditor: monaco.editor.IDiffEditor | undefined;
 
   codeViewer = React.createRef<HTMLDivElement>();
   diffViewer = React.createRef<HTMLDivElement>();
@@ -142,6 +153,7 @@ export default class CodeComponent extends React.Component<Props, State> {
       theme: "vs",
       readOnly: this.isSingleFile(),
     });
+    this.forceUpdate();
 
     const bytestreamURL = this.props.search.get("bytestream_url") || "";
     const invocationID = this.props.search.get("invocation_id") || "";
@@ -149,7 +161,8 @@ export default class CodeComponent extends React.Component<Props, State> {
     let filename = this.props.search.get("filename");
     if (this.isSingleFile() && bytestreamURL) {
       rpcService.fetchBytestreamFile(bytestreamURL, invocationID, "text", { zip }).then((result) => {
-        this.editor.setModel(monaco.editor.createModel(result, undefined, monaco.Uri.file(filename || "file")));
+        let path = monaco.Uri.file(filename || "file");
+        this.editor?.setModel(monaco.editor.createModel(result, langFromPath(path.path), path));
       });
       return;
     }
@@ -172,8 +185,8 @@ export default class CodeComponent extends React.Component<Props, State> {
             let records = parseLcov(result);
             for (let record of records) {
               if (record.sourceFile == this.currentPath()) {
-                this.editor.deltaDecorations(
-                  this.editor.getModel().getAllDecorations(),
+                this.editor?.deltaDecorations(
+                  [],
                   record.data.map((r) => {
                     const parts = r.split(",");
                     const lineNum = parseInt(parts[0]);
@@ -220,7 +233,7 @@ export default class CodeComponent extends React.Component<Props, State> {
           undefined
         );
       } else {
-        this.editor.setModel(this.state.fullPathToModelMap.get(this.currentPath()));
+        this.editor.setModel(this.state.fullPathToModelMap.get(this.currentPath()) || null);
       }
     }
 
@@ -230,14 +243,14 @@ export default class CodeComponent extends React.Component<Props, State> {
   }
 
   handleContentChanged() {
-    if (this.state.originalFileContents.get(this.currentPath()) === this.editor.getValue()) {
+    if (this.state.originalFileContents.get(this.currentPath()) === this.editor?.getValue()) {
       this.state.changes.delete(this.currentPath());
       this.state.pathToIncludeChanges.delete(this.currentPath());
     } else if (this.currentPath()) {
       if (!this.state.changes.get(this.currentPath())) {
         this.state.pathToIncludeChanges.set(this.currentPath(), true);
       }
-      this.state.changes.set(this.currentPath(), this.editor.getValue());
+      this.state.changes.set(this.currentPath(), this.editor?.getValue() || "");
     }
     this.updateState({ changes: this.state.changes });
   }
@@ -318,8 +331,7 @@ export default class CodeComponent extends React.Component<Props, State> {
   // TODO(siggisim): Support renaming files
   // TODO(siggisim): Support right click file context menus
   // TODO(siggisim): Support tabs
-  // TODO(siggisim): Remove the use of all `any` types
-  handleFileClicked(node: any, fullPath: string) {
+  handleFileClicked(node: github.TreeNode, fullPath: string) {
     if (node.type === "tree") {
       if (this.state.treeShaToExpanded.get(node.sha)) {
         this.state.treeShaToExpanded.set(node.sha, false);
@@ -370,11 +382,11 @@ export default class CodeComponent extends React.Component<Props, State> {
     });
     let model = this.state.fullPathToModelMap.get(fullPath);
     if (!model) {
-      model = monaco.editor.createModel(fileContents, undefined, monaco.Uri.file(fullPath));
+      model = monaco.editor.createModel(fileContents, langFromPath(fullPath), monaco.Uri.file(fullPath));
       this.state.fullPathToModelMap.set(fullPath, model);
       this.updateState({ fullPathToModelMap: this.state.fullPathToModelMap });
     }
-    this.editor.setModel(model);
+    this.editor?.setModel(model);
   }
 
   navigateToPath(path: string) {
@@ -417,7 +429,7 @@ export default class CodeComponent extends React.Component<Props, State> {
       .then((response: runner.RunResponse) => {
         window.open(`/invocation/${response.invocationId}?queued=true`, "_blank");
       })
-      .catch((error: any) => {
+      .catch((error) => {
         alert(error);
       })
       .finally(() => {
@@ -513,7 +525,7 @@ export default class CodeComponent extends React.Component<Props, State> {
 
   handleChangeClicked(fullPath: string) {
     this.navigateToPath(fullPath);
-    this.editor.setModel(this.state.fullPathToModelMap.get(fullPath));
+    this.editor?.setModel(this.state.fullPathToModelMap.get(fullPath) || null);
   }
 
   handleCheckboxClicked(fullPath: string) {
@@ -532,7 +544,7 @@ export default class CodeComponent extends React.Component<Props, State> {
       let fileContents = "// Your code here";
       let model = this.state.fullPathToModelMap.get(fileName);
       if (!model) {
-        model = monaco.editor.createModel(fileContents, undefined, monaco.Uri.file(fileName));
+        model = monaco.editor.createModel(fileContents, langFromPath(fileName), monaco.Uri.file(fileName));
         this.state.fullPathToModelMap.set(fileName, model);
       }
       this.state.originalFileContents.set(fileName, "");
@@ -543,7 +555,7 @@ export default class CodeComponent extends React.Component<Props, State> {
           changes: this.state.changes,
         },
         () => {
-          this.editor.setModel(model);
+          this.editor?.setModel(model!);
           this.handleContentChanged();
         }
       );
@@ -615,7 +627,7 @@ export default class CodeComponent extends React.Component<Props, State> {
 
   handleRevertClicked(path: string, event: React.MouseEvent<HTMLSpanElement, MouseEvent>) {
     this.state.changes.delete(path);
-    this.state.fullPathToModelMap.get(path).setValue(this.state.originalFileContents.get(path));
+    this.state.fullPathToModelMap.get(path)?.setValue(this.state.originalFileContents.get(path) || "");
     this.updateState({ changes: this.state.changes, fullPathToModelMap: this.state.fullPathToModelMap });
     event.stopPropagation();
   }
@@ -701,7 +713,7 @@ export default class CodeComponent extends React.Component<Props, State> {
 
   handleResolveClicked(fullPath: string, event: React.MouseEvent<HTMLSpanElement, MouseEvent>) {
     event.stopPropagation();
-    this.state.changes.set(fullPath, this.state.fullPathToDiffModelMap.get(fullPath).modified.getValue());
+    this.state.changes.set(fullPath, this.state.fullPathToDiffModelMap.get(fullPath)?.modified.getValue() || "");
     this.state.fullPathToDiffModelMap.delete(fullPath);
     this.state.mergeConflicts.delete(fullPath);
     this.updateState({
@@ -727,11 +739,11 @@ export default class CodeComponent extends React.Component<Props, State> {
           this.diffEditor = monaco.editor.createDiffEditor(this.diffViewer.current!);
         }
         let fileContents = textDecoder.decode(response.content);
-        let editedModel = this.state.fullPathToModelMap.get(fullPath);
+        let editedModel = this.state.fullPathToModelMap.get(fullPath)!;
         let uri = monaco.Uri.file(`${fullPath}-${sha}`);
         let latestModel = monaco.editor.getModel(uri);
         if (!latestModel) {
-          latestModel = monaco.editor.createModel(fileContents, undefined, uri);
+          latestModel = monaco.editor.createModel(fileContents, langFromPath(uri.path), uri);
         }
         let diffModel = { original: latestModel, modified: editedModel };
         this.diffEditor.setModel(diffModel);
@@ -739,7 +751,7 @@ export default class CodeComponent extends React.Component<Props, State> {
 
         this.navigateToPath(fullPath);
         this.updateState({ fullPathToDiffModelMap: this.state.fullPathToDiffModelMap }, () => {
-          this.diffEditor.layout();
+          this.diffEditor?.layout();
         });
       });
   }
@@ -783,8 +795,7 @@ export default class CodeComponent extends React.Component<Props, State> {
               </a>
             )}
             <a href="/">
-              <img alt="BuildBuddy Code" src="/image/logo_dark.svg" className="logo" /> Code{" "}
-              <Code className="icon code-logo" />
+              <img alt="BuildBuddy Code" src="/image/b_dark.svg" className="logo" />
             </a>
           </div>
           <div className="code-menu-breadcrumbs">
@@ -800,23 +811,31 @@ export default class CodeComponent extends React.Component<Props, State> {
                   <a target="_blank" href={`http://github.com/${this.currentOwner()}`}>
                     {this.currentOwner()}
                   </a>{" "}
-                  /{" "}
+                  <ChevronRight />
                   <a target="_blank" href={`http://github.com/${this.currentOwner()}/${this.currentRepo()}`}>
                     {this.currentRepo()}
-                  </a>{" "}
-                  {/* <a href="#">master</a> / TODO: add branch to breadcrumb  */}@{" "}
-                  <a
-                    target="_blank"
-                    title={this.state.commitSHA}
-                    href={`http://github.com/${this.currentOwner()}/${this.currentRepo()}/commit/${
-                      this.state.commitSHA
-                    }`}>
-                    {this.state.commitSHA?.slice(0, 7)}
-                  </a>{" "}
-                  <span onClick={this.handleUpdateCommitSha.bind(this, undefined)}>
-                    <ArrowUpCircle className="code-update-commit" />
-                  </span>{" "}
+                  </a>
                 </div>
+                <ChevronRight />
+                <a
+                  href={`http://github.com/${this.currentOwner()}/${this.currentRepo()}/tree/${
+                    this.state.repoResponse?.defaultBranch
+                  }`}>
+                  {this.state.repoResponse?.defaultBranch}
+                </a>
+                <ChevronRight />
+                <a
+                  target="_blank"
+                  title={this.state.commitSHA}
+                  href={`http://github.com/${this.currentOwner()}/${this.currentRepo()}/commit/${
+                    this.state.commitSHA
+                  }`}>
+                  {this.state.commitSHA?.slice(0, 7)}
+                </a>{" "}
+                <span onClick={this.handleUpdateCommitSha.bind(this, undefined)}>
+                  <ArrowUpCircle className="code-update-commit" />
+                </span>{" "}
+                <ChevronRight />
                 <div className="code-menu-breadcrumbs-filename">
                   {this.currentPath() ? (
                     <>
@@ -1047,7 +1066,7 @@ self.MonacoEnvironment = {
 };
 
 // This replaces any non-serializable objects in state with serializable models.
-function stateReplacer(key: any, value: any) {
+function stateReplacer(key: string, value: any) {
   if (key == "fullPathToModelMap") {
     return {
       dataType: "ModelMap",
@@ -1086,25 +1105,43 @@ function stateReplacer(key: any, value: any) {
 }
 
 // This revives any non-serializable objects in state from their seralized form.
-function stateReviver(key: any, value: any) {
+function stateReviver(key: string, value: any) {
   if (typeof value === "object" && value !== null) {
     if (value.dataType === "Map") {
       return new Map(value.value);
     }
     if (value.dataType === "ModelMap") {
-      return new Map(value.value.map((e: any) => [e.key, monaco.editor.createModel(e.value, undefined, e.uri.path)]));
+      return new Map(
+        value.value.map((e: any) => [e.key, monaco.editor.createModel(e.value, langFromPath(e.key), e.key)])
+      );
     }
     if (value.dataType === "DiffModelMap") {
       return new Map(
         value.value.map((e: any) => [
           e.key,
           {
-            original: monaco.editor.createModel(e.original, undefined, e.originalUri.path),
-            modified: monaco.editor.createModel(e.modified, undefined, e.modifiedUri.path),
+            original: monaco.editor.createModel(e.original, langFromPath(e.originalUri.path), e.originalUri.path),
+            modified: monaco.editor.createModel(e.modified, langFromPath(e.modifiedUri.path), e.modifiedUri.path),
           },
         ])
       );
     }
   }
   return value;
+}
+
+function langFromPath(path: string) {
+  if (!path) {
+    return undefined;
+  }
+  if (
+    path.endsWith(".bazel") ||
+    path.endsWith("WORKSPACE") ||
+    path.endsWith("BUILD") ||
+    path.endsWith("MODULE") ||
+    path.endsWith(".bzl")
+  ) {
+    return "python";
+  }
+  return undefined;
 }

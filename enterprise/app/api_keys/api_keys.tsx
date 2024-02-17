@@ -417,7 +417,8 @@ export default class ApiKeysComponent extends React.Component<ApiKeysComponentPr
                       checked={request.visibleToDevelopers}
                     />
                     <span>
-                      Visible to developers <span className="field-description">(users with the role Developer)</span>
+                      Visible to non-admins{" "}
+                      <span className="field-description">(org members with role other than Admin)</span>
                     </span>
                   </label>
                 </div>
@@ -504,16 +505,18 @@ export default class ApiKeysComponent extends React.Component<ApiKeysComponentPr
                   <span className="untitled-key">Untitled key</span>
                 )}
               </div>
-              <div className="api-key-capabilities">
+              <div
+                className="api-key-capabilities"
+                title={key.visibleToDevelopers ? "Visible to non-admin members of this organization" : undefined}>
                 <span>{describeCapabilities(key)}</span>
               </div>
               <ApiKeyField apiKey={key} />
-              {this.props.user.canCall("updateApiKey") && (
+              {this.props.user.canCall(this.props.userOwnedOnly ? "updateUserApiKey" : "updateApiKey") && (
                 <OutlinedButton className="api-key-edit-button" onClick={this.onClickUpdate.bind(this, key)}>
                   Edit
                 </OutlinedButton>
               )}
-              {this.props.user.canCall("deleteApiKey") && (
+              {this.props.user.canCall(this.props.userOwnedOnly ? "deleteUserApiKey" : "deleteApiKey") && (
                 <OutlinedButton onClick={this.onClickDelete.bind(this, key)} className="destructive">
                   Delete
                 </OutlinedButton>
@@ -613,7 +616,7 @@ function describeCapabilities<T extends ApiKeyFields>(apiKey: T) {
     capabilities = "Org admin";
   }
   if (apiKey.visibleToDevelopers) {
-    capabilities += " [D]";
+    capabilities += " (*)";
   }
   return capabilities;
 }

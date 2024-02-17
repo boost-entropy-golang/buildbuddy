@@ -201,10 +201,8 @@ func (s *ExecutionServer) insertExecution(ctx context.Context, executionID, invo
 	}
 
 	var permissions *perms.UserGroupPerm
-	if auth := s.env.GetAuthenticator(); auth != nil {
-		if u, err := auth.AuthenticatedUser(ctx); err == nil && u.GetGroupID() != "" {
-			permissions = perms.DefaultPermissions(u)
-		}
+	if u, err := s.env.GetAuthenticator().AuthenticatedUser(ctx); err == nil && u.GetGroupID() != "" {
+		permissions = perms.DefaultPermissions(u)
 	}
 
 	if permissions == nil && s.env.GetAuthenticator().AnonymousUsageEnabled(ctx) {
@@ -497,7 +495,7 @@ func (s *ExecutionServer) Dispatch(ctx context.Context, req *repb.ExecuteRequest
 	}
 
 	taskGroupID := interfaces.AuthAnonymousUser
-	if user, err := perms.AuthenticatedUser(ctx, s.env); err == nil {
+	if user, err := s.env.GetAuthenticator().AuthenticatedUser(ctx); err == nil {
 		taskGroupID = user.GetGroupID()
 	}
 

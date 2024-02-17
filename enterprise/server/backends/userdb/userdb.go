@@ -143,7 +143,7 @@ func (d *UserDB) getGroupByURLIdentifier(ctx context.Context, tx interfaces.DB, 
 }
 
 func (d *UserDB) DeleteUserGitHubToken(ctx context.Context) error {
-	u, err := perms.AuthenticatedUser(ctx, d.env)
+	u, err := d.env.GetAuthenticator().AuthenticatedUser(ctx)
 	if err != nil {
 		return err
 	}
@@ -157,11 +157,11 @@ func (d *UserDB) DeleteUserGitHubToken(ctx context.Context) error {
 }
 
 func (d *UserDB) authorizeGroupAdminRole(ctx context.Context, groupID string) error {
-	u, err := perms.AuthenticatedUser(ctx, d.env)
+	u, err := d.env.GetAuthenticator().AuthenticatedUser(ctx)
 	if err != nil {
 		return err
 	}
-	return authutil.AuthorizeGroupRole(u, groupID, role.Admin)
+	return authutil.AuthorizeOrgAdmin(u, groupID)
 }
 
 func isInOwnedDomainBlocklist(email string) bool {
@@ -229,7 +229,7 @@ func (d *UserDB) validateURLIdentifier(ctx context.Context, groupID string, urlI
 }
 
 func (d *UserDB) CreateGroup(ctx context.Context, g *tables.Group) (string, error) {
-	u, err := perms.AuthenticatedUser(ctx, d.env)
+	u, err := d.env.GetAuthenticator().AuthenticatedUser(ctx)
 	if err != nil {
 		return "", err
 	}
@@ -249,7 +249,7 @@ func (d *UserDB) CreateGroup(ctx context.Context, g *tables.Group) (string, erro
 		return "", err
 	}
 
-	err = authutil.AuthorizeGroupRole(u, u.GetGroupID(), role.Admin)
+	err = authutil.AuthorizeOrgAdmin(u, u.GetGroupID())
 
 	// We can continue if one of the following is true:
 	// 1) doesn't have an existing group
@@ -298,7 +298,7 @@ func (d *UserDB) createGroup(ctx context.Context, tx interfaces.DB, userID strin
 }
 
 func (d *UserDB) InsertOrUpdateGroup(ctx context.Context, g *tables.Group) (string, error) {
-	u, err := perms.AuthenticatedUser(ctx, d.env)
+	u, err := d.env.GetAuthenticator().AuthenticatedUser(ctx)
 	if err != nil {
 		return "", err
 	}
@@ -334,7 +334,7 @@ func (d *UserDB) InsertOrUpdateGroup(ctx context.Context, g *tables.Group) (stri
 		}
 
 		groupID = g.GroupID
-		if err := authutil.AuthorizeGroupRole(u, groupID, role.Admin); err != nil {
+		if err := authutil.AuthorizeOrgAdmin(u, groupID); err != nil {
 			return err
 		}
 
@@ -426,7 +426,7 @@ func (d *UserDB) addUserToGroup(ctx context.Context, tx interfaces.DB, userID, g
 }
 
 func (d *UserDB) RequestToJoinGroup(ctx context.Context, groupID string) (grpb.GroupMembershipStatus, error) {
-	u, err := perms.AuthenticatedUser(ctx, d.env)
+	u, err := d.env.GetAuthenticator().AuthenticatedUser(ctx)
 	if err != nil {
 		return 0, err
 	}
@@ -807,12 +807,12 @@ func (d *UserDB) GetUserByID(ctx context.Context, id string) (*tables.User, erro
 		return nil, err
 	}
 
-	authUser, err := perms.AuthenticatedUser(ctx, d.env)
+	authUser, err := d.env.GetAuthenticator().AuthenticatedUser(ctx)
 	if err != nil {
 		return nil, err
 	}
 	for _, g := range user.Groups {
-		if err := authutil.AuthorizeGroupRole(authUser, g.Group.GroupID, role.Admin); err == nil {
+		if err := authutil.AuthorizeOrgAdmin(authUser, g.Group.GroupID); err == nil {
 			return user, nil
 		}
 	}
@@ -833,10 +833,6 @@ func (d *UserDB) GetUserByIDWithoutAuthCheck(ctx context.Context, id string) (*t
 }
 
 func (d *UserDB) GetUserByEmail(ctx context.Context, email string) (*tables.User, error) {
-	auth := d.env.GetAuthenticator()
-	if auth == nil {
-		return nil, status.InternalError("No auth configured on this BuildBuddy instance")
-	}
 	u, err := d.env.GetAuthenticator().AuthenticatedUser(ctx)
 	if err != nil {
 		return nil, err
@@ -866,10 +862,6 @@ func (d *UserDB) GetUserByEmail(ctx context.Context, email string) (*tables.User
 }
 
 func (d *UserDB) GetUser(ctx context.Context) (*tables.User, error) {
-	auth := d.env.GetAuthenticator()
-	if auth == nil {
-		return nil, status.InternalError("No auth configured on this BuildBuddy instance")
-	}
 	u, err := d.env.GetAuthenticator().AuthenticatedUser(ctx)
 	if err != nil {
 		return nil, err
@@ -920,10 +912,6 @@ func (d *UserDB) getUser(ctx context.Context, tx interfaces.DB, userID string) (
 }
 
 func (d *UserDB) GetImpersonatedUser(ctx context.Context) (*tables.User, error) {
-	auth := d.env.GetAuthenticator()
-	if auth == nil {
-		return nil, status.InternalError("No auth configured on this BuildBuddy instance")
-	}
 	u, err := d.env.GetAuthenticator().AuthenticatedUser(ctx)
 	if err != nil {
 		return nil, err
