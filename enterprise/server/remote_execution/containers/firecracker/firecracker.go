@@ -462,9 +462,10 @@ func (p *Provider) New(ctx context.Context, props *platform.Properties, task *re
 
 // FirecrackerContainer executes commands inside of a firecracker VM.
 type FirecrackerContainer struct {
-	id     string // a random GUID, unique per-run of firecracker
-	vmIdx  int    // the index of this vm on the host machine
-	loader *snaploader.FileCacheLoader
+	id         string // a random GUID, unique per-run of firecracker
+	snapshotID string // a random GUID, unique per-run of firecracker
+	vmIdx      int    // the index of this vm on the host machine
+	loader     *snaploader.FileCacheLoader
 
 	vmConfig         *fcpb.VMConfiguration
 	containerImage   string // the OCI container image. ex "alpine:latest"
@@ -621,10 +622,10 @@ func NewContainer(ctx context.Context, env environment.Env, task *repb.Execution
 			label := ""
 			if err != nil {
 				label = metrics.MissStatusLabel
-				log.CtxInfof(ctx, "Failed to get VM snapshot for keyset %s: %s", snaploader.KeysetDebugString(ctx, c.env, c.SnapshotKeySet()), err)
+				log.CtxInfof(ctx, "Failed to get VM snapshot for keyset %s: %s", snaploader.KeysetDebugString(ctx, c.env, c.SnapshotKeySet(), c.supportsRemoteSnapshots), err)
 			} else {
 				label = metrics.HitStatusLabel
-				log.CtxInfof(ctx, "Found snapshot for key %s", snaploader.KeyDebugString(ctx, c.env, snap.GetKey()))
+				log.CtxInfof(ctx, "Found snapshot for key %s", snaploader.KeyDebugString(ctx, c.env, snap.GetKey(), c.supportsRemoteSnapshots))
 			}
 			metrics.RecycleRunnerRequests.With(prometheus.Labels{
 				metrics.RecycleRunnerRequestStatusLabel: label,
@@ -787,6 +788,10 @@ func (c *FirecrackerContainer) SnapshotKeySet() *fcpb.SnapshotKeySet {
 	return c.snapshotKeySet.CloneVT()
 }
 
+func (c *FirecrackerContainer) SnapshotID() string {
+	return c.snapshotID
+}
+
 // State returns the container state to be persisted to disk so that this
 // container can be reconstructed from the state on disk after an executor
 // restart.
@@ -915,7 +920,10 @@ func (c *FirecrackerContainer) saveSnapshot(ctx context.Context, snapshotDetails
 
 func (c *FirecrackerContainer) getVMMetadata() *repb.VMMetadata {
 	if c.snapshot == nil || c.snapshot.GetVMMetadata() == nil {
-		return &repb.VMMetadata{VmId: c.id}
+		return &repb.VMMetadata{
+			VmId:       c.id,
+			SnapshotId: c.snapshotID,
+		}
 	}
 	return c.snapshot.GetVMMetadata()
 }
@@ -927,6 +935,7 @@ func (c *FirecrackerContainer) getVMTask() *repb.VMMetadata_VMTask {
 		ExecutionId:           c.task.GetExecutionId(),
 		ActionDigest:          c.task.GetExecuteRequest().GetActionDigest(),
 		ExecuteResponseDigest: d,
+		SnapshotId:            c.snapshotID, // Unique ID pertaining to this execution run
 	}
 }
 
@@ -1021,6 +1030,16 @@ func (c *FirecrackerContainer) LoadSnapshot(ctx context.Context) error {
 	if err != nil {
 		return status.WrapError(err, "failed to get snapshot")
 	}
+
+	// Set unique per-run identifier on the vm metadata so this exact snapshot
+	// run can be identified
+	if snap.GetVMMetadata() == nil {
+		md := &repb.VMMetadata{
+			VmId: c.id,
+		}
+		snap.SetVMMetadata(md)
+	}
+	snap.GetVMMetadata().SnapshotId = c.snapshotID
 	c.snapshot = snap
 
 	if err := os.MkdirAll(c.getChroot(), 0777); err != nil {
@@ -1274,7 +1293,7 @@ func (c *FirecrackerContainer) hotSwapWorkspace(ctx context.Context, execClient 
 			return err
 		}
 		mountPath := filepath.Join(c.getChroot(), workspaceDriveID+vbdMountDirSuffix)
-		if err := d.Mount(mountPath); err != nil {
+		if err := d.Mount(c.vmCtx, mountPath); err != nil {
 			return status.WrapError(err, "mount workspace VBD")
 		}
 		c.workspaceVBD = d
@@ -1309,13 +1328,18 @@ func nonCmdExit(ctx context.Context, err error) *interfaces.CommandResult {
 func (c *FirecrackerContainer) newID(ctx context.Context) error {
 	vmIdxMu.Lock()
 	defer vmIdxMu.Unlock()
-	u, err := uuid.NewRandom()
+	u1, err := uuid.NewRandom()
+	if err != nil {
+		return err
+	}
+	u2, err := uuid.NewRandom()
 	if err != nil {
 		return err
 	}
 	vmIdx += 1
-	log.CtxDebugf(ctx, "Container id changing from %q (%d) to %q (%d)", c.id, c.vmIdx, u.String(), vmIdx)
-	c.id = u.String()
+	log.CtxDebugf(ctx, "Container id changing from %q (%d) to %q (%d)", c.id, c.vmIdx, u1.String(), vmIdx)
+	c.id = u1.String()
+	c.snapshotID = u2.String()
 	c.vmIdx = vmIdx
 
 	if vmIdx > maxVMSPerHost {
@@ -1718,7 +1742,7 @@ func (c *FirecrackerContainer) setupVBDMounts(ctx context.Context) error {
 			return nil, err
 		}
 		mountPath := filepath.Join(c.getChroot(), driveID+vbdMountDirSuffix)
-		if err := d.Mount(mountPath); err != nil {
+		if err := d.Mount(c.vmCtx, mountPath); err != nil {
 			return nil, err
 		}
 		log.CtxDebugf(ctx, "Mounted %s VBD FUSE filesystem to %s", driveID, mountPath)
@@ -2646,7 +2670,7 @@ func (c *FirecrackerContainer) SnapshotDebugString(ctx context.Context) string {
 	if c.snapshot == nil {
 		return ""
 	}
-	return snaploader.KeyDebugString(ctx, c.env, c.snapshot.GetKey())
+	return snaploader.KeyDebugString(ctx, c.env, c.snapshot.GetKey(), c.supportsRemoteSnapshots)
 }
 
 func (c *FirecrackerContainer) VMConfig() *fcpb.VMConfiguration {

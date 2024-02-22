@@ -663,6 +663,7 @@ func (sm *Replica) loadInflightTransactions(db ReplicaReader) error {
 		if err := proto.Unmarshal(iter.Value(), batchReq); err != nil {
 			return err
 		}
+		sm.log.Warningf("txid: %q, batchReq: %+v", txid, batchReq)
 		if _, err := sm.loadTxnIntoMemory(txid, batchReq); err != nil {
 			return err
 		}
@@ -1999,8 +2000,8 @@ func New(leaser pebble.Leaser, shardID, replicaID uint64, store IStore, broadcas
 		log:                 log.NamedSubLogger(fmt.Sprintf("c%dn%d", shardID, replicaID)),
 		fileStorer:          filestore.New(),
 		accesses:            make(chan *accessTimeUpdate, *atimeBufferSize),
-		readQPS:             qps.NewCounter(1 * time.Minute),
-		raftProposeQPS:      qps.NewCounter(1 * time.Minute),
+		readQPS:             qps.NewCounter(5 * time.Second),
+		raftProposeQPS:      qps.NewCounter(5 * time.Second),
 		broadcast:           broadcast,
 		lockedKeys:          make(map[string][]byte),
 		prepared:            make(map[string]pebble.Batch),
