@@ -28,6 +28,7 @@ import Long from "long";
 import ModuleSidekick from "../sidekick/module/module";
 import BazelVersionSidekick from "../sidekick/bazelversion/bazelversion";
 import BazelrcSidekick from "../sidekick/bazelrc/bazelrc";
+import error_service from "../../../app/errors/error_service";
 
 interface Props {
   user: User;
@@ -45,7 +46,8 @@ interface State {
   fullPathToModelMap: Map<string, monaco.editor.ITextModel>;
   fullPathToDiffModelMap: Map<string, monaco.editor.IDiffEditorModel>;
   originalFileContents: Map<string, string>;
-  changes: Map<string, string>;
+  /** Map of file path to patch contents, or null if the file is being deleted. */
+  changes: Map<string, string | null>;
   mergeConflicts: Map<string, string>;
   pathToIncludeChanges: Map<string, boolean>;
   prLink: string;
@@ -131,6 +133,17 @@ export default class CodeComponent extends React.Component<Props, State> {
     if (this.state.repoResponse || this.isSingleFile()) {
       this.fetchInitialContent();
     }
+
+    document.onkeydown = (e) => {
+      switch (e.keyCode) {
+        case 70: // Meta + F
+          if (!e.metaKey) break;
+          this.editor?.focus();
+          this.editor?.trigger("find", "editor.actions.findWithArgs", { searchString: "" });
+          e.preventDefault();
+          break;
+      }
+    };
   }
 
   fetchInitialContent() {
@@ -323,10 +336,8 @@ export default class CodeComponent extends React.Component<Props, State> {
       });
   }
 
-  // TODO(siggisim): Support deleting files
   // TODO(siggisim): Support moving files around
   // TODO(siggisim): Support renaming files
-  // TODO(siggisim): Support right click file context menus
   // TODO(siggisim): Support tabs
   handleFileClicked(node: github.TreeNode, fullPath: string) {
     if (node.type === "tree") {
@@ -479,7 +490,7 @@ export default class CodeComponent extends React.Component<Props, State> {
     });
   }
 
-  async handleReviewClicked() {
+  handleReviewClicked() {
     if (!this.props.user.githubLinked) {
       this.handleGitHubClicked();
       return;
@@ -491,7 +502,7 @@ export default class CodeComponent extends React.Component<Props, State> {
       ([key, value]) => this.state.pathToIncludeChanges.get(key) // Only include checked changes
     );
 
-    let response = await createPullRequest({
+    createPullRequest({
       owner: this.currentOwner(),
       repo: this.currentRepo(),
       title: this.state.prTitle,
@@ -500,27 +511,35 @@ export default class CodeComponent extends React.Component<Props, State> {
       changes: [
         {
           files: Object.fromEntries(
-            filteredEntries.map(([key, value]) => [key, { content: textEncoder.encode(value) }])
+            filteredEntries.map(([key, value]) => (value ? [key, { content: textEncoder.encode(value) }] : [key, null]))
           ),
           commit: this.state.prBody,
         },
       ],
-    });
-
-    this.updateState({
-      requestingReview: false,
-      reviewRequestModalVisible: false,
-      prLink: response.url,
-      prNumber: response.pullNumber,
-      prBranch: response.ref,
-    });
-
-    window.open(response.url, "_blank");
-
-    console.log(response);
+    })
+      .then((response) => {
+        this.updateState({
+          requestingReview: false,
+          reviewRequestModalVisible: false,
+          prLink: response.url,
+          prNumber: response.pullNumber,
+          prBranch: response.ref,
+        });
+        window.open(response.url, "_blank");
+        console.log(response);
+      })
+      .catch((e) => {
+        error_service.handleError(e);
+        this.updateState({
+          requestingReview: false,
+        });
+      });
   }
 
   handleChangeClicked(fullPath: string) {
+    if (this.state.changes.get(fullPath) === null) {
+      return;
+    }
     this.navigateToPath(fullPath);
     this.editor?.setModel(this.state.fullPathToModelMap.get(fullPath) || null);
   }
@@ -530,17 +549,18 @@ export default class CodeComponent extends React.Component<Props, State> {
     this.updateState({ pathToIncludeChanges: this.state.pathToIncludeChanges });
   }
 
-  // TODO(siggisim): Implement delete
   handleDeleteClicked(fullPath: string) {
-    alert("Delete not yet implemented!");
+    this.state.changes.set(fullPath, null);
+    this.state.pathToIncludeChanges.set(fullPath, true);
+    this.updateState({ changes: this.state.changes });
   }
 
   handleNewFileClicked() {
     let fileName = prompt(
       "File name:",
-      (this.state.contextMenuFile?.type == "tree"
-        ? this.state.contextMenuFullPath
-        : this.state.contextMenuFullPath?.substring(0, this.state.contextMenuFullPath?.lastIndexOf("/"))) + "/"
+      (this.state.contextMenuFile?.type != "tree"
+        ? this.state.contextMenuFullPath?.substring(0, this.state.contextMenuFullPath?.lastIndexOf("/"))
+        : this.state.contextMenuFullPath) + "/"
     );
     if (fileName) {
       let fileContents = "// Your code here";
@@ -593,15 +613,21 @@ export default class CodeComponent extends React.Component<Props, State> {
       changes: [
         {
           files: Object.fromEntries(
-            filteredEntries.map(([key, value]) => [key, { content: textEncoder.encode(value) }])
+            filteredEntries.map(([key, value]) => (value ? [key, { content: textEncoder.encode(value) }] : [key, null]))
           ),
           commit: `Update ${filenames}`,
         },
       ],
-    }).then(() => {
-      this.updateState({ updatingPR: false });
-      window.open(this.state.prLink, "_blank");
-    });
+    })
+      .then(() => {
+        window.open(this.state.prLink, "_blank");
+      })
+      .catch((e) => {
+        error_service.handleError(e);
+      })
+      .finally(() => {
+        this.updateState({ updatingPR: false });
+      });
   }
 
   handleClearPRClicked() {
@@ -624,6 +650,7 @@ export default class CodeComponent extends React.Component<Props, State> {
       .then(() => {
         window.open(this.state.prLink, "_blank");
         this.handleClearPRClicked();
+        this.handleUpdateCommitSha(() => {});
       });
   }
 
@@ -645,11 +672,11 @@ export default class CodeComponent extends React.Component<Props, State> {
           head: this.state.repoResponse?.defaultBranch,
         })
       )
-      .then((response) => {
+      .then(async (response) => {
         console.log(response);
         let newCommits = response.aheadBy;
         let newSha = response.commits.pop()?.sha;
-        if (newCommits == new Long(0)) {
+        if (Number(newCommits) == 0) {
           if (callback) {
             callback(0);
           } else {
@@ -661,9 +688,27 @@ export default class CodeComponent extends React.Component<Props, State> {
         let conflictCount = 0;
         for (let file of response.files) {
           if (this.state.changes.has(file.name)) {
+            let response = await rpcService.service.getGithubContent(
+              new github.GetGithubContentRequest({
+                owner: this.currentOwner(),
+                repo: this.currentRepo(),
+                path: this.currentPath(),
+                ref: newSha,
+              })
+            );
+            let newFileContent = textDecoder.decode(response.content);
+            this.state.originalFileContents.set(file.name, newFileContent);
+            if (newFileContent == this.state.changes.get(file.name)) {
+              this.state.changes.delete(file.name);
+              continue;
+            }
             this.state.mergeConflicts.set(file.name, file.sha);
             conflictCount++;
           }
+        }
+
+        if (this.state.changes.size == 0 && this.state.prBranch) {
+          this.handleClearPRClicked();
         }
 
         rpcService.service
@@ -762,6 +807,26 @@ export default class CodeComponent extends React.Component<Props, State> {
     this.updateState({ reviewRequestModalVisible: false });
   }
 
+  clearContextMenu() {
+    this.setState({
+      contextMenuX: undefined,
+      contextMenuY: undefined,
+      contextMenuFile: undefined,
+      contextMenuFullPath: undefined,
+    });
+  }
+
+  handleContextMenu(node: github.TreeNode | undefined, fullPath: string, event: React.MouseEvent) {
+    this.setState({
+      contextMenuX: event.pageX,
+      contextMenuY: event.pageY,
+      contextMenuFile: node,
+      contextMenuFullPath: fullPath,
+    });
+    event.preventDefault();
+    event.stopPropagation();
+  }
+
   updateState(newState: Partial<State>, callback?: VoidFunction) {
     this.setState(newState as State, () => {
       this.saveState();
@@ -788,7 +853,7 @@ export default class CodeComponent extends React.Component<Props, State> {
       (i) => i.login == this.currentOwner()
     );
     return (
-      <div className="code-editor" onClick={() => this.setState({ contextMenuFile: undefined })}>
+      <div className="code-editor" onClick={this.clearContextMenu.bind(this)}>
         <div className="code-menu">
           <div className="code-menu-logo">
             {this.isSingleFile() && (
@@ -821,9 +886,9 @@ export default class CodeComponent extends React.Component<Props, State> {
                 <ChevronRight />
                 <a
                   href={`http://github.com/${this.currentOwner()}/${this.currentRepo()}/tree/${
-                    this.state.repoResponse?.defaultBranch
+                    this.state.prBranch || this.state.repoResponse?.defaultBranch
                   }`}>
-                  {this.state.repoResponse?.defaultBranch}
+                  {this.state.prBranch || this.state.repoResponse?.defaultBranch}
                 </a>
                 <ChevronRight />
                 <a
@@ -919,27 +984,20 @@ export default class CodeComponent extends React.Component<Props, State> {
         <div className="code-main">
           {!this.isSingleFile() && (
             <div className="code-sidebar">
-              <div className="code-sidebar-tree">
+              <div className="code-sidebar-tree" onContextMenu={(e) => this.handleContextMenu(undefined, "/", e)}>
                 {this.state.treeResponse &&
-                  this.state.treeResponse.nodes.sort(compareNodes).map((node) => (
-                    <SidebarNodeComponent
-                      node={node}
-                      treeShaToExpanded={this.state.treeShaToExpanded}
-                      treeShaToChildrenMap={this.state.treeShaToChildrenMap}
-                      handleFileClicked={this.handleFileClicked.bind(this)}
-                      fullPath={node.path}
-                      handleContextMenu={(node, fullPath, event) => {
-                        this.setState({
-                          contextMenuX: event.pageX,
-                          contextMenuY: event.pageY,
-                          contextMenuFile: node,
-                          contextMenuFullPath: fullPath,
-                        });
-                        event.preventDefault();
-                        event.stopPropagation();
-                      }}
-                    />
-                  ))}
+                  this.state.treeResponse.nodes
+                    .sort(compareNodes)
+                    .map((node) => (
+                      <SidebarNodeComponent
+                        node={node}
+                        treeShaToExpanded={this.state.treeShaToExpanded}
+                        treeShaToChildrenMap={this.state.treeShaToChildrenMap}
+                        handleFileClicked={this.handleFileClicked.bind(this)}
+                        fullPath={node.path}
+                        handleContextMenu={this.handleContextMenu.bind(this)}
+                      />
+                    ))}
               </div>
               {!this.props.user.githubLinked && (
                 <div className="code-sidebar-actions">
@@ -985,6 +1043,7 @@ export default class CodeComponent extends React.Component<Props, State> {
                       type="checkbox"
                     />{" "}
                     {fullPath}
+                    {this.state.changes.get(fullPath) === null && <> (deleted)</>}
                     {this.state.mergeConflicts.has(fullPath) && fullPath != this.currentPath() && (
                       <span
                         className="code-revert-button"
@@ -1017,16 +1076,16 @@ export default class CodeComponent extends React.Component<Props, State> {
           )}
           {this.editor && this.currentPath()?.endsWith(".bazelrc") && <BazelrcSidekick editor={this.editor} />}
         </div>
-        {this.state.contextMenuFile && (
+        {this.state.contextMenuFullPath && (
           <div className="context-menu-container">
             <div
               className="context-menu"
-              onClick={() => this.setState({ contextMenuFile: undefined })}
+              onClick={this.clearContextMenu.bind(this)}
               style={{ top: this.state.contextMenuY, left: this.state.contextMenuX }}>
               <div onClick={() => this.handleNewFileClicked()}>New file</div>
               {/* TODO <div>New folder</div> */}
               {/* TODO <div>Rename</div> */}
-              <div onClick={() => this.handleDeleteClicked(this.state.contextMenuFile?.path || "")}>Delete</div>
+              <div onClick={() => this.handleDeleteClicked(this.state.contextMenuFullPath || "")}>Delete</div>
             </div>
           </div>
         )}
