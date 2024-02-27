@@ -41,13 +41,16 @@ interface State {
   repoResponse: github.GetGithubRepoResponse | undefined;
   treeResponse: github.GetGithubTreeResponse | undefined;
   installationsResponse: github.GetGithubUserInstallationsResponse | undefined;
-  treeShaToExpanded: Map<string, boolean>;
+  fullPathToExpanded: Map<string, boolean>;
+  fullPathToRenaming: Map<string, boolean>;
   treeShaToChildrenMap: Map<string, github.TreeNode[]>;
   fullPathToModelMap: Map<string, monaco.editor.ITextModel>;
   fullPathToDiffModelMap: Map<string, monaco.editor.IDiffEditorModel>;
   originalFileContents: Map<string, string>;
+  tabs: Map<string, string>;
   /** Map of file path to patch contents, or null if the file is being deleted. */
   changes: Map<string, string | null>;
+  temporaryFiles: Map<string, github.TreeNode[]>;
   mergeConflicts: Map<string, string>;
   pathToIncludeChanges: Map<string, boolean>;
   prLink: string;
@@ -61,6 +64,7 @@ interface State {
   reviewRequestModalVisible: boolean;
   isBuilding: boolean;
 
+  showContextMenu?: boolean;
   contextMenuX?: number;
   contextMenuY?: number;
   contextMenuFullPath?: string;
@@ -80,12 +84,15 @@ export default class CodeComponent extends React.Component<Props, State> {
     repoResponse: undefined,
     treeResponse: undefined,
     installationsResponse: undefined,
-    treeShaToExpanded: new Map<string, boolean>(),
+    fullPathToExpanded: new Map<string, boolean>(),
+    fullPathToRenaming: new Map<string, boolean>(),
     treeShaToChildrenMap: new Map<string, Array<github.TreeNode>>(),
     fullPathToModelMap: new Map<string, monaco.editor.ITextModel>(),
     fullPathToDiffModelMap: new Map<string, monaco.editor.IDiffEditorModel>(),
     originalFileContents: new Map<string, string>(),
+    tabs: new Map<string, string>(),
     changes: new Map<string, string>(),
+    temporaryFiles: new Map<string, github.TreeNode[]>(),
     mergeConflicts: new Map<string, string>(),
     pathToIncludeChanges: new Map<string, boolean>(),
     prLink: "",
@@ -111,6 +118,12 @@ export default class CodeComponent extends React.Component<Props, State> {
   fetchedInitialContent = false;
 
   componentWillMount() {
+    let githubUrl = this.props.search.get("github_url");
+    if (githubUrl) {
+      window.location.href = this.parseGithubUrl(githubUrl);
+      return;
+    }
+
     document.title = `Code | BuildBuddy`;
 
     this.fetchCode();
@@ -146,6 +159,49 @@ export default class CodeComponent extends React.Component<Props, State> {
     };
   }
 
+  parseGithubUrl(githubUrl: string) {
+    let match = githubUrl.match(
+      /^(https:\/\/github.com)?(\/)?(?<owner>[A-Za-z0-9_.-]+)?(\/(?<repo>[A-Za-z0-9_.-]+))?(\/(?<entity>[A-Za-z0-9_.-]+))?(\/(?<rest>.*))?/
+    )?.groups;
+
+    let destinationUrl = "/code/";
+    if (match?.owner) {
+      destinationUrl += match?.owner + "/";
+    }
+    if (match?.repo) {
+      destinationUrl += match?.repo + "/";
+    }
+    if (match?.entity == "tree" && match?.rest) {
+      let parts = match?.rest.split("/");
+      let branch = parts.shift();
+      destinationUrl += "?branch=" + branch;
+    } else if (match?.entity == "blob" && match?.rest) {
+      let parts = match?.rest.split("/");
+      let branch = parts.shift();
+      destinationUrl += parts.join("/") + "?branch=" + branch;
+    }
+    return destinationUrl;
+  }
+
+  fetchContentForPath(path: string) {
+    return rpcService.service.getGithubContent(
+      new github.GetGithubContentRequest({
+        owner: this.currentOwner(),
+        repo: this.currentRepo(),
+        path: path,
+        ref: this.getRef(),
+      })
+    );
+  }
+
+  getRef() {
+    return this.state.commitSHA || this.getBranch();
+  }
+
+  getBranch() {
+    return this.props.search.get("branch") || this.state.repoResponse?.defaultBranch;
+  }
+
   fetchInitialContent() {
     if (this.fetchedInitialContent) {
       return;
@@ -172,7 +228,7 @@ export default class CodeComponent extends React.Component<Props, State> {
     if (this.isSingleFile() && bytestreamURL) {
       rpcService.fetchBytestreamFile(bytestreamURL, invocationID, "text", { zip }).then((result) => {
         let path = monaco.Uri.file(filename || "file");
-        this.editor?.setModel(monaco.editor.createModel(result, langFromPath(path.path), path));
+        this.setModel(path.path, monaco.editor.createModel(result, langFromPath(path.path), path));
       });
       return;
     }
@@ -186,7 +242,7 @@ export default class CodeComponent extends React.Component<Props, State> {
             owner: this.currentOwner(),
             repo: this.currentRepo(),
             path: this.currentPath(),
-            ref: commit || this.state.commitSHA || this.state.repoResponse?.defaultBranch,
+            ref: commit || this.getRef(),
           })
         )
         .then((response) => {
@@ -222,18 +278,9 @@ export default class CodeComponent extends React.Component<Props, State> {
 
     if (this.currentPath()) {
       if (!this.state.fullPathToModelMap.has(this.currentPath())) {
-        rpcService.service
-          .getGithubContent(
-            new github.GetGithubContentRequest({
-              owner: this.currentOwner(),
-              repo: this.currentRepo(),
-              path: this.currentPath(),
-              ref: this.state.commitSHA || this.state.repoResponse?.defaultBranch,
-            })
-          )
-          .then((response) => {
-            this.navigateToContent(this.currentPath(), response.content);
-          });
+        this.fetchContentForPath(this.currentPath()).then((response) => {
+          this.navigateToContent(this.currentPath(), response.content);
+        });
       }
 
       if (this.state.mergeConflicts.has(this.currentPath())) {
@@ -271,7 +318,7 @@ export default class CodeComponent extends React.Component<Props, State> {
   }
 
   getStateCacheKey() {
-    return `${LOCAL_STORAGE_STATE_KEY}/${this.currentOwner()}/${this.currentRepo()}`;
+    return `${LOCAL_STORAGE_STATE_KEY}/${this.currentOwner()}/${this.currentRepo()}/${this.getBranch()}`;
   }
 
   componentWillUnmount() {
@@ -320,14 +367,13 @@ export default class CodeComponent extends React.Component<Props, State> {
       new github.GetGithubRepoRequest({ owner: this.currentOwner(), repo: this.currentRepo() })
     );
     console.log(repoResponse);
-    let commit = this.state.commitSHA || repoResponse.defaultBranch;
 
     rpcService.service
       .getGithubTree(
         new github.GetGithubTreeRequest({
           owner: this.currentOwner(),
           repo: this.currentRepo(),
-          ref: commit,
+          ref: this.getRef() || repoResponse.defaultBranch,
         })
       )
       .then((treeResponse) => {
@@ -336,14 +382,32 @@ export default class CodeComponent extends React.Component<Props, State> {
       });
   }
 
+  isNewFile(node: github.TreeNode) {
+    return !node.sha;
+  }
+
+  isDirectory(node: github.TreeNode | undefined) {
+    return node?.type === "tree";
+  }
+
   // TODO(siggisim): Support moving files around
-  // TODO(siggisim): Support renaming files
-  // TODO(siggisim): Support tabs
   handleFileClicked(node: github.TreeNode, fullPath: string) {
-    if (node.type === "tree") {
-      if (this.state.treeShaToExpanded.get(node.sha)) {
-        this.state.treeShaToExpanded.set(node.sha, false);
-        this.updateState({ treeShaToExpanded: this.state.treeShaToExpanded });
+    if (this.isNewFile(node)) {
+      if (this.isDirectory(node)) {
+        this.state.fullPathToExpanded.set(fullPath, !Boolean(this.state.fullPathToExpanded.get(fullPath)));
+        this.state.treeShaToChildrenMap.set(node.sha, []);
+      } else {
+        this.navigateToPath(fullPath);
+        this.setModel(fullPath, this.state.fullPathToModelMap.get(fullPath));
+      }
+      this.updateState({});
+      return;
+    }
+
+    if (this.isDirectory(node)) {
+      if (this.state.fullPathToExpanded.get(fullPath)) {
+        this.state.fullPathToExpanded.set(fullPath, false);
+        this.updateState({ fullPathToExpanded: this.state.fullPathToExpanded });
         return;
       }
 
@@ -356,7 +420,7 @@ export default class CodeComponent extends React.Component<Props, State> {
           })
         )
         .then((response) => {
-          this.state.treeShaToExpanded.set(node.sha, true);
+          this.state.fullPathToExpanded.set(fullPath, true);
           this.state.treeShaToChildrenMap.set(node.sha, response.nodes);
           this.updateState({
             treeShaToChildrenMap: this.state.treeShaToChildrenMap,
@@ -381,7 +445,7 @@ export default class CodeComponent extends React.Component<Props, State> {
       });
   }
 
-  navigateToContent(fullPath: string, content: Uint8Array) {
+  ensureModelExists(fullPath: string, content: Uint8Array) {
     let fileContents = textDecoder.decode(content);
     this.state.originalFileContents.set(fullPath, fileContents);
     this.updateState({
@@ -394,7 +458,22 @@ export default class CodeComponent extends React.Component<Props, State> {
       this.state.fullPathToModelMap.set(fullPath, model);
       this.updateState({ fullPathToModelMap: this.state.fullPathToModelMap });
     }
-    this.editor?.setModel(model);
+    return model;
+  }
+
+  handleTabClicked(fullPath: string) {
+    this.navigateToPath(fullPath);
+    this.setModel(fullPath, this.state.fullPathToModelMap.get(fullPath));
+  }
+
+  navigateToContent(fullPath: string, content: Uint8Array) {
+    this.setModel(fullPath, this.ensureModelExists(fullPath, content));
+  }
+
+  setModel(fullPath: string, model: monaco.editor.ITextModel | undefined) {
+    this.state.tabs.set(fullPath, fullPath);
+    this.editor?.setModel(model || null);
+    this.updateState({ tabs: this.state.tabs });
   }
 
   navigateToPath(path: string) {
@@ -448,7 +527,7 @@ export default class CodeComponent extends React.Component<Props, State> {
   getRepoState() {
     let state = new runner.RunRequest.RepoState();
     state.commitSha = this.state.commitSHA;
-    state.branch = this.state.repoResponse?.defaultBranch!;
+    state.branch = this.getBranch()!;
     for (let path of this.state.changes.keys()) {
       state.patch.push(
         textEncoder.encode(
@@ -541,7 +620,7 @@ export default class CodeComponent extends React.Component<Props, State> {
       return;
     }
     this.navigateToPath(fullPath);
-    this.editor?.setModel(this.state.fullPathToModelMap.get(fullPath) || null);
+    this.setModel(fullPath, this.state.fullPathToModelMap.get(fullPath));
   }
 
   handleCheckboxClicked(fullPath: string) {
@@ -549,39 +628,61 @@ export default class CodeComponent extends React.Component<Props, State> {
     this.updateState({ pathToIncludeChanges: this.state.pathToIncludeChanges });
   }
 
-  handleDeleteClicked(fullPath: string) {
-    this.state.changes.set(fullPath, null);
-    this.state.pathToIncludeChanges.set(fullPath, true);
+  handleDeleteClicked(fullPath: string, node: github.TreeNode) {
+    if (this.isDirectory(node)) {
+      error_service.handleError("Deleting directories is not yet supported");
+      return;
+    }
+    if (this.isNewFile(node)) {
+      this.state.changes.delete(fullPath);
+      this.state.pathToIncludeChanges.delete(fullPath);
+    } else {
+      this.state.changes.set(fullPath, null);
+      this.state.pathToIncludeChanges.set(fullPath, true);
+    }
+
     this.updateState({ changes: this.state.changes });
   }
 
-  handleNewFileClicked() {
-    let fileName = prompt(
-      "File name:",
-      (this.state.contextMenuFile?.type != "tree"
-        ? this.state.contextMenuFullPath?.substring(0, this.state.contextMenuFullPath?.lastIndexOf("/"))
-        : this.state.contextMenuFullPath) + "/"
-    );
-    if (fileName) {
-      let fileContents = "// Your code here";
-      let model = this.state.fullPathToModelMap.get(fileName);
-      if (!model) {
-        model = monaco.editor.createModel(fileContents, langFromPath(fileName), monaco.Uri.file(fileName));
-        this.state.fullPathToModelMap.set(fileName, model);
-      }
-      this.state.originalFileContents.set(fileName, "");
-      this.navigateToPath(fileName);
-      this.updateState(
-        {
-          originalFileContents: this.state.originalFileContents,
-          changes: this.state.changes,
-        },
-        () => {
-          this.editor?.setModel(model!);
-          this.handleContentChanged();
-        }
-      );
+  newFileWithContents(node: github.TreeNode, path: string, contents: string) {
+    let parent = this.getParent(path);
+    let tempFiles = this.state.temporaryFiles.get(parent);
+    if (tempFiles) {
+      tempFiles.splice(tempFiles.indexOf(node), 1);
+      this.state.temporaryFiles.set(parent, tempFiles);
     }
+
+    let model = this.state.fullPathToModelMap.get(path);
+    if (!model) {
+      model = monaco.editor.createModel(contents, langFromPath(path), monaco.Uri.file(path));
+      this.state.fullPathToModelMap.set(path, model);
+    }
+    this.navigateToPath(path);
+    this.updateState({}, () => {
+      this.setModel(path, model);
+      this.handleContentChanged();
+    });
+  }
+
+  handleRenameClicked(fullPath: string) {
+    this.state.fullPathToRenaming.set(fullPath, true);
+    this.updateState({});
+  }
+
+  handleNewFileClicked(path: string) {
+    if (!this.state.temporaryFiles.has(path)) {
+      this.state.temporaryFiles.set(path, []);
+    }
+    this.state.temporaryFiles.get(path)!.push(new github.TreeNode({ path: "", type: "file" }));
+    this.updateState({ temporaryFiles: this.state.temporaryFiles });
+  }
+
+  handleNewFolderClicked(path: string) {
+    if (!this.state.temporaryFiles.has(path)) {
+      this.state.temporaryFiles.set(path, []);
+    }
+    this.state.temporaryFiles.get(path)!.push(new github.TreeNode({ path: "", type: "tree" }));
+    this.updateState({ temporaryFiles: this.state.temporaryFiles });
   }
 
   handleGitHubClicked() {
@@ -656,7 +757,9 @@ export default class CodeComponent extends React.Component<Props, State> {
 
   handleRevertClicked(path: string, event: React.MouseEvent<HTMLSpanElement, MouseEvent>) {
     this.state.changes.delete(path);
-    this.state.fullPathToModelMap.get(path)?.setValue(this.state.originalFileContents.get(path) || "");
+    if (this.state.originalFileContents.has(path)) {
+      this.state.fullPathToModelMap.get(path)?.setValue(this.state.originalFileContents.get(path) || "");
+    }
     this.updateState({ changes: this.state.changes, fullPathToModelMap: this.state.fullPathToModelMap });
     event.stopPropagation();
   }
@@ -669,7 +772,7 @@ export default class CodeComponent extends React.Component<Props, State> {
           owner: this.currentOwner(),
           repo: this.currentRepo(),
           base: this.state.commitSHA,
-          head: this.state.repoResponse?.defaultBranch,
+          head: this.getBranch(),
         })
       )
       .then(async (response) => {
@@ -807,8 +910,59 @@ export default class CodeComponent extends React.Component<Props, State> {
     this.updateState({ reviewRequestModalVisible: false });
   }
 
+  getParent(path: string) {
+    let lastSlashIndex = path.lastIndexOf("/");
+    if (lastSlashIndex == -1) {
+      lastSlashIndex = 0;
+    }
+    return path.substr(0, lastSlashIndex);
+  }
+
+  joinPath(paths: string[]) {
+    return paths.filter((p) => p).join("");
+  }
+
+  async handleRename(node: github.TreeNode, path: string, newValue: string, existingFile: boolean) {
+    if (!newValue) {
+      return;
+    }
+    this.state.fullPathToRenaming.set(path, false);
+    this.updateState({});
+
+    if (this.isDirectory(node)) {
+      if (existingFile) {
+        error_service.handleError("Renaming directories not yet supported!");
+      } else {
+        node.path = newValue;
+      }
+      return;
+    }
+
+    if (existingFile) {
+      let parent = this.getParent(path);
+      let newPath = this.joinPath([parent, newValue]);
+      if (newPath == path) {
+        return;
+      }
+
+      if (!this.state.fullPathToModelMap.has(path)) {
+        await this.fetchContentForPath(path).then((response) => {
+          return this.ensureModelExists(path, response.content);
+        });
+      }
+
+      this.newFileWithContents(node, newValue, this.state.fullPathToModelMap.get(path)?.getValue() || "");
+      this.handleDeleteClicked(path, node);
+      this.updateState({});
+      return;
+    }
+
+    this.newFileWithContents(node, path + newValue, "// Your code here");
+  }
+
   clearContextMenu() {
-    this.setState({
+    this.updateState({
+      showContextMenu: false,
       contextMenuX: undefined,
       contextMenuY: undefined,
       contextMenuFile: undefined,
@@ -817,7 +971,11 @@ export default class CodeComponent extends React.Component<Props, State> {
   }
 
   handleContextMenu(node: github.TreeNode | undefined, fullPath: string, event: React.MouseEvent) {
-    this.setState({
+    if (this.isDirectory(node)) {
+      this.state.fullPathToExpanded.set(fullPath, true);
+    }
+    this.updateState({
+      showContextMenu: true,
       contextMenuX: event.pageX,
       contextMenuY: event.pageY,
       contextMenuFile: node,
@@ -834,6 +992,31 @@ export default class CodeComponent extends React.Component<Props, State> {
         callback();
       }
     });
+  }
+
+  getFiles(nodes: github.TreeNode[], parent: string) {
+    // Add any temporary files
+    let files = new Map<string, github.TreeNode>();
+    for (let t of this.state.temporaryFiles.get(parent) || []) {
+      files.set(t.path, t);
+    }
+
+    // And any matching changed files, or paths leading up to changed files
+    for (let path of this.state.changes.keys()) {
+      let matchesRootDirectory = parent == "" && path.indexOf("/") == -1;
+      if (path.startsWith(parent + "/") || matchesRootDirectory) {
+        let remainder = parent == "" ? path : path.substr(parent.length + 1);
+        let dirs = remainder.split("/");
+        files.set(dirs[0], new github.TreeNode({ path: dirs[0], type: dirs.length > 1 ? "tree" : "file" }));
+      }
+    }
+
+    // And finally the original files from github
+    for (let o of nodes) {
+      files.set(o.path, o);
+    }
+
+    return Array.from(files.values());
   }
 
   // TODO(siggisim): Make the menu look nice
@@ -884,13 +1067,17 @@ export default class CodeComponent extends React.Component<Props, State> {
                   </a>
                 </div>
                 <ChevronRight />
-                <a
-                  href={`http://github.com/${this.currentOwner()}/${this.currentRepo()}/tree/${
-                    this.state.prBranch || this.state.repoResponse?.defaultBranch
-                  }`}>
-                  {this.state.prBranch || this.state.repoResponse?.defaultBranch}
-                </a>
-                <ChevronRight />
+                {this.state.commitSHA != this.getBranch() && (
+                  <>
+                    <a
+                      href={`http://github.com/${this.currentOwner()}/${this.currentRepo()}/tree/${
+                        this.state.prBranch || this.getBranch()
+                      }`}>
+                      {this.state.prBranch || this.getBranch()}
+                    </a>
+                    <ChevronRight />
+                  </>
+                )}
                 <a
                   target="_blank"
                   title={this.state.commitSHA}
@@ -984,18 +1171,22 @@ export default class CodeComponent extends React.Component<Props, State> {
         <div className="code-main">
           {!this.isSingleFile() && (
             <div className="code-sidebar">
-              <div className="code-sidebar-tree" onContextMenu={(e) => this.handleContextMenu(undefined, "/", e)}>
+              <div className="code-sidebar-tree" onContextMenu={(e) => this.handleContextMenu(undefined, "", e)}>
                 {this.state.treeResponse &&
-                  this.state.treeResponse.nodes
+                  this.getFiles(this.state.treeResponse.nodes, "")
                     .sort(compareNodes)
                     .map((node) => (
                       <SidebarNodeComponent
                         node={node}
-                        treeShaToExpanded={this.state.treeShaToExpanded}
+                        getFiles={this.getFiles.bind(this)}
+                        changes={this.state.changes}
+                        fullPathToExpanded={this.state.fullPathToExpanded}
+                        fullPathToRenaming={this.state.fullPathToRenaming}
                         treeShaToChildrenMap={this.state.treeShaToChildrenMap}
                         handleFileClicked={this.handleFileClicked.bind(this)}
                         fullPath={node.path}
                         handleContextMenu={this.handleContextMenu.bind(this)}
+                        handleRename={this.handleRename.bind(this)}
                       />
                     ))}
               </div>
@@ -1009,6 +1200,24 @@ export default class CodeComponent extends React.Component<Props, State> {
             </div>
           )}
           <div className="code-container">
+            {!this.isSingleFile() && (
+              <div className="code-viewer-tabs">
+                {[...this.state.tabs.keys()].reverse().map((t) => (
+                  <div
+                    className={`code-viewer-tab ${t == this.currentPath() ? "selected" : ""}`}
+                    onClick={this.handleTabClicked.bind(this, t)}>
+                    <span>{t.split("/").pop() || "Untitled"}</span>
+                    <XCircle
+                      onClick={(e) => {
+                        this.state.tabs.delete(t);
+                        this.updateState({});
+                        e.stopPropagation();
+                      }}
+                    />
+                  </div>
+                ))}
+              </div>
+            )}
             <div className="code-viewer-container">
               <div className={`code-viewer ${showDiffView ? "hidden-viewer" : ""}`} ref={this.codeViewer} />
               <div className={`diff-viewer ${showDiffView ? "" : "hidden-viewer"}`} ref={this.diffViewer} />
@@ -1042,8 +1251,16 @@ export default class CodeComponent extends React.Component<Props, State> {
                       onChange={(event) => this.handleCheckboxClicked(fullPath)}
                       type="checkbox"
                     />{" "}
-                    {fullPath}
-                    {this.state.changes.get(fullPath) === null && <> (deleted)</>}
+                    <div
+                      className={`code-diff-viewer-item-path${
+                        this.state.changes.get(fullPath) === null ? " deleted" : ""
+                      }${
+                        this.state.originalFileContents.has(fullPath) || this.state.changes.get(fullPath) === null
+                          ? ""
+                          : " added"
+                      }`}>
+                      {fullPath}
+                    </div>
                     {this.state.mergeConflicts.has(fullPath) && fullPath != this.currentPath() && (
                       <span
                         className="code-revert-button"
@@ -1076,16 +1293,19 @@ export default class CodeComponent extends React.Component<Props, State> {
           )}
           {this.editor && this.currentPath()?.endsWith(".bazelrc") && <BazelrcSidekick editor={this.editor} />}
         </div>
-        {this.state.contextMenuFullPath && (
+        {this.state.showContextMenu && (
           <div className="context-menu-container">
             <div
               className="context-menu"
               onClick={this.clearContextMenu.bind(this)}
               style={{ top: this.state.contextMenuY, left: this.state.contextMenuX }}>
-              <div onClick={() => this.handleNewFileClicked()}>New file</div>
-              {/* TODO <div>New folder</div> */}
-              {/* TODO <div>Rename</div> */}
-              <div onClick={() => this.handleDeleteClicked(this.state.contextMenuFullPath || "")}>Delete</div>
+              <div onClick={() => this.handleNewFileClicked(this.state.contextMenuFullPath!)}>New file</div>
+              <div onClick={() => this.handleNewFolderClicked(this.state.contextMenuFullPath!)}>New folder</div>
+              <div onClick={() => this.handleRenameClicked(this.state.contextMenuFullPath!)}>Rename</div>
+              <div
+                onClick={() => this.handleDeleteClicked(this.state.contextMenuFullPath!, this.state.contextMenuFile!)}>
+                Delete
+              </div>
             </div>
           </div>
         )}
@@ -1107,7 +1327,7 @@ export default class CodeComponent extends React.Component<Props, State> {
                     className="code-request-review-button"
                     onClick={() =>
                       window.open(applicableInstallation?.url + `/permissions/update`, "_blank") &&
-                      this.setState({ installationsResponse: undefined })
+                      this.updateState({ installationsResponse: undefined })
                     }>
                     <Key className="icon white" /> Permissions
                   </FilledButton>
