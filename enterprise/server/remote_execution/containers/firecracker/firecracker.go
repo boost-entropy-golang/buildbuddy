@@ -589,7 +589,7 @@ func NewContainer(ctx context.Context, env environment.Env, task *repb.Execution
 		c.vmIdx = opts.ForceVMIdx
 	}
 
-	c.supportsRemoteSnapshots = *snaputil.EnableRemoteSnapshotSharing && (platform.IsCIRunner(task.GetCommand().GetArguments()) || *forceRemoteSnapshotting)
+	c.supportsRemoteSnapshots = *snaputil.EnableRemoteSnapshotSharing && (platform.IsCICommand(task.GetCommand()) || *forceRemoteSnapshotting)
 
 	if opts.SavedState == nil {
 		c.vmConfig.DebugMode = *debugTerminal
@@ -2221,6 +2221,20 @@ func (c *FirecrackerContainer) Exec(ctx context.Context, cmd *repb.Command, stdi
 			return
 		}
 	}()
+
+	// Emit metrics to track time spent preparing VM to execute a command
+	if c.memoryStore != nil {
+		c.memoryStore.EmitUsageMetrics("init")
+	}
+	if c.uffdHandler != nil {
+		c.uffdHandler.EmitSummaryMetrics("init")
+	}
+	if c.rootStore != nil {
+		c.rootStore.EmitUsageMetrics("init")
+	}
+	if c.workspaceStore != nil {
+		c.workspaceStore.EmitUsageMetrics("init")
+	}
 
 	result = c.SendExecRequestToGuest(ctx, cmd, workDir, stdio)
 	close(execDone)

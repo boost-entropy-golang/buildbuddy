@@ -28,7 +28,9 @@ import Long from "long";
 import ModuleSidekick from "../sidekick/module/module";
 import BazelVersionSidekick from "../sidekick/bazelversion/bazelversion";
 import BazelrcSidekick from "../sidekick/bazelrc/bazelrc";
+import BuildFileSidekick from "../sidekick/buildfile/buildfile";
 import error_service from "../../../app/errors/error_service";
+import { build } from "../../../proto/remote_execution_ts_proto";
 
 interface Props {
   user: User;
@@ -120,7 +122,7 @@ export default class CodeComponent extends React.Component<Props, State> {
   componentWillMount() {
     let githubUrl = this.props.search.get("github_url");
     if (githubUrl) {
-      window.location.href = this.parseGithubUrl(githubUrl);
+      window.location.href = this.parseGithubUrl(githubUrl) + window.location.hash;
       return;
     }
 
@@ -213,6 +215,7 @@ export default class CodeComponent extends React.Component<Props, State> {
     }
 
     window.addEventListener("resize", () => this.handleWindowResize());
+    window.addEventListener("hashchange", () => this.focusLineNumber());
 
     this.editor = monaco.editor.create(this.codeViewer.current!, {
       value: ["// Welcome to BuildBuddy Code!", "", "// Click on a file to the left to get start editing."].join("\n"),
@@ -283,6 +286,8 @@ export default class CodeComponent extends React.Component<Props, State> {
         });
       }
 
+      this.focusLineNumber();
+
       if (this.state.mergeConflicts.has(this.currentPath())) {
         this.handleViewConflictClicked(
           this.currentPath(),
@@ -296,6 +301,15 @@ export default class CodeComponent extends React.Component<Props, State> {
 
     this.editor.onDidChangeModelContent(() => {
       this.handleContentChanged();
+    });
+  }
+
+  focusLineNumber() {
+    let focusedLineNumber = window.location.hash.startsWith("#L") ? parseInt(window.location.hash.substr(2)) : 0;
+    setTimeout(() => {
+      this.editor?.setSelection(new monaco.Selection(focusedLineNumber, 0, focusedLineNumber, 0));
+      this.editor?.revealLinesInCenter(focusedLineNumber, focusedLineNumber);
+      this.editor?.focus();
     });
   }
 
@@ -318,7 +332,7 @@ export default class CodeComponent extends React.Component<Props, State> {
   }
 
   getStateCacheKey() {
-    return `${LOCAL_STORAGE_STATE_KEY}/${this.currentOwner()}/${this.currentRepo()}/${this.getBranch()}`;
+    return `${LOCAL_STORAGE_STATE_KEY}/${this.currentOwner()}/${this.currentRepo()}`;
   }
 
   componentWillUnmount() {
@@ -480,35 +494,16 @@ export default class CodeComponent extends React.Component<Props, State> {
     window.history.pushState(undefined, "", `/code/${this.currentOwner()}/${this.currentRepo()}/${path}`);
   }
 
-  getRemoteEndpoint() {
-    // TODO(siggisim): Support on-prem deployments.
-    if (window.location.origin.endsWith(".dev")) {
-      return "remote.buildbuddy.dev";
-    }
-    return "remote.buildbuddy.io";
-  }
-
-  getJobCount() {
-    return 200;
-  }
-
-  getContainerImage() {
-    return "docker://gcr.io/flame-public/buildbuddy-ci-runner:latest";
-  }
-
-  getBazelFlags() {
-    return `--remote_executor=${this.getRemoteEndpoint()} --bes_backend=${this.getRemoteEndpoint()} --bes_results_url=${
-      window.location.origin
-    }/invocation/ --jobs=${this.getJobCount()} --remote_default_exec_properties=container-image=${this.getContainerImage()}`;
-  }
-
   handleBuildClicked(args: string) {
     let request = new runner.RunRequest();
     request.gitRepo = new runner.RunRequest.GitRepo();
     request.gitRepo.repoUrl = `https://github.com/${this.currentOwner()}/${this.currentRepo()}.git`;
-    request.bazelCommand = `${args} ${this.getBazelFlags()}`;
+    request.bazelCommand = args;
     request.repoState = this.getRepoState();
     request.async = true;
+    request.execProperties = [
+      new build.bazel.remote.execution.v2.Platform.Property({ name: "include-secrets", value: "true" }),
+    ];
 
     this.updateState({ isBuilding: true });
     rpcService.service
@@ -669,7 +664,11 @@ export default class CodeComponent extends React.Component<Props, State> {
     this.updateState({});
   }
 
-  handleNewFileClicked(path: string) {
+  handleNewFileClicked(node: github.TreeNode, path: string) {
+    if (node.type != "tree") {
+      path = this.getParent(path);
+    }
+
     if (!this.state.temporaryFiles.has(path)) {
       this.state.temporaryFiles.set(path, []);
     }
@@ -677,7 +676,11 @@ export default class CodeComponent extends React.Component<Props, State> {
     this.updateState({ temporaryFiles: this.state.temporaryFiles });
   }
 
-  handleNewFolderClicked(path: string) {
+  handleNewFolderClicked(node: github.TreeNode, path: string) {
+    if (node.type != "tree") {
+      path = this.getParent(path);
+    }
+
     if (!this.state.temporaryFiles.has(path)) {
       this.state.temporaryFiles.set(path, []);
     }
@@ -1288,6 +1291,9 @@ export default class CodeComponent extends React.Component<Props, State> {
           {this.editor && (this.currentPath()?.endsWith("MODULE.bazel") || this.currentPath()?.endsWith("MODULE")) && (
             <ModuleSidekick editor={this.editor} />
           )}
+          {this.editor && (this.currentPath()?.endsWith("BUILD.bazel") || this.currentPath()?.endsWith("BUILD")) && (
+            <BuildFileSidekick editor={this.editor} onBazelCommand={(c) => this.handleBuildClicked(c)} />
+          )}
           {this.editor && this.currentPath()?.endsWith(".bazelversion") && (
             <BazelVersionSidekick editor={this.editor} />
           )}
@@ -1299,8 +1305,16 @@ export default class CodeComponent extends React.Component<Props, State> {
               className="context-menu"
               onClick={this.clearContextMenu.bind(this)}
               style={{ top: this.state.contextMenuY, left: this.state.contextMenuX }}>
-              <div onClick={() => this.handleNewFileClicked(this.state.contextMenuFullPath!)}>New file</div>
-              <div onClick={() => this.handleNewFolderClicked(this.state.contextMenuFullPath!)}>New folder</div>
+              <div
+                onClick={() => this.handleNewFileClicked(this.state.contextMenuFile!, this.state.contextMenuFullPath!)}>
+                New file
+              </div>
+              <div
+                onClick={() =>
+                  this.handleNewFolderClicked(this.state.contextMenuFile!, this.state.contextMenuFullPath!)
+                }>
+                New folder
+              </div>
               <div onClick={() => this.handleRenameClicked(this.state.contextMenuFullPath!)}>Rename</div>
               <div
                 onClick={() => this.handleDeleteClicked(this.state.contextMenuFullPath!, this.state.contextMenuFile!)}>
