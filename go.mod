@@ -105,6 +105,7 @@ require (
 	github.com/rantav/go-grpc-channelz v0.0.3
 	github.com/rs/zerolog v1.29.1
 	github.com/shirou/gopsutil/v3 v3.23.5
+	github.com/shurcooL/githubv4 v0.0.0-20231126234147-1cffa1f02456
 	github.com/sirupsen/logrus v1.9.3
 	github.com/smacker/go-tree-sitter v0.0.0-20230501083651-a7d92773b3aa
 	github.com/stretchr/testify v1.8.4
@@ -136,7 +137,7 @@ require (
 	google.golang.org/genproto/googleapis/bytestream v0.0.0-20240116215550-a9fa1716bcac
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20240205150955-31a09d347014
 	google.golang.org/grpc v1.61.0
-	google.golang.org/protobuf v1.32.0
+	google.golang.org/protobuf v1.33.0
 	gopkg.in/yaml.v2 v2.4.0
 	gopkg.in/yaml.v3 v3.0.1
 	gorm.io/driver/clickhouse v0.5.1
@@ -236,7 +237,7 @@ require (
 	github.com/gogo/protobuf v1.3.2 // indirect
 	github.com/golang-jwt/jwt/v4 v4.5.0 // indirect
 	github.com/golang/groupcache v0.0.0-20210331224755-41bb18bfe9da // indirect
-	github.com/golang/protobuf v1.5.3 // indirect
+	github.com/golang/protobuf v1.5.4 // indirect
 	github.com/golang/snappy v0.0.4 // indirect
 	github.com/google/btree v1.1.2 // indirect
 	github.com/google/flatbuffers v23.5.9+incompatible // indirect
@@ -307,6 +308,7 @@ require (
 	github.com/sergi/go-diff v1.3.1 // indirect
 	github.com/shoenig/go-m1cpu v0.1.6 // indirect
 	github.com/shopspring/decimal v1.3.1 // indirect
+	github.com/shurcooL/graphql v0.0.0-20230722043721-ed46e5a46466 // indirect
 	github.com/skeema/knownhosts v1.2.1 // indirect
 	github.com/spf13/cast v1.5.1 // indirect
 	github.com/tklauser/numcpus v0.6.1 // indirect

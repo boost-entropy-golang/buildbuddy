@@ -63,24 +63,14 @@ type Executor struct {
 	hostID     string
 }
 
-type Options struct {
-	// TESTING ONLY: allows the name of the executor to be manually specified instead of deriving it
-	// from host information.
-	NameOverride string
-}
-
-func NewExecutor(env environment.Env, id, hostID string, runnerPool interfaces.RunnerPool, options *Options) (*Executor, error) {
-	effectiveHostID := hostID
-	if options.NameOverride != "" {
-		effectiveHostID = options.NameOverride
-	}
+func NewExecutor(env environment.Env, id, hostID string, runnerPool interfaces.RunnerPool) (*Executor, error) {
 	if err := disk.EnsureDirectoryExists(runnerPool.GetBuildRoot()); err != nil {
 		return nil, err
 	}
 	return &Executor{
 		env:        env,
 		id:         id,
-		hostID:     effectiveHostID,
+		hostID:     hostID,
 		runnerPool: runnerPool,
 	}, nil
 }
@@ -201,7 +191,7 @@ func (s *Executor) ExecuteTaskAndStreamResults(ctx context.Context, st *repb.Sch
 	defer stage.End()
 
 	if !req.GetSkipCacheLookup() {
-		log.CtxInfof(ctx, "Checking action cache for existing result.")
+		log.CtxDebugf(ctx, "Checking action cache for existing result.")
 		if err := stateChangeFn(repb.ExecutionStage_CACHE_CHECK, operation.InProgressExecuteResponse()); err != nil {
 			return true, err
 		}
@@ -210,14 +200,14 @@ func (s *Executor) ExecuteTaskAndStreamResults(ctx context.Context, st *repb.Sch
 			if err := stateChangeFn(repb.ExecutionStage_COMPLETED, operation.ExecuteResponseWithCachedResult(actionResult)); err != nil {
 				return true, err
 			}
-			log.CtxInfof(ctx, "Found existing result in action cache, all done.")
+			log.CtxDebugf(ctx, "Found existing result in action cache, all done.")
 			actionMetrics.Result = actionResult
 			actionMetrics.CachedResult = true
 			return false, nil
 		}
 	}
 
-	log.CtxInfof(ctx, "Getting a runner for task.")
+	log.CtxDebugf(ctx, "Getting a runner for task.")
 	r, err := s.runnerPool.Get(ctx, st)
 	if err != nil {
 		return finishWithErrFn(status.WrapErrorf(err, "error creating runner for command"))
@@ -231,7 +221,7 @@ func (s *Executor) ExecuteTaskAndStreamResults(ctx context.Context, st *repb.Sch
 		s.runnerPool.TryRecycle(ctx, r, finishedCleanly)
 	}()
 
-	log.CtxInfof(ctx, "Preparing runner for task.")
+	log.CtxDebugf(ctx, "Preparing runner for task.")
 	stage.Set("pull_image")
 	if err := r.PrepareForTask(ctx); err != nil {
 		return finishWithErrFn(err)
@@ -239,7 +229,7 @@ func (s *Executor) ExecuteTaskAndStreamResults(ctx context.Context, st *repb.Sch
 
 	md.InputFetchStartTimestamp = timestamppb.Now()
 
-	log.CtxInfof(ctx, "Downloading inputs.")
+	log.CtxDebugf(ctx, "Downloading inputs.")
 	stage.Set("input_fetch")
 	if err := r.DownloadInputs(ctx, md.IoStats); err != nil {
 		return finishWithErrFn(err)
@@ -247,7 +237,7 @@ func (s *Executor) ExecuteTaskAndStreamResults(ctx context.Context, st *repb.Sch
 
 	md.InputFetchCompletedTimestamp = timestamppb.Now()
 
-	log.CtxInfof(ctx, "Transitioning to EXECUTING stage")
+	log.CtxDebugf(ctx, "Transitioning to EXECUTING stage")
 	if err := stateChangeFn(repb.ExecutionStage_EXECUTING, operation.InProgressExecuteResponse()); err != nil {
 		return true, err
 	}
@@ -264,7 +254,7 @@ func (s *Executor) ExecuteTaskAndStreamResults(ctx context.Context, st *repb.Sch
 	ctx, cancel := context.WithTimeout(ctx, execDuration)
 	defer cancel()
 
-	log.CtxInfof(ctx, "Executing task.")
+	log.CtxDebugf(ctx, "Executing task.")
 	stage.Set("execution")
 	cmdResultChan := make(chan *interfaces.CommandResult, 1)
 	go func() {
@@ -316,7 +306,7 @@ func (s *Executor) ExecuteTaskAndStreamResults(ctx context.Context, st *repb.Sch
 	actionMetrics.Result = actionResult
 	executeResponse := operation.ExecuteResponseWithResult(actionResult, cmdResult.Error)
 
-	log.CtxInfof(ctx, "Uploading outputs.")
+	log.CtxDebugf(ctx, "Uploading outputs.")
 	stage.Set("output_upload")
 	if err := r.UploadOutputs(ctx, md.IoStats, executeResponse, cmdResult); err != nil {
 		return finishWithErrFn(status.UnavailableErrorf("Error uploading outputs: %s", err.Error()))
@@ -351,7 +341,7 @@ func (s *Executor) ExecuteTaskAndStreamResults(ctx context.Context, st *repb.Sch
 		return finishWithErrFn(err)
 	}
 	if cmdResult.Error == nil {
-		log.CtxInfof(ctx, "Task finished cleanly.")
+		log.CtxDebugf(ctx, "Task finished cleanly.")
 		finishedCleanly = true
 	}
 	return false, nil
