@@ -436,7 +436,7 @@ func (sm *Replica) updatePartitionMetadata(wb pebble.Batch, key, val []byte, fil
 			// Skip increment on duplicate write.
 			return closer.Close()
 		}
-		if err != nil && err != pebble.ErrNotFound {
+		if err != pebble.ErrNotFound {
 			return err
 		}
 		pm.TotalCount++
@@ -728,6 +728,7 @@ func (sm *Replica) loadReplicaState(db ReplicaReader) error {
 		return status.FailedPreconditionErrorf("last applied not moving forward: %d > %d", sm.lastAppliedIndex, lastStoredIndex)
 	}
 	sm.lastAppliedIndex = lastStoredIndex
+	log.Debugf("replica (shardID=%d, replicaID=%d) loadReplicaState finished", sm.ShardID, sm.ReplicaID)
 	return nil
 }
 
