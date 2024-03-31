@@ -347,7 +347,7 @@ func (g *runner) prepareCommands(ctx context.Context) ([]*rbeclient.Command, err
 		for {
 			select {
 			case <-prepDone:
-				break
+				return
 			case <-time.After(1 * time.Second):
 			}
 
@@ -616,7 +616,7 @@ func (w *rawResultsWriter) Write(res *rbeclient.CommandResult, remoteStats *remo
 
 	return w.csvWriter.Write([]string{
 		res.CommandName,
-		res.Executor,
+		res.ActionResult.GetExecutionMetadata().GetWorker(),
 		errorString,
 		strconv.FormatInt(res.LocalStats.ExecuteRPCStarted.Milliseconds(), 10),
 		strconv.FormatInt(res.LocalStats.TimeToAccepted.Milliseconds(), 10),

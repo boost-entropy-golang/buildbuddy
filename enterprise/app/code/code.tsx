@@ -31,9 +31,11 @@ import BazelrcSidekick from "../sidekick/bazelrc/bazelrc";
 import BuildFileSidekick from "../sidekick/buildfile/buildfile";
 import error_service from "../../../app/errors/error_service";
 import { build } from "../../../proto/remote_execution_ts_proto";
+import { search } from "../../../proto/search_ts_proto";
 import OrgPicker from "../org_picker/org_picker";
 import capabilities from "../../../app/capabilities/capabilities";
 import router from "../../../app/router/router";
+import picker_service, { PickerModel } from "../../../app/picker/picker_service";
 
 interface Props {
   user: User;
@@ -74,6 +76,9 @@ interface State {
   contextMenuY?: number;
   contextMenuFullPath?: string;
   contextMenuFile?: github.TreeNode;
+
+  commands: string[];
+  defaultConfig: string;
 }
 
 // When upgrading monaco, make sure to run
@@ -116,6 +121,9 @@ export default class CodeComponent extends React.Component<Props, State> {
 
     prTitle: "",
     prBody: "",
+
+    commands: ["build //...", "test //..."],
+    defaultConfig: "",
   };
 
   editor: monaco.editor.IStandaloneCodeEditor | undefined;
@@ -165,8 +173,44 @@ export default class CodeComponent extends React.Component<Props, State> {
           this.editor?.trigger("find", "editor.actions.findWithArgs", { searchString: "" });
           e.preventDefault();
           break;
+        case 80: // Meta + P
+          if (!e.metaKey) break;
+          e.preventDefault();
+          this.showFileSearch();
       }
     };
+  }
+
+  showFileSearch() {
+    let picker: PickerModel = {
+      title: "Search",
+      placeholder: "",
+      // TODO: add debounce support
+    };
+    if (capabilities.config.codesearchEnabled) {
+      picker.fetchOptions = async (query) => {
+        // TODO: include repo info once supported
+        // TODO: kick off indexing on page load
+        return (
+          await rpcService.service.search(
+            new search.SearchRequest({ query: new search.Query({ term: `filepath:${query}` }) })
+          )
+        ).results.map((r) => r.filename);
+      };
+    } else {
+      picker.options = this.state.treeResponse?.nodes.map((n) => n.path) || [];
+    }
+    picker_service.show(picker);
+    picker_service.picked.subscribe((path) => {
+      this.navigateToPath(path);
+      if (this.state.fullPathToModelMap.has(path)) {
+        this.setModel(path, this.state.fullPathToModelMap.get(path));
+      } else {
+        this.fetchContentForPath(path).then((response) => {
+          this.navigateToContent(path, response.content);
+        });
+      }
+    });
   }
 
   parseGithubUrl(githubUrl: string) {
@@ -507,17 +551,29 @@ export default class CodeComponent extends React.Component<Props, State> {
   }
 
   handleBuildClicked(args: string) {
+    let newCommands = this.state.commands;
+    // Remove if it already exists.
+    const index = newCommands.indexOf(args);
+    if (index > -1) {
+      newCommands.splice(index, 1);
+    }
+    // Place it at the front.
+    newCommands.unshift(args);
+    // Limit the number of commands.
+    newCommands = newCommands.slice(0, 10);
+
     let request = new runner.RunRequest();
     request.gitRepo = new runner.RunRequest.GitRepo();
     request.gitRepo.repoUrl = `https://github.com/${this.currentOwner()}/${this.currentRepo()}.git`;
-    request.bazelCommand = args;
+    request.bazelCommand = args + (this.state.defaultConfig ? ` --config=${this.state.defaultConfig}` : "");
     request.repoState = this.getRepoState();
     request.async = true;
+    request.runRemotely = true;
     request.execProperties = [
       new build.bazel.remote.execution.v2.Platform.Property({ name: "include-secrets", value: "true" }),
     ];
 
-    this.updateState({ isBuilding: true });
+    this.updateState({ isBuilding: true, commands: newCommands });
     rpcService.service
       .run(request)
       .then((response: runner.RunResponse) => {
@@ -679,8 +735,8 @@ export default class CodeComponent extends React.Component<Props, State> {
     this.updateState({});
   }
 
-  handleNewFileClicked(node: github.TreeNode, path: string) {
-    if (node.type != "tree") {
+  handleNewFileClicked(node: github.TreeNode | undefined, path: string) {
+    if (node && node.type != "tree") {
       path = this.getParent(path);
     }
 
@@ -691,8 +747,8 @@ export default class CodeComponent extends React.Component<Props, State> {
     this.updateState({ temporaryFiles: this.state.temporaryFiles });
   }
 
-  handleNewFolderClicked(node: github.TreeNode, path: string) {
-    if (node.type != "tree") {
+  handleNewFolderClicked(node: github.TreeNode | undefined, path: string) {
+    if (node && node.type != "tree") {
       path = this.getParent(path);
     }
 
@@ -1195,8 +1251,11 @@ export default class CodeComponent extends React.Component<Props, State> {
               )}
               <CodeBuildButton
                 onCommandClicked={this.handleBuildClicked.bind(this)}
+                onDefaultConfig={(config) => this.setState({ defaultConfig: config })}
                 isLoading={this.state.isBuilding}
                 project={`${this.currentOwner()}/${this.currentRepo()}}`}
+                commands={this.state.commands}
+                defaultConfig={this.state.defaultConfig}
               />
             </div>
           )}

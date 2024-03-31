@@ -555,8 +555,8 @@ def install_go_mod_dependencies(workspace_name = "buildbuddy"):
     go_repository(
         name = "com_github_bits_and_blooms_bitset",
         importpath = "github.com/bits-and-blooms/bitset",
-        sum = "h1:Kn4yilvwNtMACtf1eYDlG8H77R07mZSPbMjLyS07ChA=",
-        version = "v1.2.0",
+        sum = "h1:U/q1fAF7xXRhFCrhROzIfffYnu+dlS38vCZtmFVPHmA=",
+        version = "v1.12.0",
     )
     go_repository(
         name = "com_github_bkaradzic_go_lz4",
@@ -3895,6 +3895,12 @@ def install_go_mod_dependencies(workspace_name = "buildbuddy"):
         version = "v0.5.0",
     )
     go_repository(
+        name = "com_github_mschoch_smat",
+        importpath = "github.com/mschoch/smat",
+        sum = "h1:8imxQsjDm8yFEAVBe7azKmKSgzSkZXDuKkSq9374khM=",
+        version = "v0.2.0",
+    )
+    go_repository(
         name = "com_github_muesli_reflow",
         importpath = "github.com/muesli/reflow",
         sum = "h1:IFsN6K9NfGtjeggFP+68I4chLZV2yIKsXJFNZ+eWh6s=",
@@ -4357,6 +4363,12 @@ def install_go_mod_dependencies(workspace_name = "buildbuddy"):
         importpath = "github.com/rivo/uniseg",
         sum = "h1:S1pD9weZBuJdFmowNwbpi7BJ8TNftyUImj/0WQi72jY=",
         version = "v0.2.0",
+    )
+    go_repository(
+        name = "com_github_roaringbitmap_roaring",
+        importpath = "github.com/RoaringBitmap/roaring",
+        sum = "h1:LXcSqGGGMKm+KAzUyWn7ZeREqoOkoMX+KwLOK1thc4I=",
+        version = "v1.9.1",
     )
     go_repository(
         name = "com_github_rogpeppe_fastuuid",
@@ -5012,6 +5024,12 @@ def install_go_mod_dependencies(workspace_name = "buildbuddy"):
         importpath = "github.com/xhit/go-str2duration/v2",
         sum = "h1:lxklc02Drh6ynqX+DdPyp5pCKLUQpRT8bp8Ydu2Bstc=",
         version = "v2.1.0",
+    )
+    go_repository(
+        name = "com_github_xiam_s_expr",
+        importpath = "github.com/xiam/s-expr",
+        sum = "h1:GOOG0ytl7fQsJ2yyA0qJu4uSUyv2pbILu+7edPboSNk=",
+        version = "v0.0.0-20240311144413-9d7e25c9d7d1",
     )
     go_repository(
         name = "com_github_xiang90_probing",
@@ -6769,10 +6787,14 @@ def install_go_mod_dependencies(workspace_name = "buildbuddy"):
 # Manually created
 def install_static_dependencies(workspace_name = "buildbuddy"):
     http_archive(
-        name = "com_github_buildbuddy_io_firecracker_firecracker-v1.4.0-20230720-cf5f56f",
-        build_file_content = 'exports_files(["firecracker-v1.4.0-20230720-cf5f56f", "jailer-v1.4.0-20230720-cf5f56f"])',
-        sha256 = "b36d9ad62ca467d2794635c4f19b0993c11bb46ed3b575037287964f9c82cc9b",
-        urls = ["https://storage.googleapis.com/buildbuddy-tools/binaries/firecracker/firecracker-v1.4.0-20230720-cf5f56f.tgz"],
+        name = "com_github_firecracker_microvm_firecracker",
+        build_file_content = "\n".join([
+            'package(default_visibility = ["//visibility:public"])',
+            'filegroup(name = "firecracker", srcs = ["release-{release}/firecracker-{release}"])',
+            'filegroup(name = "jailer", srcs = ["release-{release}/jailer-{release}"])',
+        ]).format(release = "v1.7.0-x86_64"),
+        sha256 = "55bd3e6d599fdd108e36e52f9aee2319f06c18a90f2fa49b64e93fdf06f5ff53",
+        urls = ["https://github.com/firecracker-microvm/firecracker/releases/download/v1.7.0/firecracker-v1.7.0-x86_64.tgz"],
     )
     http_archive(
         name = "com_github_containerd_stargz_snapshotter-v0.11.4-linux-amd64",

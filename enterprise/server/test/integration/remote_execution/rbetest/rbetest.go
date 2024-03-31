@@ -569,7 +569,6 @@ func (c *testCommandController) RegisterCommand(stream retpb.CommandController_R
 			err = stream.Send(op)
 			if err != nil {
 				log.Warningf("Send failed: %v", err)
-				break
 			}
 		case <-done:
 			return nil
@@ -818,7 +817,7 @@ func (r *Env) addExecutor(t testing.TB, options *ExecutorOptions) *Executor {
 	executorHostID := uuid.New()
 	if options.Name != "" {
 		executorID = options.Name
-		executorHostID = options.Name
+		executorHostID = options.Name + ".host"
 	}
 
 	runnerPool := NewTestRunnerPool(r.t, env, options.RunInterceptor)
