@@ -7,6 +7,12 @@ load("//rules/go:index.bzl", "go_sdk_tool")
 
 package(default_visibility = ["//visibility:public"])
 
+alias(
+    name = "zlib",
+    actual = "@zlib",
+    tags = ["manual"],
+)
+
 # Rendered JSON result could be checked by doing:
 #   bazel build //:no_go_config
 #   cat bazel-bin/no_go_config.json | jq .
@@ -127,6 +133,7 @@ nogo(
         "@com_github_nishanths_exhaustive//:exhaustive",
     ] + staticcheck_analyzers(ANALYZERS + [
         "-SA1019",
+        "-SA1024",
         "-SA1029",
         "-SA9001",
         "-ST1000",
