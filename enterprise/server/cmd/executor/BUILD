@@ -100,20 +100,32 @@ genrule(
 )
 
 container_layer(
-    name = "executor_tools",
+    name = "executor_tools_layer",
     directory = "/usr/bin",
-    files = [
-        ":firecracker",
-        ":jailer",
-        "@com_github_buildbuddy_io_soci_snapshotter-soci-store-linux-amd64-race//file:soci-store-race",
-        "@com_github_buildbuddy_io_soci_snapshotter-soci-store-linux-amd64//file:soci-store",
-    ],
+    files = select({
+        "@platforms//cpu:x86_64": [
+            ":firecracker",
+            ":jailer",
+            "@com_github_buildbuddy_io_soci_snapshotter-soci-store-linux-amd64-race//file:soci-store-race",
+            "@com_github_buildbuddy_io_soci_snapshotter-soci-store-linux-amd64//file:soci-store",
+        ],
+        "//conditions:default": [],
+    }),
+)
+
+container_layer(
+    name = "podman_static_layer",
+    directory = "/",
+    tars = ["//enterprise/server/remote_execution/containers/podman:podman-static.tar.gz"],
 )
 
 container_image(
     name = "base_image",
     base = "@executor_image//image:dockerfile_image.tar",
-    layers = [":executor_tools"],
+    layers = [
+        ":executor_tools_layer",
+        ":podman_static_layer",
+    ],
     symlinks = {
         "config.yaml": "app/enterprise/server/cmd/executor/executor.runfiles/buildbuddy/enterprise/config/executor.release.yaml",
     },
