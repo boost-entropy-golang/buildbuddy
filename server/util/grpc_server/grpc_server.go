@@ -53,7 +53,7 @@ func GRPCSPort() int {
 	return *gRPCSPort
 }
 
-func InternalPort() int {
+func InternalGRPCPort() int {
 	return *internalGRPCPort
 }
 
@@ -68,112 +68,83 @@ func MaxRecvMsgSizeBytes() int {
 	return *gRPCMaxRecvMsgSizeBytes
 }
 
-type RegisterServices func(server *grpc.Server, env *real_environment.RealEnv)
-
-func RegisterGRPCServer(env *real_environment.RealEnv, regServices RegisterServices) error {
-	grpcServer, err := newGRPCServer(env, *gRPCPort, nil, regServices)
-	if err != nil {
-		return err
-	}
-	env.SetGRPCServer(grpcServer)
-	if *gRPCOverHTTPPortEnabled {
-		env.SetMux(&gRPCMux{
-			env.GetMux(),
-			grpcServer,
-		})
-	}
-	return nil
+type GRPCServerConfig struct {
+	ExtraChainedUnaryInterceptors  []grpc.UnaryServerInterceptor
+	ExtraChainedStreamInterceptors []grpc.StreamServerInterceptor
 }
 
-func RegisterGRPCSServer(env *real_environment.RealEnv, regServices RegisterServices) error {
-	if !env.GetSSLService().IsEnabled() {
-		return nil
-	}
-	creds, err := env.GetSSLService().GetGRPCSTLSCreds()
-	if err != nil {
-		return status.InternalErrorf("Error getting SSL creds: %s", err)
-	}
-	grpcsServer, err := newGRPCServer(env, *gRPCSPort, grpc.Creds(creds), regServices)
-	if err != nil {
-		return err
-	}
-	env.SetGRPCSServer(grpcsServer)
-	return nil
+type GRPCServer struct {
+	env      environment.Env
+	hostPort string
+	server   *grpc.Server
 }
 
-func RegisterInternalGRPCServer(env *real_environment.RealEnv, regServices RegisterServices) error {
-	if *internalGRPCPort == 0 {
-		return nil
-	}
-
-	grpcServer, err := newGRPCServer(env, *internalGRPCPort, nil, regServices)
-	if err != nil {
-		return err
-	}
-	env.SetInternalGRPCServer(grpcServer)
-	return nil
+func (b *GRPCServer) GetServer() *grpc.Server {
+	return b.server
 }
 
-func RegisterInternalGRPCSServer(env *real_environment.RealEnv, regServices RegisterServices) error {
-	if *internalGRPCSPort == 0 {
-		return nil
+func New(env environment.Env, port int, ssl bool, config GRPCServerConfig) (*GRPCServer, error) {
+	b := &GRPCServer{env: env}
+	if ssl && !env.GetSSLService().IsEnabled() {
+		return nil, status.InvalidArgumentError("GRPCS requires SSL Service")
+	}
+	b.hostPort = fmt.Sprintf("%s:%d", b.env.GetListenAddr(), port)
+
+	var credentialOption grpc.ServerOption = nil
+	if ssl {
+		creds, err := b.env.GetSSLService().GetGRPCSTLSCreds()
+		if err != nil {
+			return nil, status.InternalErrorf("Error getting SSL creds: %s", err)
+		}
+		credentialOption = grpc.Creds(creds)
 	}
 
-	if !env.GetSSLService().IsEnabled() {
-		return nil
-	}
-	creds, err := env.GetSSLService().GetGRPCSTLSCreds()
-	if err != nil {
-		return status.InternalErrorf("Error getting SSL creds: %s", err)
-	}
-	grpcsServer, err := newGRPCServer(env, *internalGRPCSPort, grpc.Creds(creds), regServices)
-	if err != nil {
-		return err
-	}
-	env.SetInternalGRPCSServer(grpcsServer)
-	return nil
-}
-
-func newGRPCServer(env *real_environment.RealEnv, port int, credentialOption grpc.ServerOption, regServices RegisterServices) (*grpc.Server, error) {
-	// Initialize our gRPC server (and fail early if that doesn't happen).
-	hostAndPort := fmt.Sprintf("%s:%d", env.GetListenAddr(), port)
-
-	lis, err := net.Listen("tcp", hostAndPort)
-	if err != nil {
-		return nil, status.InternalErrorf("Failed to listen: %s", err)
-	}
-
-	grpcOptions := CommonGRPCServerOptions(env)
+	grpcOptions := CommonGRPCServerOptionsWithConfig(env, config)
 	if credentialOption != nil {
 		grpcOptions = append(grpcOptions, credentialOption)
-		log.Infof("gRPCS listening on %s", hostAndPort)
+		log.Infof("gRPCS listening on %s", b.hostPort)
 	} else {
-		log.Infof("gRPC listening on %s", hostAndPort)
+		log.Infof("gRPC listening on %s", b.hostPort)
 	}
 
-	grpcServer := grpc.NewServer(grpcOptions...)
+	b.server = grpc.NewServer(grpcOptions...)
 
 	// Support reflection so that tools like grpc-cli (aka stubby) can
 	// enumerate our services and call them.
-	reflection.Register(grpcServer)
+	reflection.Register(b.server)
 
 	// Support prometheus grpc metrics.
-	grpc_prometheus.Register(grpcServer)
+	grpc_prometheus.Register(b.server)
 
 	if *enablePrometheusHistograms {
 		grpc_prometheus.EnableHandlingTimeHistogram()
 	}
 
 	// Register health check service.
-	hlpb.RegisterHealthServer(grpcServer, env.GetHealthChecker())
+	hlpb.RegisterHealthServer(b.server, b.env.GetHealthChecker())
+	return b, nil
+}
 
-	regServices(grpcServer, env)
+func (b *GRPCServer) Start() error {
+	lis, err := net.Listen("tcp", b.hostPort)
+	if err != nil {
+		return status.InternalErrorf("Failed to listen: %s", err)
+	}
 
 	go func() {
-		_ = grpcServer.Serve(lis)
+		_ = b.server.Serve(lis)
 	}()
-	env.GetHealthChecker().RegisterShutdownFunction(GRPCShutdownFunc(grpcServer))
-	return grpcServer, nil
+	b.env.GetHealthChecker().RegisterShutdownFunction(GRPCShutdownFunc(b.server))
+	return nil
+}
+
+func EnableGRPCOverHTTP(env *real_environment.RealEnv, grpcServer *grpc.Server) {
+	if *gRPCOverHTTPPortEnabled {
+		env.SetMux(&gRPCMux{
+			env.GetMux(),
+			grpcServer,
+		})
+	}
 }
 
 func GRPCShutdown(ctx context.Context, grpcServer *grpc.Server) error {
@@ -246,11 +217,25 @@ func propagateRequestMetadataIDsToSpanStreamServerInterceptor() grpc.StreamServe
 }
 
 func CommonGRPCServerOptions(env environment.Env) []grpc.ServerOption {
+	return CommonGRPCServerOptionsWithConfig(env, GRPCServerConfig{})
+}
+
+func CommonGRPCServerOptionsWithConfig(env environment.Env, config GRPCServerConfig) []grpc.ServerOption {
+	chainedUnaryInterceptors := []grpc.UnaryServerInterceptor{otelgrpc.UnaryServerInterceptor(otelgrpc.WithMeterProvider(noop.NewMeterProvider())), propagateRequestMetadataIDsToSpanUnaryServerInterceptor()}
+	if len(config.ExtraChainedUnaryInterceptors) > 0 {
+		chainedUnaryInterceptors = append(chainedUnaryInterceptors, config.ExtraChainedUnaryInterceptors...)
+	}
+
+	chainedStreamInterceptors := []grpc.StreamServerInterceptor{otelgrpc.StreamServerInterceptor(otelgrpc.WithMeterProvider(noop.NewMeterProvider())), propagateRequestMetadataIDsToSpanStreamServerInterceptor()}
+	if len(config.ExtraChainedStreamInterceptors) > 0 {
+		chainedStreamInterceptors = append(chainedStreamInterceptors, config.ExtraChainedStreamInterceptors...)
+	}
+
 	return []grpc.ServerOption{
 		interceptors.GetUnaryInterceptor(env),
 		interceptors.GetStreamInterceptor(env),
-		grpc.ChainUnaryInterceptor(otelgrpc.UnaryServerInterceptor(otelgrpc.WithMeterProvider(noop.NewMeterProvider())), propagateRequestMetadataIDsToSpanUnaryServerInterceptor()),
-		grpc.ChainStreamInterceptor(otelgrpc.StreamServerInterceptor(otelgrpc.WithMeterProvider(noop.NewMeterProvider())), propagateRequestMetadataIDsToSpanStreamServerInterceptor()),
+		grpc.ChainUnaryInterceptor(chainedUnaryInterceptors...),
+		grpc.ChainStreamInterceptor(chainedStreamInterceptors...),
 		grpc.StreamInterceptor(grpc_prometheus.StreamServerInterceptor),
 		grpc.UnaryInterceptor(grpc_prometheus.UnaryServerInterceptor),
 		grpc.RecvBufferPool(grpc.NewSharedBufferPool()),
