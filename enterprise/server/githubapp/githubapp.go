@@ -1997,7 +1997,7 @@ type prDetailsQuery struct {
 			} `graphql:"reviews(first: 100)"`
 			Commits struct {
 				Nodes []prCommit
-			} `graphql:"commits(first: 100)"`
+			} `graphql:"commits(last: 100)"`
 			// TODO(jdhollen): Fetch files here
 		} `graphql:"pullRequest(number: $pullNumber)"`
 	} `graphql:"repository(owner: $repoOwner, name: $repoName)"`
@@ -2153,6 +2153,13 @@ func graphQLCommentToProto(c *reviewComment, startLine int64, endLine int64, dif
 	comment.Id = c.Id
 	comment.Body = c.BodyText
 	comment.Path = path
+	// TODO(jdhollen): This commit sha is the commit of the right hand side
+	// of the diff.  GitHub only gives us the diff hunk as a way to match
+	// the comment with the left hand side commit. Even if the GitHub UI's
+	// behavior is internally-consistent (big if, doesn't seem like it), the
+	// behavior is definitely opaque to users.  We should strive to match
+	// comments to specific commits and *always* show the comment on that
+	// revision of the file (effectively ignoring the "side" attribute).
 	comment.CommitSha = c.OriginalCommit.Oid
 	comment.ReviewId = c.PullRequestReview.Id
 	comment.CreatedAtUsec = c.CreatedAt.UnixMicro()
@@ -2186,6 +2193,12 @@ func FileStatusToChangeType(status string) ghpb.FileChangeType {
 		return ghpb.FileChangeType_FILE_CHANGE_TYPE_REMOVED
 	} else if status == "changed" || status == "modified" {
 		return ghpb.FileChangeType_FILE_CHANGE_TYPE_MODIFIED
+	} else if status == "renamed" {
+		return ghpb.FileChangeType_FILE_CHANGE_TYPE_RENAMED
+	} else if status == "copied" {
+		return ghpb.FileChangeType_FILE_CHANGE_TYPE_COPIED
+	} else if status == "unchanged" {
+		return ghpb.FileChangeType_FILE_CHANGE_TYPE_UNCHANGED
 	}
 	return ghpb.FileChangeType_FILE_CHANGE_TYPE_UNKNOWN
 }
@@ -2305,9 +2318,12 @@ func (a *GitHubApp) GetGithubPullRequestDetails(ctx context.Context, req *ghpb.G
 		if ref == "" {
 			return nil, status.InternalErrorf("Couldn't find SHA for file.")
 		}
-		summary.BaseSha = pr.BaseRefOid
-		summary.CommitSha = pr.HeadRefOid
-		summary.Comments = fileCommentCount[f.GetFilename()]
+		summary.OriginalName = f.GetPreviousFilename()
+		if summary.OriginalName == "" {
+			summary.OriginalName = summary.Name
+		}
+		summary.OriginalCommitSha = pr.BaseRefOid
+		summary.ModifiedCommitSha = pr.HeadRefOid
 		fileSummaries = append(fileSummaries, summary)
 	}
 
@@ -2381,6 +2397,8 @@ func (a *GitHubApp) GetGithubPullRequestDetails(ctx context.Context, req *ghpb.G
 		CreatedAtUsec:  pr.CreatedAt.UnixMicro(),
 		UpdatedAtUsec:  pr.UpdatedAt.UnixMicro(),
 		Branch:         pr.HeadRefName,
+		BaseCommitSha:  pr.BaseRefOid,
+		HeadCommitSha:  pr.HeadRefOid,
 		Reviewers:      reviewers,
 		Files:          fileSummaries,
 		ActionStatuses: actionStatuses,

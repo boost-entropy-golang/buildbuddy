@@ -503,6 +503,7 @@ func (ws *workflowService) ExecuteWorkflow(ctx context.Context, req *wfpb.Execut
 		return nil, err
 	}
 
+	// TODO(Maggie): Delete after all usages are cleaned up
 	if req.GetClean() {
 		err = ws.useCleanWorkflow(ctx, wf)
 		if err != nil {
@@ -664,6 +665,33 @@ func (ws *workflowService) GetLegacyWorkflowIDForGitRepository(groupID string, r
 	return fmt.Sprintf("%s:%s:%s", repoWorkflowIDPrefix, groupID, repoURL)
 }
 
+// InvalidateAllSnapshotsForRepo updates the instance name suffix for the repo.
+// As the instance name suffix is used in the snapshot key, this invalidates
+// all previous workflows.
+func (ws *workflowService) InvalidateAllSnapshotsForRepo(ctx context.Context, repoURL string) error {
+	u, err := ws.env.GetAuthenticator().AuthenticatedUser(ctx)
+	if err != nil {
+		return err
+	}
+
+	suffix, err := random.RandomString(10)
+	if err != nil {
+		return err
+	}
+
+	log.CtxInfof(ctx, "Workflow clean run requested for repo %q (group %s)", repoURL, u.GetGroupID())
+	err = ws.env.GetDBHandle().NewQuery(ctx, "workflow_service_update_repo_instance_name").Raw(`
+				UPDATE GitRepositories
+				SET instance_name_suffix = ?
+				WHERE group_id = ? AND repo_url = ?`,
+		suffix, u.GetGroupID(), repoURL,
+	).Exec().Error
+
+	return err
+}
+
+// TODO(Maggie): Delete useCleanWorkflow and checkCleanWorkflowPermissions after
+// all references to ExecuteWorkflowRequest.clean have been cleaned up
 func (ws *workflowService) checkCleanWorkflowPermissions(ctx context.Context, wf *tables.Workflow) error {
 	u, err := ws.env.GetAuthenticator().AuthenticatedUser(ctx)
 	if err != nil {
@@ -1141,35 +1169,44 @@ func (ws *workflowService) createActionForWorkflow(ctx context.Context, wf *tabl
 		return nil, err
 	}
 
+	args := []string{
+		// NOTE: The executor is responsible for making sure this
+		// buildbuddy_ci_runner binary exists at the workspace root. It does so
+		// whenever it sees the `workflow-id` platform property.
+		//
+		// Also be cautious when adding new flags. See
+		// https://github.com/buildbuddy-io/buildbuddy-internal/issues/3101
+		"./buildbuddy_ci_runner",
+		"--invocation_id=" + invocationID,
+		"--action_name=" + workflowAction.Name,
+		"--bes_backend=" + events_api_url.String(),
+		"--bes_results_url=" + besResultsURL,
+		"--cache_backend=" + cache_api_url.String(),
+		"--rbe_backend=" + remote_exec_api_url.String(),
+		"--remote_instance_name=" + instanceName,
+		"--commit_sha=" + wd.SHA,
+		"--pushed_repo_url=" + wd.PushedRepoURL,
+		"--pushed_branch=" + wd.PushedBranch,
+		"--pull_request_number=" + fmt.Sprintf("%d", wd.PullRequestNumber),
+		"--target_repo_url=" + wd.TargetRepoURL,
+		"--target_branch=" + wd.TargetBranch,
+		"--visibility=" + visibility,
+		"--workflow_id=" + wf.WorkflowID,
+		"--trigger_event=" + wd.EventName,
+		"--bazel_command=" + ws.ciRunnerBazelCommand(),
+		"--debug=" + fmt.Sprintf("%v", ws.ciRunnerDebugMode()),
+	}
+	for _, filter := range workflowAction.GetGitFetchFilters() {
+		args = append(args, "--git_fetch_filters="+filter)
+	}
+	for _, path := range workflowAction.GitCleanExclude {
+		args = append(args, "--git_clean_exclude="+path)
+	}
+	args = append(args, extraArgs...)
+
 	cmd := &repb.Command{
 		EnvironmentVariables: envVars,
-		Arguments: append([]string{
-			// NOTE: The executor is responsible for making sure this
-			// buildbuddy_ci_runner binary exists at the workspace root. It does so
-			// whenever it sees the `workflow-id` platform property.
-			//
-			// Also be cautious when adding new flags. See
-			// https://github.com/buildbuddy-io/buildbuddy-internal/issues/3101
-			"./buildbuddy_ci_runner",
-			"--invocation_id=" + invocationID,
-			"--action_name=" + workflowAction.Name,
-			"--bes_backend=" + events_api_url.String(),
-			"--bes_results_url=" + besResultsURL,
-			"--cache_backend=" + cache_api_url.String(),
-			"--rbe_backend=" + remote_exec_api_url.String(),
-			"--remote_instance_name=" + instanceName,
-			"--commit_sha=" + wd.SHA,
-			"--pushed_repo_url=" + wd.PushedRepoURL,
-			"--pushed_branch=" + wd.PushedBranch,
-			"--pull_request_number=" + fmt.Sprintf("%d", wd.PullRequestNumber),
-			"--target_repo_url=" + wd.TargetRepoURL,
-			"--target_branch=" + wd.TargetBranch,
-			"--visibility=" + visibility,
-			"--workflow_id=" + wf.WorkflowID,
-			"--trigger_event=" + wd.EventName,
-			"--bazel_command=" + ws.ciRunnerBazelCommand(),
-			"--debug=" + fmt.Sprintf("%v", ws.ciRunnerDebugMode()),
-		}, extraArgs...),
+		Arguments:            args,
 		Platform: &repb.Platform{
 			Properties: []*repb.Platform_Property{
 				{Name: "Pool", Value: ws.poolForAction(workflowAction)},
@@ -1210,9 +1247,6 @@ func (ws *workflowService) createActionForWorkflow(ctx context.Context, wf *tabl
 			Name:  platform.DockerInitPropertyName,
 			Value: "true",
 		})
-	}
-	for _, path := range workflowAction.GitCleanExclude {
-		cmd.Arguments = append(cmd.Arguments, "--git_clean_exclude="+path)
 	}
 	cmdDigest, err := cachetools.UploadProtoToCAS(ctx, cache, instanceName, repb.DigestFunction_SHA256, cmd)
 	if err != nil {
