@@ -688,6 +688,10 @@ func (s *Store) NodeHost() *dragonboat.NodeHost {
 	return s.nodeHost
 }
 
+func (s *Store) NHID() string {
+	return s.nodeHost.ID()
+}
+
 func (s *Store) NodeDescriptor() *rfpb.NodeDescriptor {
 	return &rfpb.NodeDescriptor{
 		Nhid:        s.nodeHost.ID(),
@@ -774,37 +778,6 @@ func (s *Store) ListReplicas(ctx context.Context, req *rfpb.ListReplicasRequest)
 		})
 	}
 	return rsp, nil
-}
-
-func (s *Store) AddPeer(ctx context.Context, sourceShardID, newShardID uint64) error {
-	defer canary.Start("AddPeer", 10*time.Second)()
-	rd := s.lookupRange(sourceShardID)
-	if rd == nil {
-		return status.FailedPreconditionErrorf("cluster %d not found on this node", sourceShardID)
-	}
-	sourceReplica, err := s.GetReplica(rd.GetRangeId())
-	if err != nil || sourceReplica == nil {
-		return status.FailedPreconditionErrorf("range %d not found on this node", rd.GetRangeId())
-	}
-	initialMembers := make(map[uint64]string)
-	for _, replica := range rd.GetReplicas() {
-		nhid, _, err := s.registry.ResolveNHID(replica.GetShardId(), replica.GetReplicaId())
-		if err != nil {
-			return status.InternalErrorf("could not resolve node host ID: %s", err)
-		}
-		initialMembers[replica.GetReplicaId()] = nhid
-	}
-
-	_, err = s.StartShard(ctx, &rfpb.StartShardRequest{
-		ShardId:       newShardID,
-		ReplicaId:     sourceReplica.ReplicaID,
-		InitialMember: initialMembers,
-		Join:          false,
-	})
-	if status.IsAlreadyExistsError(err) {
-		return nil
-	}
-	return err
 }
 
 func (s *Store) StartShard(ctx context.Context, req *rfpb.StartShardRequest) (*rfpb.StartShardResponse, error) {
@@ -1253,35 +1226,6 @@ func (w *updateTagsWorker) updateTags() error {
 	return err
 }
 
-func (s *Store) GetMembership(ctx context.Context, shardID uint64) ([]*rfpb.ReplicaDescriptor, error) {
-	var membership *dragonboat.Membership
-	var err error
-	err = client.RunNodehostFn(ctx, func(ctx context.Context) error {
-		membership, err = s.nodeHost.SyncGetShardMembership(ctx, shardID)
-		if err != nil {
-			return err
-		}
-		// Trick client.RunNodehostFn into running this again if we got a nil
-		// membership back
-		if membership == nil {
-			return status.OutOfRangeErrorf("cluster not ready")
-		}
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	replicas := make([]*rfpb.ReplicaDescriptor, 0, len(membership.Nodes))
-	for replicaID := range membership.Nodes {
-		replicas = append(replicas, &rfpb.ReplicaDescriptor{
-			ShardId:   shardID,
-			ReplicaId: replicaID,
-		})
-	}
-	return replicas, nil
-}
-
 func (s *Store) SplitRange(ctx context.Context, req *rfpb.SplitRangeRequest) (*rfpb.SplitRangeResponse, error) {
 	startTime := time.Now()
 	leftRange := req.GetRange()
@@ -1342,17 +1286,16 @@ func (s *Store) SplitRange(ctx context.Context, req *rfpb.SplitRangeRequest) (*r
 		},
 	})
 	// Bringup new peers.
-	servers := make(map[string]string)
+	servers := make(map[string]string, len(leftRange.GetReplicas()))
 	for _, r := range leftRange.GetReplicas() {
-		nhid, _, err := s.registry.ResolveNHID(r.GetShardId(), r.GetReplicaId())
-		if err != nil {
-			return nil, err
+		if r.GetNhid() == "" {
+			return nil, status.InternalErrorf("empty nhid in ReplicaDescriptor %+v", r)
 		}
 		grpcAddr, _, err := s.registry.ResolveGRPC(r.GetShardId(), r.GetReplicaId())
 		if err != nil {
 			return nil, err
 		}
-		servers[nhid] = grpcAddr
+		servers[r.GetNhid()] = grpcAddr
 	}
 	bootstrapInfo := bringup.MakeBootstrapInfo(newShardID, 1, servers)
 	if err := bringup.StartShard(ctx, s.apiClient, bootstrapInfo, stubBatch); err != nil {
@@ -1364,10 +1307,7 @@ func (s *Store) SplitRange(ctx context.Context, req *rfpb.SplitRangeRequest) (*r
 	newRightRange.Start = splitPointResponse.GetSplitKey()
 	newRightRange.RangeId = newRangeID
 	newRightRange.Generation += 1
-	for i, r := range newRightRange.GetReplicas() {
-		r.ReplicaId = uint64(i + 1)
-		r.ShardId = newShardID
-	}
+	newRightRange.Replicas = bootstrapInfo.Replicas
 	newRightRangeBuf, err := proto.Marshal(newRightRange)
 	if err != nil {
 		return nil, err
@@ -1560,7 +1500,7 @@ func (s *Store) AddReplica(ctx context.Context, req *rfpb.AddReplicaRequest) (*r
 
 	// Finally, update the range descriptor information to reflect the
 	// membership of this new node in the range.
-	rd, err = s.addReplicaToRangeDescriptor(ctx, shardID, newReplicaID, rd)
+	rd, err = s.addReplicaToRangeDescriptor(ctx, shardID, newReplicaID, node.GetNhid(), rd)
 	if err != nil {
 		return nil, err
 	}
@@ -1813,11 +1753,12 @@ func (s *Store) updateRangeDescriptor(ctx context.Context, shardID uint64, old, 
 	return s.txnCoordinator.RunTxn(ctx, txn)
 }
 
-func (s *Store) addReplicaToRangeDescriptor(ctx context.Context, shardID, replicaID uint64, oldDescriptor *rfpb.RangeDescriptor) (*rfpb.RangeDescriptor, error) {
+func (s *Store) addReplicaToRangeDescriptor(ctx context.Context, shardID, replicaID uint64, nhid string, oldDescriptor *rfpb.RangeDescriptor) (*rfpb.RangeDescriptor, error) {
 	newDescriptor := proto.Clone(oldDescriptor).(*rfpb.RangeDescriptor)
 	newDescriptor.Replicas = append(newDescriptor.Replicas, &rfpb.ReplicaDescriptor{
 		ShardId:   shardID,
 		ReplicaId: replicaID,
+		Nhid:      proto.String(nhid),
 	})
 	newDescriptor.Generation = oldDescriptor.GetGeneration() + 1
 	if err := s.updateRangeDescriptor(ctx, shardID, oldDescriptor, newDescriptor); err != nil {

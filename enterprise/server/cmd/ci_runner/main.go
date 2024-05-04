@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"io/fs"
@@ -97,6 +98,11 @@ const (
 	repoUserEnvVarName         = "REPO_USER"
 	repoTokenEnvVarName        = "REPO_TOKEN"
 
+	// Only set if --install_kythe is true.
+	kytheDirEnvVarName = "KYTHE_DIR"
+	kytheDirName       = "kythe-v0.0.67"
+	kytheArchiveURL    = "https://storage.googleapis.com/buildbuddy-tools/archives/kythe-v0.0.67.tar.gz"
+
 	// Exit code placeholder used when a command doesn't return an exit code on its own.
 	noExitCode         = -1
 	failedExitCodeName = "Failed"
@@ -136,23 +142,26 @@ var (
 	rbeBackend         = flag.String("rbe_backend", "", "gRPC endpoint for BuildBuddy RBE.")
 	besResultsURL      = flag.String("bes_results_url", "", "URL prefix for BuildBuddy invocation URLs.")
 	remoteInstanceName = flag.String("remote_instance_name", "", "Remote instance name used to retrieve patches (for hosted bazel) or the remote instance name running the workflow action.")
-	triggerEvent       = flag.String("trigger_event", "", "Event type that triggered the action runner.")
-	pushedRepoURL      = flag.String("pushed_repo_url", "", "URL of the pushed repo.")
-	pushedBranch       = flag.String("pushed_branch", "", "Branch name of the commit to be checked out.")
-	prNumber           = flag.Int64("pull_request_number", 0, "PR number, if applicable (0 if not triggered by a PR).")
-	commitSHA          = flag.String("commit_sha", "", "Commit SHA to report statuses for.")
-	targetRepoURL      = flag.String("target_repo_url", "", "URL of the target repo.")
-	targetBranch       = flag.String("target_branch", "", "Branch to check action triggers against.")
 	workflowID         = flag.String("workflow_id", "", "ID of the workflow associated with this CI run.")
 	actionName         = flag.String("action_name", "", "If set, run the specified action and *only* that action, ignoring trigger conditions.")
+	serializedAction   = flag.String("serialized_action", "", "If set, run this b64+yaml encoded action, ignoring trigger conditions.")
 	invocationID       = flag.String("invocation_id", "", "If set, use the specified invocation ID for the workflow action. Ignored if action_name is not set.")
 	visibility         = flag.String("visibility", "", "If set, use the specified value for VISIBILITY build metadata for the workflow invocation.")
 	bazelSubCommand    = flag.String("bazel_sub_command", "", "If set, run the bazel command specified by these args and ignore all triggering and configured actions.")
-	patchURIs          = flag.Slice("patch_uri", []string{}, "URIs of patches to apply to the repo after checkout. Can be specified multiple times to apply multiple patches.")
 	recordRunMetadata  = flag.Bool("record_run_metadata", false, "Instead of running a target, extract metadata about it and report it in the build event stream.")
-	gitCleanExclude    = flag.Slice("git_clean_exclude", []string{}, "Directories to exclude from `git clean` while setting up the repo.")
-	gitFetchFilters    = flag.Slice("git_fetch_filters", []string{}, "Filters to apply to `git fetch` commands.")
-	gitFetchDepth      = flag.Int("git_fetch_depth", 0, "Depth to use for `git fetch` commands.")
+
+	// Flags to configure setting up git repo
+	triggerEvent    = flag.String("trigger_event", "", "Event type that triggered the action runner.")
+	pushedRepoURL   = flag.String("pushed_repo_url", "", "URL of the pushed repo. This is required.")
+	pushedBranch    = flag.String("pushed_branch", "", "Branch name of the commit to be checked out.")
+	commitSHA       = flag.String("commit_sha", "", "Commit SHA to report statuses for.")
+	targetRepoURL   = flag.String("target_repo_url", "", "If different from pushed_repo_url, indicates a fork (`pushed_repo_url`) is being merged into this repo.")
+	targetBranch    = flag.String("target_branch", "", "If different from pushed_branch, pushed_branch should be merged into this branch in the target repo.")
+	prNumber        = flag.Int64("pull_request_number", 0, "PR number, if applicable (0 if not triggered by a PR).")
+	patchURIs       = flag.Slice("patch_uri", []string{}, "URIs of patches to apply to the repo after checkout. Can be specified multiple times to apply multiple patches.")
+	gitCleanExclude = flag.Slice("git_clean_exclude", []string{}, "Directories to exclude from `git clean` while setting up the repo.")
+	gitFetchFilters = flag.Slice("git_fetch_filters", []string{}, "Filters to apply to `git fetch` commands.")
+	gitFetchDepth   = flag.Int("git_fetch_depth", 0, "Depth to use for `git fetch` commands.")
 
 	shutdownAndExit = flag.Bool("shutdown_and_exit", false, "If set, runs bazel shutdown with the configured bazel_command, and exits. No other commands are run.")
 
@@ -160,6 +169,7 @@ var (
 	bazelStartupFlags = flag.String("bazel_startup_flags", "", "Startup flags to pass to bazel. The value can include spaces and will be properly tokenized.")
 	extraBazelArgs    = flag.String("extra_bazel_args", "", "Extra flags to pass to the bazel command. The value can include spaces and will be properly tokenized.")
 	debug             = flag.Bool("debug", false, "Print additional debug information in the action logs.")
+	installKythe      = flag.Bool("install_kythe", false, "If true, install kythe in the workspace root and set the KYTHE_DIR env var to the installed location")
 
 	// Test-only flags
 	fallbackToCleanCheckout = flag.Bool("fallback_to_clean_checkout", true, "Fallback to cloning the repo from scratch if sync fails (for testing purposes only).")
@@ -239,6 +249,25 @@ func provisionArtifactsDir(ws *workspace, bazelCommandIndex int) error {
 		return err
 	}
 	if err := os.Setenv(artifactsDirEnvVarName, path); err != nil {
+		return err
+	}
+	return nil
+}
+
+func provisionKythe(ctx context.Context, ws *workspace) error {
+	kytheRootPath := filepath.Join(ws.rootDir, kytheDirName)
+	if _, err := os.Stat(kytheRootPath); err == nil {
+		return nil // dir already exists; we're done.
+	}
+	if err := os.MkdirAll(kytheRootPath, 0755); err != nil {
+		return err
+	}
+	cmd := fmt.Sprintf(`curl -sL "%s" | tar -xz -C %s --strip-components 1`, kytheArchiveURL, kytheRootPath)
+	args := []string{"-c", cmd}
+	if err := runCommand(ctx, "bash", args, nil /*=env*/, "" /*=dir*/, ws.log); err != nil {
+		return err
+	}
+	if err := os.Setenv(kytheDirEnvVarName, kytheRootPath); err != nil {
 		return err
 	}
 	return nil
@@ -551,6 +580,14 @@ func run() error {
 	ws.log = buildEventReporter
 	ws.hostname, ws.username = getHostAndUserName()
 
+	// Set BUILDBUDDY_CI_RUNNER_ABSPATH so that we can re-invoke ourselves
+	// as the git credential helper reliably, even after chdir.
+	absPath, err := filepath.Abs(os.Args[0])
+	if err != nil {
+		return status.WrapError(err, "compute CI runner binary abspath")
+	}
+	os.Setenv("BUILDBUDDY_CI_RUNNER_ABSPATH", absPath)
+
 	// Change the current working directory to respect WORKDIR_OVERRIDE, if set.
 	if wd := os.Getenv("WORKDIR_OVERRIDE"); wd != "" {
 		if err := os.MkdirAll(wd, 0755); err != nil {
@@ -566,14 +603,6 @@ func run() error {
 		return err
 	}
 	ws.rootDir = rootDir
-
-	// Set BUILDBUDDY_CI_RUNNER_ABSPATH so that we can re-invoke ourselves
-	// as the git credential helper reliably, even after chdir.
-	absPath, err := filepath.Abs(os.Args[0])
-	if err != nil {
-		return status.WrapError(err, "compute CI runner binary abspath")
-	}
-	os.Setenv("BUILDBUDDY_CI_RUNNER_ABSPATH", absPath)
 
 	// Bazel needs a HOME dir; ensure that one is set.
 	if err := ensureHomeDir(); err != nil {
@@ -922,6 +951,12 @@ func (ar *actionRunner) Run(ctx context.Context, ws *workspace) error {
 		}
 	}()
 
+	if *installKythe {
+		if err := provisionKythe(ctx, ws); err != nil {
+			return err
+		}
+	}
+
 	for i, bazelCmd := range action.BazelCommands {
 		cmdStartTime := time.Now()
 
@@ -1111,6 +1146,17 @@ func getActionNameForWorkflowConfiguredEvent() string {
 }
 
 func getActionToRun() (*config.Action, error) {
+	if *serializedAction != "" {
+		actionYaml, err := base64.StdEncoding.DecodeString(*serializedAction)
+		if err != nil {
+			return nil, err
+		}
+		a := &config.Action{}
+		if err := yaml.Unmarshal(actionYaml, a); err != nil {
+			return nil, err
+		}
+		return a, nil
+	}
 	if *bazelSubCommand != "" {
 		return &config.Action{
 			Name: "run",
@@ -1574,45 +1620,8 @@ func (ws *workspace) sync(ctx context.Context) error {
 		return status.InvalidArgumentError("expected at least one of `pushed_branch` or `target_branch` to be set")
 	}
 
-	// Fetch the pushed and target branches from their respective remotes.
-	// "base" here is referring to the repo on which the workflow is configured.
-	// "fork" is referring to the forked repo, if the runner was triggered by a
-	// PR from a fork (forkBranches will be empty otherwise).
-	baseRefs := []string{}
-	if *targetBranch != "" {
-		baseRefs = append(baseRefs, *targetBranch)
-	}
-	forkBranches := []string{}
-	// Add the pushed branch to the appropriate list corresponding to the remote
-	// to be fetched (base or fork).
-	if *pushedRepoURL != "" {
-		if isPushedBranchInFork := *pushedRepoURL != *targetRepoURL; isPushedBranchInFork {
-			forkBranches = append(forkBranches, *pushedBranch)
-		} else if *pushedBranch != *targetBranch {
-			baseRefs = append(baseRefs, *pushedBranch)
-		}
-	}
-	// TODO: Fetch from remotes in parallel
-	if err := ws.fetch(ctx, *targetRepoURL, baseRefs); err != nil {
-		return err
-	}
-	if err := ws.fetch(ctx, *pushedRepoURL, forkBranches); err != nil {
-		return err
-	}
-
-	checkoutRef := ""
-	checkoutLocalBranchName := ""
-	if *pushedRepoURL != "" {
-		checkoutRef = fmt.Sprintf("%s/%s", gitRemoteName(*pushedRepoURL), *pushedBranch)
-		checkoutLocalBranchName = *pushedBranch
-	} else {
-		checkoutRef = fmt.Sprintf("%s/%s", gitRemoteName(*targetRepoURL), *targetBranch)
-		checkoutLocalBranchName = *targetBranch
-	}
-
-	// If a commit is set, use it
-	if *commitSHA != "" {
-		checkoutRef = *commitSHA
+	if err := ws.fetchRefs(ctx); err != nil {
+		return status.WrapError(err, "fetch refs")
 	}
 
 	// Clean up in case a previous workflow made a mess.
@@ -1629,9 +1638,8 @@ func (ws *workspace) sync(ctx context.Context) error {
 		return err
 	}
 
-	// Create the local branch if it doesn't already exist, then update it to point to the checkout ref
-	if _, err := git(ctx, ws.log, "checkout", "--force", "-B", checkoutLocalBranchName, checkoutRef); err != nil {
-		return err
+	if err := ws.checkoutRef(ctx); err != nil {
+		return status.WrapError(err, "checkout ref")
 	}
 
 	// If commit sha is not set, pull the sha that is checked out so that it can be used in Github Status reporting
@@ -1651,7 +1659,7 @@ func (ws *workspace) sync(ctx context.Context) error {
 	// If enabled by the config, merge the target branch (if different from the
 	// pushed branch) so that the workflow can pick up any changes not yet
 	// incorporated into the pushed branch.
-	if merge && *pushedRepoURL != "" && (*pushedRepoURL != *targetRepoURL || *pushedBranch != *targetBranch) {
+	if merge && *targetRepoURL != "" && (*pushedRepoURL != *targetRepoURL || *pushedBranch != *targetBranch) {
 		targetRef := fmt.Sprintf("%s/%s", gitRemoteName(*targetRepoURL), *targetBranch)
 		if _, err := git(ctx, ws.log, "merge", "--no-edit", targetRef); err != nil && !isAlreadyUpToDate(err) {
 			errMsg := err.Output
@@ -1680,6 +1688,55 @@ func (ws *workspace) sync(ctx context.Context) error {
 		}
 	}
 
+	return nil
+}
+
+// fetchRefs fetches the pushed and target refs from their respective remotes
+func (ws *workspace) fetchRefs(ctx context.Context) error {
+	// "base" here is referring to the repo on which the workflow is configured.
+	baseRefs := make([]string, 0)
+	if *targetBranch != "" {
+		baseRefs = append(baseRefs, *targetBranch)
+	}
+	// "fork" is referring to the forked repo, if the runner was triggered by a
+	// PR from a fork (forkBranches will be empty otherwise).
+	forkBranches := make([]string, 0)
+
+	// Add the pushed branch to the appropriate list corresponding to the remote
+	// to be fetched (base or fork).
+	isPushedBranchInFork := *targetRepoURL != "" && *pushedRepoURL != *targetRepoURL
+	if isPushedBranchInFork {
+		forkBranches = append(forkBranches, *pushedBranch)
+	} else if *pushedBranch != *targetBranch {
+		baseRefs = append(baseRefs, *pushedBranch)
+	}
+
+	baseURL := *pushedRepoURL
+	if isPushedBranchInFork {
+		baseURL = *targetRepoURL
+	}
+	// TODO: Fetch from remotes in parallel
+	if err := ws.fetch(ctx, baseURL, baseRefs); err != nil {
+		return err
+	}
+	if err := ws.fetch(ctx, *pushedRepoURL, forkBranches); err != nil {
+		return err
+	}
+	return nil
+}
+
+// checkoutRef checks out a reference that the rest of the remote run should run off
+func (ws *workspace) checkoutRef(ctx context.Context) error {
+	checkoutLocalBranchName := *pushedBranch
+	checkoutRef := *commitSHA
+	if checkoutRef == "" {
+		checkoutRef = fmt.Sprintf("%s/%s", gitRemoteName(*pushedRepoURL), *pushedBranch)
+	}
+
+	// Create the local branch if it doesn't already exist, then update it to point to the checkout ref
+	if _, err := git(ctx, ws.log, "checkout", "--force", "-B", checkoutLocalBranchName, checkoutRef); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -1908,7 +1965,7 @@ func readConfig() (*config.BuildBuddyConfig, error) {
 }
 
 func gitRemoteName(repoURL string) string {
-	if repoURL == *targetRepoURL {
+	if repoURL == *targetRepoURL || *targetRepoURL == "" {
 		return defaultGitRemoteName
 	}
 	return forkGitRemoteName

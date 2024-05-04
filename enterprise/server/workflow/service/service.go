@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -50,6 +51,7 @@ import (
 	"golang.org/x/oauth2"
 	"google.golang.org/genproto/googleapis/longrunning"
 	"google.golang.org/protobuf/types/known/durationpb"
+	"gopkg.in/yaml.v2"
 
 	ctxpb "github.com/buildbuddy-io/buildbuddy/proto/context"
 	inspb "github.com/buildbuddy-io/buildbuddy/proto/invocation_status"
@@ -503,14 +505,6 @@ func (ws *workflowService) ExecuteWorkflow(ctx context.Context, req *wfpb.Execut
 		return nil, err
 	}
 
-	// TODO(Maggie): Delete after all usages are cleaned up
-	if req.GetClean() {
-		err = ws.useCleanWorkflow(ctx, wf)
-		if err != nil {
-			return nil, err
-		}
-	}
-
 	// TODO: Refactor to avoid using this WebhookData struct in the case of manual
 	// workflow execution, since there are no webhooks involved when executing a
 	// workflow manually.
@@ -609,13 +603,20 @@ func (ws *workflowService) getActions(ctx context.Context, wf *tables.Workflow, 
 		return nil, err
 	}
 
+	addKythe, err := ws.enableExtraKytheIndexingAction(ctx)
+	if err != nil {
+		return nil, err
+	}
+
 	var actions []*config.Action
 	for _, a := range cfg.Actions {
 		if len(actionFilter) == 0 || config.MatchesAnyActionName(a, actionFilter) {
 			actions = append(actions, a)
 		}
 	}
-
+	if addKythe {
+		actions = append(actions, config.KytheIndexingAction(wd.TargetRepoDefaultBranch))
+	}
 	if len(actions) == 0 {
 		if len(actionFilter) == 0 {
 			return nil, status.NotFoundError("no workflow actions found")
@@ -690,53 +691,16 @@ func (ws *workflowService) InvalidateAllSnapshotsForRepo(ctx context.Context, re
 	return err
 }
 
-// TODO(Maggie): Delete useCleanWorkflow and checkCleanWorkflowPermissions after
-// all references to ExecuteWorkflowRequest.clean have been cleaned up
-func (ws *workflowService) checkCleanWorkflowPermissions(ctx context.Context, wf *tables.Workflow) error {
+func (ws *workflowService) enableExtraKytheIndexingAction(ctx context.Context) (bool, error) {
 	u, err := ws.env.GetAuthenticator().AuthenticatedUser(ctx)
 	if err != nil {
-		return err
+		return false, err
 	}
 	g, err := ws.env.GetUserDB().GetGroupByID(ctx, u.GetGroupID())
 	if err != nil {
-		return err
+		return false, err
 	}
-	if !g.RestrictCleanWorkflowRunsToAdmins {
-		return nil
-	}
-	return authutil.AuthorizeOrgAdmin(u, wf.GroupID)
-}
-
-// To run workflow in a clean container, update the instance name suffix
-func (ws *workflowService) useCleanWorkflow(ctx context.Context, wf *tables.Workflow) error {
-	if err := ws.checkCleanWorkflowPermissions(ctx, wf); err != nil {
-		return err
-	}
-
-	suffix, err := random.RandomString(10)
-	if err != nil {
-		return err
-	}
-	wf.InstanceNameSuffix = suffix
-
-	if isRepositoryWorkflowID(wf.WorkflowID) {
-		log.CtxInfof(ctx, "Workflow clean run requested for repo %q (group %s)", wf.RepoURL, wf.GroupID)
-		err = ws.env.GetDBHandle().NewQuery(ctx, "workflow_service_update_repo_instance_name").Raw(`
-				UPDATE GitRepositories
-				SET instance_name_suffix = ?
-				WHERE group_id = ? AND repo_url = ?`,
-			suffix, wf.GroupID, wf.RepoURL,
-		).Exec().Error
-	} else {
-		log.CtxInfof(ctx, "Workflow clean run requested for workflow %q (group %s)", wf.WorkflowID, wf.GroupID)
-		err = ws.env.GetDBHandle().NewQuery(ctx, "workflow_service_update_workflow_instance_name").Raw(`
-				UPDATE Workflows
-				SET instance_name_suffix = ?
-				WHERE workflow_id = ?`,
-			wf.InstanceNameSuffix, wf.WorkflowID,
-		).Exec().Error
-	}
-	return err
+	return g.CodeSearchEnabled, nil
 }
 
 func (ws *workflowService) getRepositoryWorkflow(ctx context.Context, groupID string, repoURL *gitutil.RepoURL) (*repositoryWorkflow, error) {
@@ -1196,6 +1160,20 @@ func (ws *workflowService) createActionForWorkflow(ctx context.Context, wf *tabl
 		"--bazel_command=" + ws.ciRunnerBazelCommand(),
 		"--debug=" + fmt.Sprintf("%v", ws.ciRunnerDebugMode()),
 	}
+
+	// HACK: Kythe requires some special args, so if the name of this action
+	// indicates it's a Kythe action, add those args.
+	if workflowAction.Name == config.KytheActionName {
+		yamlBytes, err := yaml.Marshal(workflowAction)
+		if err != nil {
+			return nil, err
+		}
+		serializedAction := base64.StdEncoding.EncodeToString(yamlBytes)
+		args = append(args, "--bazel_startup_flags=--bazelrc=$KYTHE_DIR/extractors.bazelrc")
+		args = append(args, "--serialized_action="+serializedAction)
+		args = append(args, "--install_kythe=true")
+	}
+
 	for _, filter := range workflowAction.GetGitFetchFilters() {
 		args = append(args, "--git_fetch_filters="+filter)
 	}
