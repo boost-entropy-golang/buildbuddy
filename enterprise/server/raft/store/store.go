@@ -333,17 +333,17 @@ func (s *Store) Statusz(ctx context.Context) string {
 		return true
 	})
 	sort.Slice(replicas, func(i, j int) bool {
-		return replicas[i].ShardID < replicas[j].ShardID
+		return replicas[i].ShardID() < replicas[j].ShardID()
 	})
 	for _, r := range replicas {
-		replicaName := fmt.Sprintf("  Shard: %5d   Replica: %5d", r.ShardID, r.ReplicaID)
+		replicaName := fmt.Sprintf("  Shard: %5d   Replica: %5d", r.ShardID(), r.ReplicaID())
 		ru, err := r.Usage()
 		if err != nil {
 			buf += fmt.Sprintf("%s error: %s\n", replicaName, err)
 			continue
 		}
 		isLeader := 0
-		if rd := s.lookupRange(r.ShardID); rd != nil {
+		if rd := s.lookupRange(r.ShardID()); rd != nil {
 			if s.leaseKeeper.HaveLease(rd.GetRangeId()) {
 				isLeader = 1
 			}
@@ -443,6 +443,10 @@ func (s *Store) Stop(ctx context.Context) error {
 	}
 	s.updateTagsWorker.Stop()
 
+	s.log.Info("Store: waitgroups finished")
+	s.nodeHost.Close()
+	s.log.Info("Store: nodeHost closed")
+
 	if err := s.db.Flush(); err != nil {
 		return err
 	}
@@ -450,10 +454,7 @@ func (s *Store) Stop(ctx context.Context) error {
 
 	// Wait for all active requests to be finished.
 	s.leaser.Close()
-
-	s.log.Info("Store: waitgroups finished")
-	s.nodeHost.Close()
-
+	log.Info("Store: leaser closed")
 	return grpc_server.GRPCShutdown(ctx, s.grpcServer)
 }
 
@@ -646,7 +647,7 @@ func (s *Store) validatedRange(header *rfpb.Header) (*replica.Replica, *rfpb.Ran
 
 func (s *Store) HaveLease(rangeID uint64) bool {
 	if r, err := s.GetReplica(rangeID); err == nil {
-		return s.leaseKeeper.HaveLease(r.ShardID)
+		return s.leaseKeeper.HaveLease(r.ShardID())
 	}
 	s.log.Warningf("HaveLease check for unheld range: %d", rangeID)
 	return false
@@ -853,7 +854,7 @@ func (s *Store) SyncPropose(ctx context.Context, req *rfpb.SyncProposeRequest) (
 		if err != nil {
 			return nil, err
 		}
-		shardID = r.ShardID
+		shardID = r.ShardID()
 	}
 
 	batchResponse, err := client.SyncProposeLocal(ctx, s.nodeHost, shardID, req.GetBatch())
@@ -1464,21 +1465,21 @@ func (s *Store) AddReplica(ctx context.Context, req *rfpb.AddReplicaRequest) (*r
 	// Reserve a new node ID for the node about to be added.
 	replicaIDs, err := s.reserveReplicaIDs(ctx, 1)
 	if err != nil {
-		return nil, err
+		return nil, status.InternalErrorf("AddReplica failed to reserveReplicaIDs: %s", err)
 	}
 	newReplicaID := replicaIDs[0]
 
 	// Get the config change index for this cluster.
 	configChangeID, err := s.getConfigChangeID(ctx, shardID)
 	if err != nil {
-		return nil, err
+		return nil, status.InternalErrorf("AddReplica failed to get config change ID: %s", err)
 	}
 	lastAppliedIndex, err := s.getLastAppliedIndex(&rfpb.Header{
 		RangeId:    rd.GetRangeId(),
 		Generation: rd.GetGeneration(),
 	})
 	if err != nil {
-		return nil, err
+		return nil, status.InternalErrorf("AddReplica failed to get last applied index: %s", err)
 	}
 
 	// Gossip the address of the node that is about to be added.
@@ -1490,13 +1491,13 @@ func (s *Store) AddReplica(ctx context.Context, req *rfpb.AddReplicaRequest) (*r
 		return s.nodeHost.SyncRequestAddReplica(ctx, shardID, newReplicaID, node.GetNhid(), configChangeID)
 	})
 	if err != nil {
-		return nil, err
+		return nil, status.InternalErrorf("AddReplica failed to call nodeHost.SyncRequestAddReplica: %s", err)
 	}
 
 	// Start the cluster on the newly added node.
 	c, err := s.apiClient.Get(ctx, node.GetGrpcAddress())
 	if err != nil {
-		return nil, err
+		return nil, status.InternalErrorf("AddReplica failed to get the client for the node: %s", err)
 	}
 	_, err = c.StartShard(ctx, &rfpb.StartShardRequest{
 		ShardId:          shardID,
@@ -1505,14 +1506,14 @@ func (s *Store) AddReplica(ctx context.Context, req *rfpb.AddReplicaRequest) (*r
 		LastAppliedIndex: lastAppliedIndex,
 	})
 	if err != nil {
-		return nil, err
+		return nil, status.InternalErrorf("AddReplica failed to start shard: %s", err)
 	}
 
 	// Finally, update the range descriptor information to reflect the
 	// membership of this new node in the range.
 	rd, err = s.addReplicaToRangeDescriptor(ctx, shardID, newReplicaID, node.GetNhid(), rd)
 	if err != nil {
-		return nil, err
+		return nil, status.InternalErrorf("AddReplica failed to add replica to range descriptor: %s", err)
 	}
 	metrics.RaftMoves.With(prometheus.Labels{
 		metrics.RaftNodeHostIDLabel: s.nodeHost.ID(),
@@ -1754,12 +1755,24 @@ func (s *Store) updateRangeDescriptor(ctx context.Context, shardID uint64, old, 
 		},
 		ExpectedValue: oldBuf,
 	}
+
 	metaRangeBatch := rbuilder.NewBatchBuilder()
 	metaRangeBatch.Add(metaRangeCasReq)
 
 	mrd := s.sender.GetMetaRangeDescriptor()
-	txn := rbuilder.NewTxn().AddStatement(new.GetReplicas()[0], localBatch)
-	txn = txn.AddStatement(mrd.GetReplicas()[0], metaRangeBatch)
+	newReplica := new.GetReplicas()[0]
+	metaReplica := mrd.GetReplicas()[0]
+
+	txn := rbuilder.NewTxn()
+	if newReplica.GetShardId() == metaReplica.GetShardId() {
+		localBatch.Add(metaRangeCasReq)
+		txn.AddStatement(newReplica, localBatch)
+	} else {
+		metaRangeBatch := rbuilder.NewBatchBuilder()
+		metaRangeBatch.Add(metaRangeCasReq)
+		txn.AddStatement(newReplica, localBatch)
+		txn = txn.AddStatement(metaReplica, metaRangeBatch)
+	}
 	return s.txnCoordinator.RunTxn(ctx, txn)
 }
 
