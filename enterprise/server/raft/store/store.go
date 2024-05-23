@@ -110,6 +110,8 @@ type Store struct {
 	txnCoordinator   *txn.Coordinator
 
 	driverQueue *driver.Queue
+
+	clock clockwork.Clock
 }
 
 // registryHolder implements NodeRegistryFactory. When nodeHost is created, it
@@ -157,10 +159,10 @@ func New(env environment.Env, rootDir, raftAddress, grpcAddr string, partitions 
 	}
 	leaser := pebble.NewDBLeaser(db)
 
-	return NewWithArgs(env, rootDir, nodeHost, gossipManager, sender, registry, raftListener, apiClient, grpcAddr, partitions, db, leaser)
+	return NewWithArgs(env, rootDir, nodeHost, gossipManager, sender, registry, raftListener, apiClient, grpcAddr, partitions, db, leaser, clockwork.NewRealClock())
 }
 
-func NewWithArgs(env environment.Env, rootDir string, nodeHost *dragonboat.NodeHost, gossipManager interfaces.GossipService, sender *sender.Sender, registry registry.NodeRegistry, listener *listener.RaftListener, apiClient *client.APIClient, grpcAddress string, partitions []disk.Partition, db pebble.IPebbleDB, leaser pebble.Leaser) (*Store, error) {
+func NewWithArgs(env environment.Env, rootDir string, nodeHost *dragonboat.NodeHost, gossipManager interfaces.GossipService, sender *sender.Sender, registry registry.NodeRegistry, listener *listener.RaftListener, apiClient *client.APIClient, grpcAddress string, partitions []disk.Partition, db pebble.IPebbleDB, leaser pebble.Leaser, clock clockwork.Clock) (*Store, error) {
 	nodeLiveness := nodeliveness.New(nodeHost.ID(), sender)
 
 	nhLog := log.NamedSubLogger(nodeHost.ID())
@@ -195,6 +197,7 @@ func NewWithArgs(env environment.Env, rootDir string, nodeHost *dragonboat.NodeH
 
 		db:     db,
 		leaser: leaser,
+		clock:  clock,
 	}
 
 	updateTagsWorker := &updateTagsWorker{
@@ -428,6 +431,10 @@ func (s *Store) Start() error {
 		return nil
 	})
 	eg.Go(func() error {
+		s.updateStoreUsageTag(gctx)
+		return nil
+	})
+	eg.Go(func() error {
 		s.processSplitRequests(gctx)
 		return nil
 	})
@@ -441,7 +448,7 @@ func (s *Store) Start() error {
 	})
 	eg.Go(func() error {
 		if s.driverQueue != nil {
-			s.driverQueue.Start()
+			s.driverQueue.Start(gctx)
 		}
 		return nil
 	})
@@ -460,9 +467,6 @@ func (s *Store) Stop(ctx context.Context) error {
 		s.egCancel()
 		s.leaseKeeper.Stop()
 		s.liveness.Release()
-		if s.driverQueue != nil {
-			s.driverQueue.Stop()
-		}
 		s.eg.Wait()
 	}
 	s.updateTagsWorker.Stop()
@@ -818,7 +822,7 @@ func (s *Store) getLeasedReplicas() []*replica.Replica {
 	}
 	s.rangeMu.RUnlock()
 
-	res := make([]*replica.Replica, 0, len(s.openRanges))
+	res := make([]*replica.Replica, 0, len(openRanges))
 	for _, rd := range openRanges {
 		header := &rfpb.Header{
 			RangeId:    rd.GetRangeId(),
@@ -970,13 +974,13 @@ func (s *Store) acquireNodeLiveness(ctx context.Context) {
 		s.log.Infof("Acquired node liveness in %s", time.Since(start))
 	}()
 
-	ticker := time.NewTicker(100 * time.Millisecond)
+	ticker := s.clock.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
+		case <-ticker.Chan():
 			s.metaRangeMu.Lock()
 			haveMetaRange := len(s.metaRangeData) > 0
 			s.metaRangeMu.Unlock()
@@ -1058,7 +1062,7 @@ func (s *Store) isZombieNode(ctx context.Context, shardInfo dragonboat.ShardInfo
 	// cluster.
 	updatedRD, err := s.Sender().LookupRangeDescriptor(ctx, rd.GetStart(), true /*skip Cache */)
 	if err != nil {
-		log.Errorf("failed to look up range descriptor: %s", err)
+		s.log.Errorf("failed to look up range descriptor: %s", err)
 		return false
 	}
 	if updatedRD.GetGeneration() >= rd.GetGeneration() {
@@ -1076,7 +1080,7 @@ func (s *Store) cleanupZombieNodes(ctx context.Context) {
 	if *zombieNodeScanInterval == 0 {
 		return
 	}
-	timer := time.NewTicker(*zombieNodeScanInterval)
+	timer := s.clock.NewTicker(*zombieNodeScanInterval)
 	defer timer.Stop()
 
 	nInfo := s.nodeHost.GetNodeHostInfo(dragonboat.NodeHostInfoOption{SkipLogInfo: true})
@@ -1086,7 +1090,7 @@ func (s *Store) cleanupZombieNodes(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
-		case <-timer.C:
+		case <-timer.Chan():
 			if idx == len(nInfo.ShardInfoList) {
 				idx = 0
 				nInfo = s.nodeHost.GetNodeHostInfo(dragonboat.NodeHostInfoOption{SkipLogInfo: true})
@@ -1141,6 +1145,27 @@ func (s *Store) checkIfReplicasNeedSplitting(ctx context.Context) {
 				default:
 					s.log.Debugf("Split queue full. Dropping message.")
 				}
+			default:
+				break
+			}
+		}
+	}
+}
+
+func (s *Store) updateStoreUsageTag(ctx context.Context) {
+	eventsCh := s.AddEventListener()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case e := <-eventsCh:
+			switch e.EventType() {
+			case events.EventRangeUsageUpdated:
+				rangeUsageEvent := e.(events.RangeUsageEvent)
+				if !s.leaseKeeper.HaveLease(rangeUsageEvent.RangeDescriptor.GetRangeId()) {
+					continue
+				}
+				s.updateTagsWorker.Enqueue()
 			default:
 				break
 			}
@@ -1892,14 +1917,13 @@ func (store *Store) scan(ctx context.Context) {
 	if store.driverQueue == nil {
 		return
 	}
-	scanDelay := time.NewTicker(*replicaScanInterval)
+	scanDelay := store.clock.NewTicker(*replicaScanInterval)
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-scanDelay.C:
+		case <-scanDelay.Chan():
 		}
-		log.Debug("scan started")
 		replicas := store.getLeasedReplicas()
 		for _, repl := range replicas {
 			store.driverQueue.MaybeAdd(repl)

@@ -59,6 +59,7 @@ go_test(
     name = "store_test",
     srcs = ["store_test.go"],
     shard_count = 8,
+    tags = ["block-network"],
     deps = [
         ":store",
         "//enterprise/server/raft/bringup",
@@ -84,6 +85,8 @@ go_test(
         "//server/util/log",
         "//server/util/proto",
         "//server/util/status",
+        "//server/util/testing/flags",
+        "@com_github_jonboulle_clockwork//:clockwork",
         "@com_github_lni_dragonboat_v4//:dragonboat",
         "@com_github_lni_dragonboat_v4//config",
         "@com_github_lni_dragonboat_v4//raftio",
