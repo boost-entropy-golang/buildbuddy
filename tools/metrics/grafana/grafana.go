@@ -26,7 +26,6 @@ import (
 
 var (
 	kube = flag.Bool("kube", false, "Use kubectl port-forward to point Grafana at real data.")
-	vm   = flag.Bool("vm", false, "Use VictoriaMetrics instead of Prometheus")
 
 	// Note: these flags only take effect when setting -kube=true:
 	namespace  = flag.String("namespace", "monitor-dev", "k8s namespace")
@@ -36,7 +35,6 @@ var (
 const (
 	dockerComposeDir = "tools/metrics"
 	dashboardsDir    = "tools/metrics/grafana/dashboards"
-	vmDashboardsDir  = "bazel-bin/tools/metrics/grafana/dashboards-vm"
 	normalizeScript  = "tools/metrics/process_dashboard.py"
 	dashboardsBzl    = "tools/metrics/grafana/dashboards.bzl"
 
@@ -69,13 +67,8 @@ func run() error {
 		args := []string{"--file", "docker-compose.grafana.yml"}
 		if !*kube {
 			args = append(args, "--file", "docker-compose.redis-exporter.yml")
-			if *vm {
-				os.Setenv("DASHBOARDS_DIR", filepath.Join(workspaceRoot, vmDashboardsDir))
-				args = append(args, "--file", "docker-compose.victoria-metrics.yml")
-			} else {
-				os.Setenv("DASHBOARDS_DIR", filepath.Join(workspaceRoot, dashboardsDir))
-				args = append(args, "--file", "docker-compose.prometheus.yml")
-			}
+			os.Setenv("DASHBOARDS_DIR", filepath.Join(workspaceRoot, dashboardsDir))
+			args = append(args, "--file", "docker-compose.victoria-metrics.yml")
 		}
 		args = append(args, "up")
 		// Note: CommandContext kills with SIGKILL - we don't want that since it
@@ -188,13 +181,7 @@ func exportNormalizedDashboard(md DashboardMetadata) (fileName string, _ error) 
 	if err != nil {
 		return "", err
 	}
-	// If the dashboard already has a uid then preserve it to avoid breaking
-	// go links.
-	uid, err := existingDashboardUID(outPath)
-	if err != nil {
-		return "", err
-	}
-	processedJSON, err := processDashboard(dashboardJSON, fileName, uid)
+	processedJSON, err := processDashboard(dashboardJSON, fileName)
 	if err != nil {
 		return "", err
 	}
@@ -204,23 +191,8 @@ func exportNormalizedDashboard(md DashboardMetadata) (fileName string, _ error) 
 	return fileName, nil
 }
 
-func existingDashboardUID(path string) (string, error) {
-	b, err := os.ReadFile(path)
-	if err != nil && !os.IsNotExist(err) {
-		return "", err
-	}
-	var d Dashboard
-	if err := json.Unmarshal(b, &d); err != nil {
-		return "", err
-	}
-	if uid, ok := d["uid"]; ok {
-		return uid.(string), nil
-	}
-	return "", nil
-}
-
-func processDashboard(dashboardJSON []byte, fileName, uid string) ([]byte, error) {
-	cmd := exec.Command(normalizeScript, "--name", fileName, "--uid", uid, "--data_source_uid=prom")
+func processDashboard(dashboardJSON []byte, fileName string) ([]byte, error) {
+	cmd := exec.Command(normalizeScript, "--name", fileName)
 	cmd.Stdin = bytes.NewReader(dashboardJSON)
 	var buf bytes.Buffer
 	cmd.Stdout = &buf
