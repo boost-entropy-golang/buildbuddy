@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"errors"
+	"flag"
 	"fmt"
 	"sync"
 	"time"
@@ -15,6 +16,8 @@ import (
 	"github.com/buildbuddy-io/buildbuddy/server/util/log"
 	"github.com/buildbuddy-io/buildbuddy/server/util/proto"
 	"github.com/buildbuddy-io/buildbuddy/server/util/status"
+	"github.com/buildbuddy-io/buildbuddy/server/util/uuid"
+	"github.com/jonboulle/clockwork"
 	"github.com/lni/dragonboat/v4"
 	"github.com/lni/dragonboat/v4/client"
 
@@ -23,6 +26,10 @@ import (
 	dbsm "github.com/lni/dragonboat/v4/statemachine"
 	statuspb "google.golang.org/genproto/googleapis/rpc/status"
 	gstatus "google.golang.org/grpc/status"
+)
+
+var (
+	sessionLifetime = flag.Duration("cache.raft.client_session_lifetime", 1*time.Hour, "The duration of a client session before it's reset")
 )
 
 // A default timeout that can be applied to raft requests that do not have one
@@ -157,8 +164,64 @@ func RunNodehostFn(ctx context.Context, nhf func(ctx context.Context) error) err
 	}
 }
 
-func SyncProposeLocal(ctx context.Context, nodehost NodeHost, shardID uint64, batch *rfpb.BatchCmdRequest) (*rfpb.BatchCmdResponse, error) {
+type Session struct {
+	id        string
+	index     uint64
+	createdAt time.Time
+
+	clock     clockwork.Clock
+	refreshAt time.Time
+	mu        sync.Mutex
+}
+
+func (s *Session) ToProto() *rfpb.Session {
+	return &rfpb.Session{
+		Id:            []byte(s.id),
+		Index:         s.index,
+		CreatedAtUsec: s.createdAt.UnixMicro(),
+	}
+}
+
+func NewSession() *Session {
+	return NewSessionWithClock(clockwork.NewRealClock())
+}
+
+func NewSessionWithClock(clock clockwork.Clock) *Session {
+	now := clock.Now()
+	return &Session{
+		id:        uuid.New(),
+		index:     0,
+		clock:     clock,
+		createdAt: now,
+		refreshAt: now.Add(*sessionLifetime),
+	}
+
+}
+
+// maybeRefresh resets the id and index when the session expired.
+func (s *Session) maybeRefresh() {
+	now := s.clock.Now()
+	if s.refreshAt.Before(now) {
+		return
+	}
+
+	s.id = uuid.New()
+	s.index = 0
+	s.refreshAt = now.Add(*sessionLifetime)
+}
+
+func (s *Session) SyncProposeLocal(ctx context.Context, nodehost NodeHost, shardID uint64, batch *rfpb.BatchCmdRequest) (*rfpb.BatchCmdResponse, error) {
+	// At most one SyncProposeLocal can be run per session.
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Refreshes the session if necessary
+	s.maybeRefresh()
+
 	sesh := nodehost.GetNoOPSession(shardID)
+
+	s.index++
+	batch.Session = s.ToProto()
 	buf, err := proto.Marshal(batch)
 	if err != nil {
 		return nil, err

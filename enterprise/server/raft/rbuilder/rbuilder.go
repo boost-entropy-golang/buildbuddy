@@ -91,6 +91,10 @@ func (bb *BatchBuilder) Add(m proto.Message) *BatchBuilder {
 		req.Value = &rfpb.RequestUnion_UpdateAtime{
 			UpdateAtime: value,
 		}
+	case *rfpb.DeleteSessionsRequest:
+		req.Value = &rfpb.RequestUnion_DeleteSessions{
+			DeleteSessions: value,
+		}
 	default:
 		bb.setErr(status.FailedPreconditionErrorf("BatchBuilder.Add handling for %+v not implemented.", m))
 		return bb
@@ -121,6 +125,11 @@ func (bb *BatchBuilder) SetFinalizeOperation(op rfpb.FinalizeOperation) *BatchBu
 
 func (bb *BatchBuilder) SetHeader(h *rfpb.Header) *BatchBuilder {
 	bb.cmd.Header = h
+	return bb
+}
+
+func (bb *BatchBuilder) SetSession(session *rfpb.Session) *BatchBuilder {
+	bb.cmd.Session = session
 	return bb
 }
 
@@ -311,6 +320,14 @@ func (br *BatchResponse) UpdateAtimeResponse(n int) (*rfpb.UpdateAtimeResponse, 
 	}
 	u := br.cmd.GetUnion()[n]
 	return u.GetUpdateAtime(), br.unionError(u)
+}
+func (br *BatchResponse) DeleteSessionsResponse(n int) (*rfpb.DeleteSessionsResponse, error) {
+	br.checkIndex(n)
+	if br.err != nil {
+		return nil, br.err
+	}
+	u := br.cmd.GetUnion()[n]
+	return u.GetDeleteSessions(), br.unionError(u)
 }
 
 type txnStatement struct {
