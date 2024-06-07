@@ -3,6 +3,7 @@ package store_test
 import (
 	"bytes"
 	"context"
+	"slices"
 	"testing"
 	"time"
 
@@ -81,11 +82,11 @@ func TestAddGetRemoveRange(t *testing.T) {
 
 func TestCleanupZombieShards(t *testing.T) {
 	clock := clockwork.NewFakeClock()
-	sf := testutil.NewStoreFactory(t)
-	s1 := sf.NewStoreWithClock(t, clock)
+	sf := testutil.NewStoreFactoryWithClock(t, clock)
+	s1 := sf.NewStore(t)
 	ctx := context.Background()
 
-	testutil.StartShard(t, ctx, s1)
+	sf.StartShard(t, ctx, s1)
 
 	stores := []*testutil.TestingStore{s1}
 	waitForRangeLease(t, stores, 2)
@@ -117,13 +118,13 @@ func TestCleanupZombieShards(t *testing.T) {
 func TestCleanupZombieReplicas(t *testing.T) {
 	clock := clockwork.NewFakeClock()
 
-	sf := testutil.NewStoreFactory(t)
-	s1 := sf.NewStoreWithClock(t, clock)
-	s2 := sf.NewStoreWithClock(t, clock)
+	sf := testutil.NewStoreFactoryWithClock(t, clock)
+	s1 := sf.NewStore(t)
+	s2 := sf.NewStore(t)
 	ctx := context.Background()
 
 	stores := []*testutil.TestingStore{s1, s2}
-	testutil.StartShard(t, ctx, stores...)
+	sf.StartShard(t, ctx, stores...)
 
 	waitForRangeLease(t, stores, 2)
 
@@ -200,7 +201,7 @@ func TestAutomaticSplitting(t *testing.T) {
 	ctx := context.Background()
 
 	stores := []*testutil.TestingStore{s1}
-	testutil.StartShard(t, ctx, stores...)
+	sf.StartShard(t, ctx, stores...)
 
 	waitForRangeLease(t, stores, 2)
 	writeNRecords(ctx, t, s1, 15) // each write is 1000 bytes
@@ -214,7 +215,7 @@ func TestAddNodeToCluster(t *testing.T) {
 	s2 := sf.NewStore(t)
 	ctx := context.Background()
 
-	testutil.StartShard(t, ctx, s1)
+	sf.StartShard(t, ctx, s1)
 
 	stores := []*testutil.TestingStore{s1, s2}
 	s := getStoreWithRangeLease(t, stores, 2)
@@ -264,7 +265,7 @@ func TestRemoveNodeFromCluster(t *testing.T) {
 	ctx := context.Background()
 
 	stores := []*testutil.TestingStore{s1, s2}
-	testutil.StartShard(t, ctx, stores...)
+	sf.StartShard(t, ctx, stores...)
 
 	s := getStoreWithRangeLease(t, stores, 2)
 
@@ -377,7 +378,7 @@ func TestSplitMetaRange(t *testing.T) {
 	s1 := sf.NewStore(t)
 	ctx := context.Background()
 
-	testutil.StartShard(t, ctx, s1)
+	sf.StartShard(t, ctx, s1)
 
 	rd := s1.GetRange(1)
 
@@ -431,7 +432,7 @@ func TestSplitNonMetaRange(t *testing.T) {
 	ctx := context.Background()
 
 	stores := []*testutil.TestingStore{s1, s2, s3}
-	testutil.StartShard(t, ctx, stores...)
+	sf.StartShard(t, ctx, stores...)
 
 	s := getStoreWithRangeLease(t, stores, 2)
 	rd := s.GetRange(2)
@@ -501,7 +502,7 @@ func TestListReplicas(t *testing.T) {
 	ctx := context.Background()
 
 	stores := []*testutil.TestingStore{s1, s2, s3}
-	testutil.StartShard(t, ctx, stores...)
+	sf.StartShard(t, ctx, stores...)
 	waitForRangeLease(t, stores, 2)
 
 	list, err := s1.ListReplicas(ctx, &rfpb.ListReplicasRequest{})
@@ -516,7 +517,7 @@ func TestPostFactoSplit(t *testing.T) {
 	ctx := context.Background()
 
 	stores := []*testutil.TestingStore{s1, s2}
-	testutil.StartShard(t, ctx, s1)
+	sf.StartShard(t, ctx, s1)
 
 	s := getStoreWithRangeLease(t, stores, 2)
 	rd := s.GetRange(2)
@@ -605,7 +606,7 @@ func TestManySplits(t *testing.T) {
 	ctx := context.Background()
 	stores := []*testutil.TestingStore{s1}
 
-	testutil.StartShard(t, ctx, stores...)
+	sf.StartShard(t, ctx, stores...)
 	s := getStoreWithRangeLease(t, stores, 2)
 
 	var written []*rfpb.FileRecord
@@ -653,6 +654,93 @@ func TestManySplits(t *testing.T) {
 	}
 }
 
+func readSessionIDs(t *testing.T, ctx context.Context, shardID uint64, store *testutil.TestingStore) []string {
+	rd := store.GetRange(shardID)
+	start, end := keys.Range(constants.LocalSessionPrefix)
+	req, err := rbuilder.NewBatchBuilder().Add(&rfpb.ScanRequest{
+		Start:    start,
+		End:      end,
+		ScanType: rfpb.ScanRequest_SEEKGE_SCAN_TYPE,
+	}).SetHeader(&rfpb.Header{
+		RangeId:         rd.GetRangeId(),
+		Generation:      rd.GetGeneration(),
+		ConsistencyMode: rfpb.Header_STALE,
+	}).ToProto()
+	require.NoError(t, err)
+
+	rsp, err := client.SyncReadLocal(ctx, store.NodeHost(), shardID, req)
+	require.NoError(t, err)
+	readBatch := rbuilder.NewBatchResponseFromProto(rsp)
+	scanRsp, err := readBatch.ScanResponse(0)
+	require.NoError(t, err)
+	sessionIDs := make([]string, 0, len(scanRsp.GetKvs()))
+	for _, kv := range scanRsp.GetKvs() {
+		session := &rfpb.Session{}
+		err := proto.Unmarshal(kv.GetValue(), session)
+		require.NoError(t, err)
+		sessionIDs = append(sessionIDs, string(session.GetId()))
+	}
+	return sessionIDs
+}
+
+func TestCleanupExpiredSessions(t *testing.T) {
+	flags.Set(t, "cache.raft.client_session_ttl", 5*time.Hour)
+	clock := clockwork.NewFakeClock()
+	log.Infof("now=%s", clock.Now())
+
+	sf := testutil.NewStoreFactoryWithClock(t, clock)
+	s1 := sf.NewStore(t)
+	s2 := sf.NewStore(t)
+	ctx := context.Background()
+
+	stores := []*testutil.TestingStore{s1, s2}
+	sf.StartShard(t, ctx, stores...)
+
+	// write some records
+	writeNRecords(ctx, t, s1, 10)
+
+	sessionIDsShard1S1 := readSessionIDs(t, ctx, 1, s1)
+	sessionIDsShard1S2 := readSessionIDs(t, ctx, 1, s2)
+	require.Greater(t, len(sessionIDsShard1S1), 0)
+	require.ElementsMatch(t, sessionIDsShard1S1, sessionIDsShard1S2)
+	sessionIDsShard2S1 := readSessionIDs(t, ctx, 2, s1)
+	sessionIDsShard2S2 := readSessionIDs(t, ctx, 2, s1)
+	require.Greater(t, len(sessionIDsShard2S1), 0)
+	require.ElementsMatch(t, sessionIDsShard2S1, sessionIDsShard2S2)
+
+	// Returns true if l1 contains at least one element from l2.
+	containsAny := func(l1 []string, l2 []string) bool {
+		for _, s := range l2 {
+			if slices.Contains(l1, s) {
+				return true
+			}
+		}
+		return false
+	}
+
+	clock.Advance(5*time.Hour + 10*time.Minute)
+	for {
+		sessionIDsShard1S1After := readSessionIDs(t, ctx, 1, s1)
+		if !containsAny(sessionIDsShard1S1After, sessionIDsShard1S1) {
+			break
+		}
+		sessionIDsShard1S2After := readSessionIDs(t, ctx, 1, s2)
+		if !containsAny(sessionIDsShard1S2After, sessionIDsShard1S2) {
+			break
+		}
+		sessionIDsShard2S1After := readSessionIDs(t, ctx, 2, s1)
+		if !containsAny(sessionIDsShard2S1After, sessionIDsShard2S1) {
+			break
+		}
+		sessionIDsShard2S2After := readSessionIDs(t, ctx, 2, s2)
+		if !containsAny(sessionIDsShard2S2After, sessionIDsShard2S2) {
+			break
+		}
+		clock.Advance(65 * time.Second)
+	}
+
+}
+
 func TestSplitAcrossClusters(t *testing.T) {
 	flags.Set(t, "cache.raft.max_range_size_bytes", 0) // disable auto splitting
 	sf := testutil.NewStoreFactory(t)
@@ -670,7 +758,7 @@ func TestSplitAcrossClusters(t *testing.T) {
 			Generation: 1,
 		},
 	}
-	testutil.StartShardWithRanges(t, ctx, startingRanges, s1)
+	sf.StartShardWithRanges(t, ctx, startingRanges, s1)
 	waitForRangeLease(t, stores, 1)
 
 	// Bringup new peers.
