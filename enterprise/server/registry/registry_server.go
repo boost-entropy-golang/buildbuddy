@@ -3,9 +3,11 @@ package registry
 import (
 	"flag"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"strings"
 
 	"github.com/buildbuddy-io/buildbuddy/server/environment"
 	"github.com/buildbuddy-io/buildbuddy/server/interfaces"
@@ -38,6 +40,29 @@ func (t *RegistryServer) Start() {
 	proxy := httputil.NewSingleHostReverseProxy(url)
 
 	http.HandleFunc("/", func(w http.ResponseWriter, req *http.Request) {
+		path := req.URL.Path
+		pathPaths := strings.Split(path, "/")
+
+		if len(pathPaths) > 3 && pathPaths[1] == "modules" && strings.HasPrefix(pathPaths[3], "github.") {
+			buf, status, err := handleGitHub(path)
+			w.WriteHeader(status)
+			if err != nil {
+				log.Errorf("error serving github module %s: %s", path, err)
+			}
+			w.Write(buf)
+			return
+		}
+
+		if len(pathPaths) > 3 && pathPaths[1] == "modules" && strings.HasPrefix(pathPaths[3], "npm") {
+			buf, status, err := handleNPM(path)
+			w.WriteHeader(status)
+			if err != nil {
+				log.Errorf("error serving npm module %s: %s", path, err)
+			}
+			w.Write(buf)
+			return
+		}
+
 		req.Host = req.URL.Host
 		proxy.ServeHTTP(w, req)
 	})
@@ -48,4 +73,18 @@ func (t *RegistryServer) Start() {
 			log.Fatal(err.Error())
 		}
 	}()
+}
+
+func request(url string) ([]byte, int, error) {
+	log.Debugf("fetching: %s", url)
+	resp, err := http.Get(url)
+	if err != nil {
+		return nil, 500, err
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, 500, err
+	}
+	return body, resp.StatusCode, nil
 }
