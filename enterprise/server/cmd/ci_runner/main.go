@@ -37,6 +37,7 @@ import (
 	"github.com/buildbuddy-io/buildbuddy/server/util/healthcheck"
 	"github.com/buildbuddy-io/buildbuddy/server/util/lockingbuffer"
 	"github.com/buildbuddy-io/buildbuddy/server/util/log"
+	"github.com/buildbuddy-io/buildbuddy/server/util/redact"
 	"github.com/buildbuddy-io/buildbuddy/server/util/status"
 	"github.com/creack/pty"
 	"github.com/docker/go-units"
@@ -240,7 +241,7 @@ type workspace struct {
 	// log contains logs from the workspace setup phase (cloning the git repo and
 	// deciding which actions to run), which are reported as part of the first
 	// action's logs.
-	log io.Writer
+	log *buildEventReporter
 }
 
 func artifactsRootPath(ws *workspace) string {
@@ -264,6 +265,9 @@ func provisionArtifactsDir(ws *workspace, bazelCommandIndex int) error {
 
 func provisionKythe(ctx context.Context, ws *workspace) error {
 	kytheRootPath := filepath.Join(ws.rootDir, kytheDirName)
+	if err := os.Setenv(kytheDirEnvVarName, kytheRootPath); err != nil {
+		return err
+	}
 	if _, err := os.Stat(kytheRootPath); err == nil {
 		return nil // dir already exists; we're done.
 	}
@@ -273,9 +277,6 @@ func provisionKythe(ctx context.Context, ws *workspace) error {
 	cmd := fmt.Sprintf(`curl -sL "%s" | tar -xz -C %s --strip-components 1`, kytheArchiveURL, kytheRootPath)
 	args := []string{"-c", cmd}
 	if err := runCommand(ctx, "bash", args, nil /*=env*/, "" /*=dir*/, ws.log); err != nil {
-		return err
-	}
-	if err := os.Setenv(kytheDirEnvVarName, kytheRootPath); err != nil {
 		return err
 	}
 	return nil
@@ -632,10 +633,12 @@ func run() error {
 	if err := ensurePath(); err != nil {
 		return status.WrapError(err, "ensure PATH")
 	}
-	// Prevent git from asking for user input.
-	if err := os.Setenv("GIT_TERMINAL_PROMPT", "0"); err != nil {
-		return status.WrapError(err, "set GIT_TERMINAL_PROMPT")
+	// Try to disable interactivity since we don't provide a real terminal
+	// connection.
+	if err := disableInteractivity(); err != nil {
+		return status.WrapError(err, "disable interactivity")
 	}
+
 	// Write default bazelrc
 	if err := writeBazelrc(buildbuddyBazelrcPath, buildEventReporter.invocationID); err != nil {
 		return status.WrapError(err, "write "+buildbuddyBazelrcPath)
@@ -687,7 +690,9 @@ func run() error {
 		if err != nil {
 			return err
 		}
-		printCommandLine(os.Stderr, *bazelCommand, args...)
+		if err := printCommandLine(os.Stderr, *bazelCommand, args...); err != nil {
+			return err
+		}
 		if err := runCommand(ctx, *bazelCommand, args, nil, wsPath, os.Stderr); err != nil {
 			return err
 		}
@@ -1000,7 +1005,9 @@ func (ar *actionRunner) Run(ctx context.Context, ws *workspace) error {
 		if err != nil {
 			return status.InvalidArgumentErrorf("failed to parse bazel command: %s", err)
 		}
-		printCommandLine(ar.reporter, *bazelCommand, args...)
+		if err := printCommandLine(ar.reporter, *bazelCommand, args...); err != nil {
+			return err
+		}
 		// Transparently set the invocation ID from the one we computed ahead of
 		// time. The UI is expecting this invocation ID so that it can render a
 		// BuildBuddy invocation URL for each bazel_command that is executed.
@@ -1149,11 +1156,15 @@ func (ar *actionRunner) Run(ctx context.Context, ws *workspace) error {
 }
 
 func (ar *actionRunner) workspaceStatusEvent() *bespb.BuildEvent {
+	buildUser := os.Getenv("BUILD_USER")
+	if buildUser == "" {
+		buildUser = ar.username
+	}
 	return &bespb.BuildEvent{
 		Id: &bespb.BuildEventId{Id: &bespb.BuildEventId_WorkspaceStatus{WorkspaceStatus: &bespb.BuildEventId_WorkspaceStatusId{}}},
 		Payload: &bespb.BuildEvent_WorkspaceStatus{WorkspaceStatus: &bespb.WorkspaceStatus{
 			Item: []*bespb.WorkspaceStatus_Item{
-				{Key: "BUILD_USER", Value: ar.username},
+				{Key: "BUILD_USER", Value: buildUser},
 				{Key: "BUILD_HOST", Value: ar.hostname},
 				{Key: "GIT_BRANCH", Value: *pushedBranch},
 				{Key: "GIT_TREE_STATUS", Value: "Clean"},
@@ -1430,13 +1441,18 @@ func processRunScript(ctx context.Context, runScript string) (*runInfo, error) {
 	}, nil
 }
 
-func printCommandLine(out io.Writer, command string, args ...string) {
+func printCommandLine(out io.Writer, command string, args ...string) error {
 	cmdLine := command
 	for _, arg := range args {
 		cmdLine += " " + toShellToken(arg)
 	}
+	redactedCmdLine, err := redact.RedactCommand(cmdLine)
+	if err != nil {
+		return status.WrapError(err, "redact command")
+	}
 	io.WriteString(out, ansiGray+formatNowUTC()+ansiReset+" ")
-	io.WriteString(out, aurora.Sprintf("%s %s\n", aurora.Green("$"), cmdLine))
+	io.WriteString(out, aurora.Sprintf("%s %s\n", aurora.Green("$"), redactedCmdLine))
+	return nil
 }
 
 // TODO: Handle shell variable expansion. Probably want to run this with sh -c
@@ -1528,6 +1544,20 @@ func ensurePath() error {
 	return os.Setenv("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
 }
 
+func disableInteractivity() error {
+	// Prevent git from asking for user input.
+	if err := os.Setenv("GIT_TERMINAL_PROMPT", "0"); err != nil {
+		return err
+	}
+	if runtime.GOOS == "linux" {
+		// Prevent `apt-get install` from asking for input.
+		if err := os.Setenv("DEBIAN_FRONTEND", "noninteractive"); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // extractBazelisk copies the embedded bazelisk to the given path if it does
 // not already exist.
 func extractBazelisk(path string) error {
@@ -1596,12 +1626,11 @@ func (ws *workspace) setup(ctx context.Context) error {
 		if !*fallbackToCleanCheckout {
 			return err
 		}
-		log.Warningf(
+		ws.log.Printf(
 			"Failed to sync existing repo (maybe due to destructive '.git' dir edit or incompatible remote update). "+
 				"Deleting and initializing from scratch. Error: %s",
 			err,
 		)
-		writeCommandSummary(ws.log, "Failed to sync existing git repo. Deleting repo and trying again.")
 		if err := os.Chdir(".."); err != nil {
 			return status.WrapError(err, "cd")
 		}
@@ -1841,6 +1870,9 @@ func (ws *workspace) config(ctx context.Context) error {
 		{"extensions.partialClone", "true"},
 		// Disable this check for `git fetch` performance improvements
 		{"fetch.showForcedUpdates", "false"},
+		// Disable automatic gc - it can interfere with running `rm -rf .git` in
+		// the case where we don't sync successfully.
+		{"gc.auto", "0"},
 	}
 	writeCommandSummary(ws.log, "Configuring repository...")
 	for _, kv := range cfg {
@@ -1926,8 +1958,12 @@ func (ws *workspace) fetch(ctx context.Context, remoteURL string, refs []string,
 }
 
 type gitError struct {
-	error
+	Err    error
 	Output string
+}
+
+func (e *gitError) Error() string {
+	return fmt.Sprintf("%s: %q", e.Err.Error(), e.Output)
 }
 
 func isRemoteAlreadyExists(err error) bool {
@@ -1946,7 +1982,9 @@ func isAlreadyUpToDate(err error) bool {
 func git(ctx context.Context, out io.Writer, args ...string) (string, *gitError) {
 	var buf bytes.Buffer
 	w := io.MultiWriter(out, &buf)
-	printCommandLine(out, "git", args...)
+	if err := printCommandLine(out, "git", args...); err != nil {
+		return "", &gitError{err, ""}
+	}
 	if err := runCommand(ctx, "git", args, map[string]string{} /*=env*/, "" /*=dir*/, w); err != nil {
 		return "", &gitError{err, buf.String()}
 	}
@@ -1996,7 +2034,6 @@ func writeBazelrc(path, invocationID string) error {
 	defer f.Close()
 
 	lines := []string{
-		"build --build_metadata=ROLE=CI",
 		"build --build_metadata=PARENT_INVOCATION_ID=" + invocationID,
 		// Note: these pieces of metadata are set to match the WorkspaceStatus event
 		// for the outer (workflow) invocation.
@@ -2015,12 +2052,16 @@ func writeBazelrc(path, invocationID string) error {
 		// artifact for easier debugging.
 		"build --heap_dump_on_oom",
 	}
-	if *workflowID != "" {
+	isWorkflow := *workflowID != ""
+	if isWorkflow {
 		lines = append(lines, "build --build_metadata=WORKFLOW_ID="+*workflowID)
+		lines = append(lines, "build --build_metadata=ROLE=CI")
+	}
+	if !isWorkflow || *prNumber != 0 {
+		lines = append(lines, "build --build_metadata=DISABLE_TARGET_TRACKING=true")
 	}
 	if *prNumber != 0 {
 		lines = append(lines, "build --build_metadata=PULL_REQUEST_NUMBER="+fmt.Sprintf("%d", *prNumber))
-		lines = append(lines, "build --build_metadata=DISABLE_TARGET_TRACKING=true")
 	}
 	if isPushedRefInFork() {
 		lines = append(lines, "build --build_metadata=FORK_REPO_URL="+*pushedRepoURL)

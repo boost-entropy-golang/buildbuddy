@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"net/url"
 	"path"
+	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -1411,14 +1413,22 @@ func (s *BuildBuddyServer) GetSuggestion(ctx context.Context, req *supb.GetSugge
 	}
 	return nil, status.UnimplementedError("Not implemented")
 }
+
+var isAlphaNumPath = regexp.MustCompile(`^[A-Za-z/0-9]*$`).MatchString
+
 func (s *BuildBuddyServer) Search(ctx context.Context, req *srpb.SearchRequest) (*srpb.SearchResponse, error) {
 	if css := s.env.GetCodesearchService(); css != nil {
 		namespace, err := prefix.UserPrefix(ctx, s.env)
 		if err != nil {
 			return nil, err
 		}
-		// Force the namespace to match the authenticated user.
-		req.Namespace = namespace
+		if !isAlphaNumPath(req.GetNamespace()) {
+			return nil, status.InvalidArgumentError("namespace must match a/b/c")
+		}
+		// Force the namespace to match the authenticated user, but
+		// allow for clients to use a custom namespace within that
+		// subspace.
+		req.Namespace = filepath.Join(namespace, req.GetNamespace())
 		return css.Search(ctx, req)
 	}
 	return nil, status.UnimplementedError("Not implemented")
@@ -1591,11 +1601,12 @@ func (s *BuildBuddyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	var err error
 	if params.Get("artifact") != "" {
 		code, err = s.serveArtifact(r.Context(), w, params)
-	} else if params.Get("bytestream_url") != "" && strings.HasPrefix(params.Get("bytestream_url"), "bytestream://") {
+	} else if params.Get("bytestream_url") != "" {
 		// bytestream request
 		code, err = s.serveBytestream(r.Context(), w, params)
-		if err != nil && code == http.StatusNotFound {
-			// Fall back to blobstore if object is not in cache
+		// For CAS (bytestream://) only, fall back to blobstore if object is not
+		// in cache.
+		if err != nil && code == http.StatusNotFound && strings.HasPrefix(params.Get("bytestream_url"), "bytestream://") {
 			code, err = s.serveArtifact(r.Context(), w, params)
 		}
 	} else {

@@ -33,6 +33,7 @@ import (
 	"github.com/buildbuddy-io/buildbuddy/server/remote_cache/scorecard"
 	"github.com/buildbuddy-io/buildbuddy/server/tables"
 	"github.com/buildbuddy-io/buildbuddy/server/util/alert"
+	"github.com/buildbuddy-io/buildbuddy/server/util/authutil"
 	"github.com/buildbuddy-io/buildbuddy/server/util/background"
 	"github.com/buildbuddy-io/buildbuddy/server/util/capabilities"
 	"github.com/buildbuddy-io/buildbuddy/server/util/log"
@@ -597,8 +598,9 @@ func (w *webhookNotifier) Start() {
 		w.notifyGroup.Go(func() error {
 			defer metrics.WebhookNotifyWorkers.Dec()
 			for task := range w.tasks {
+				ctx := log.EnrichContext(ctx, log.InvocationIDKey, task.invocation.GetInvocationId())
 				if err := notifyWithTimeout(ctx, w.env, task); err != nil {
-					log.Warningf("Failed to notify webhook for invocation %s: %s", task.invocation.GetInvocationId(), err)
+					log.CtxWarningf(ctx, "Failed to notify invocation webhook: %s", err)
 				}
 			}
 			return nil
@@ -1100,7 +1102,7 @@ func (e *EventChannel) authenticateEvent(bazelBuildEvent *build_event_stream.Bui
 	if err != nil {
 		return false, err
 	}
-	apiKey, err := auth.ParseAPIKeyFromString(options)
+	apiKey, err := authutil.ParseAPIKeyFromString(options)
 	if err != nil {
 		return false, err
 	}

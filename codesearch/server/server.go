@@ -207,6 +207,9 @@ func (css *codesearchServer) Search(ctx context.Context, req *srpb.SearchRequest
 	rsp := &srpb.SearchResponse{}
 	for _, doc := range docs {
 		regions := highlighter.Highlight(doc)
+		if len(regions) == 0 {
+			continue
+		}
 		result := &srpb.Result{
 			Repo:       string(doc.Field(repoField).Contents()),
 			Filename:   string(doc.Field(filenameField).Contents()),
@@ -215,7 +218,7 @@ func (css *codesearchServer) Search(ctx context.Context, req *srpb.SearchRequest
 		}
 		for _, region := range regions {
 			result.Snippets = append(result.Snippets, &srpb.Snippet{
-				Lines: region.String(),
+				Lines: region.CustomSnippet(1, 1),
 			})
 		}
 		rsp.Results = append(rsp.Results, result)

@@ -17,7 +17,20 @@ import (
 	"github.com/go-enry/go-enry/v2"
 )
 
-var nl = []byte{'\n'}
+const (
+	// TODO(tylerw): These should not be defined in this file.
+	// Find a way to specify them from the indexer / searcher?
+	filenameField = "filename"
+	contentField  = "content"
+)
+
+var (
+	nl = []byte{'\n'}
+
+	_ types.Query             = (*ReQuery)(nil)
+	_ types.HighlightedRegion = (*regionMatch)(nil)
+	_ types.Scorer            = (*reScorer)(nil)
+)
 
 func countNL(b []byte) int {
 	r := b
@@ -40,7 +53,7 @@ type region struct {
 }
 
 type reScorer struct {
-	re *regexp.Regexp
+	fieldMatchers map[string]*regexp.Regexp
 }
 
 func match(re *regexp.Regexp, buf []byte) []region {
@@ -59,11 +72,15 @@ func match(re *regexp.Regexp, buf []byte) []region {
 func (s *reScorer) Score(doc types.Document) float64 {
 	docScore := 0.0
 	for _, fieldName := range doc.Fields() {
+		re, ok := s.fieldMatchers[fieldName]
+		if !ok {
+			continue
+		}
 		field := doc.Field(fieldName)
 		if len(field.Contents()) == 0 {
 			continue
 		}
-		matchingRegions := match(s.re, field.Contents())
+		matchingRegions := match(re, field.Contents())
 		f_qi_d := float64(len(matchingRegions))
 		D := float64(len(strings.Fields(string(field.Contents()))))
 		k1, b := bm25Params(field.Name())
@@ -75,7 +92,7 @@ func (s *reScorer) Score(doc types.Document) float64 {
 
 func bm25Params(fieldName string) (k1 float64, b float64) {
 	switch fieldName {
-	case "filename":
+	case filenameField:
 		return 1.2, 0.8
 	default:
 		return 1.4, 0.9
@@ -95,30 +112,56 @@ func extractLine(buf []byte, lineNumber int) []byte {
 }
 
 type reHighlighter struct {
-	re *regexp.Regexp
+	fieldMatchers map[string]*regexp.Regexp
 }
 
 type regionMatch struct {
-	fieldName string
-	snippet   string
+	field  types.Field
+	region region
 }
 
 func (rm regionMatch) FieldName() string {
-	return rm.fieldName
+	return rm.field.Name()
 }
+
+func makeLine(line []byte, lineNumber int) string {
+	return fmt.Sprintf("%d: %s\n", lineNumber, line)
+}
+
+func (rm regionMatch) CustomSnippet(linesBefore, linesAfter int) string {
+	lineNumber := rm.region.lineNumber
+	snippetText := ""
+
+	firstLine := max(lineNumber-linesBefore, 1)
+	lastLine := lineNumber + linesAfter
+
+	for n := firstLine; n <= lastLine; n++ {
+		buf := extractLine(rm.field.Contents(), n)
+		if buf == nil {
+			continue
+		}
+		snippetText += makeLine(buf, n)
+	}
+	return snippetText
+}
+
 func (rm regionMatch) String() string {
-	return rm.snippet
+	return rm.CustomSnippet(0, 0)
 }
 
 func (h *reHighlighter) Highlight(doc types.Document) []types.HighlightedRegion {
 	results := make([]types.HighlightedRegion, 0)
 	for _, fieldName := range doc.Fields() {
 		field := doc.Field(fieldName)
-		for _, region := range match(h.re, field.Contents()) {
-			line := extractLine(field.Contents(), region.lineNumber)
+		matcher, ok := h.fieldMatchers[fieldName]
+		if !ok {
+			continue
+		}
+		for _, region := range match(matcher, field.Contents()) {
+			region := region
 			results = append(results, types.HighlightedRegion(regionMatch{
-				fieldName: fieldName,
-				snippet:   fmt.Sprintf("%d: %s\n", region.lineNumber, line),
+				field:  field,
+				region: region,
 			}))
 		}
 	}
@@ -126,24 +169,29 @@ func (h *reHighlighter) Highlight(doc types.Document) []types.HighlightedRegion 
 }
 
 type ReQuery struct {
-	log        log.Logger
-	squery     []byte
-	numResults int
-	re         *regexp.Regexp
+	log           log.Logger
+	squery        []byte
+	numResults    int
+	fieldMatchers map[string]*regexp.Regexp
 }
 
-func NewReQuery(q string, numResults int) (types.Query, error) {
+func NewReQuery(q string, numResults int) (*ReQuery, error) {
 	subLog := log.NamedSubLogger("searcher")
 	subLog.Infof("raw query: [%s]", q)
 
-	// A list of s-expression strings that must be satisfied by
-	// the query. (added to the query with AND)
+	// A list of s-expression strings that must be satisfied by the query.
+	// (added to the query with AND)
 	requiredSClauses := make([]string, 0)
+
+	// Regex options that will be applied to the main query only.
 	regexOpts := []string{
 		"(?m)", // always use multiline mode.
 	}
 
-	// match `case:yes` or `case:y`
+	// Regexp matches (for highlighting) by fieldname.
+	fieldMatchers := make(map[string]*regexp.Regexp)
+
+	// Match `case:yes` or `case:y` and enable case-sensitive searches.
 	caseMatcher := regexp.MustCompile(`case:(yes|y)`)
 	if caseMatcher.MatchString(q) {
 		q = caseMatcher.ReplaceAllString(q, "")
@@ -155,14 +203,20 @@ func NewReQuery(q string, numResults int) (types.Query, error) {
 	// match `file:test.js`, `f:test.js`, and `path:test.js`
 	fileMatcher := regexp.MustCompile(`(?:file:|f:|path:)(?P<filepath>[[:graph:]]+)`)
 	fileMatch := fileMatcher.FindStringSubmatch(q)
+
 	if len(fileMatch) == 2 {
 		q = fileMatcher.ReplaceAllString(q, "")
 		syn, err := syntax.Parse(fileMatch[1], syntax.Perl)
 		if err != nil {
 			return nil, err
 		}
-		subQ := RegexpQuery(syn).SQuery("filename")
+		subQ := RegexpQuery(syn).SQuery(filenameField)
 		requiredSClauses = append(requiredSClauses, subQ)
+		fileMatchRe, err := regexp.Compile(fileMatch[1])
+		if err != nil {
+			return nil, err
+		}
+		fieldMatchers[filenameField] = fileMatchRe
 	}
 
 	// match `lang:go`, `lang:java`, etc.
@@ -180,33 +234,49 @@ func NewReQuery(q string, numResults int) (types.Query, error) {
 			return nil, status.InvalidArgumentErrorf("unknown lang %q", langMatch[1])
 		}
 	}
+
+	squery := ""
+
 	q = strings.TrimSpace(q)
-	q = strings.Join(regexOpts, "") + q
+	if len(q) > 0 {
+		// Only build a content matcher if there is non-empty query content.
+		re, err := regexp.Compile(strings.Join(regexOpts, "") + q)
+		if err != nil {
+			return nil, err
+		}
+		fieldMatchers[contentField] = re
+
+		syn, err := syntax.Parse(q, syntax.Perl)
+		if err != nil {
+			return nil, err
+		}
+		queryObj := RegexpQuery(syn)
+		squery = queryObj.SQuery(types.AllFields)
+
+		// If there is a content matcher, and there is not already a
+		// filename matcher, allow filenames that match the query too.
+		if _, ok := fieldMatchers[filenameField]; !ok {
+			fieldMatchers[filenameField] = re
+		}
+	}
 	subLog.Infof("parsed query: [%s]", q)
 
-	syn, err := syntax.Parse(q, syntax.Perl)
-	if err != nil {
-		return nil, err
-	}
-
-	// Annoyingly, we have to compile the regexp in the normal way too.
-	re, err := regexp.Compile(q)
-	if err != nil {
-		return nil, err
-	}
-	queryObj := RegexpQuery(syn)
-	squery := queryObj.SQuery(types.AllFields)
 	if len(requiredSClauses) > 0 {
-		clauses := strings.Join(requiredSClauses, " ")
-		squery = "(:and " + squery + clauses + ")"
+		var clauses string
+		if len(requiredSClauses) == 1 {
+			clauses = requiredSClauses[0]
+		} else {
+			clauses = strings.Join(requiredSClauses, " ")
+		}
+		squery = "(:and " + squery + " " + clauses + ")"
 	}
 	subLog.Infof("squery: %q", squery)
 
 	req := &ReQuery{
-		log:        subLog,
-		squery:     []byte(squery),
-		numResults: numResults,
-		re:         re,
+		log:           subLog,
+		squery:        []byte(squery),
+		numResults:    numResults,
+		fieldMatchers: fieldMatchers,
 	}
 	return req, nil
 }
@@ -220,9 +290,14 @@ func (req *ReQuery) NumResults() int {
 }
 
 func (req *ReQuery) GetScorer() types.Scorer {
-	return &reScorer{req.re}
+	return &reScorer{req.fieldMatchers}
 }
 
 func (req *ReQuery) GetHighlighter() types.Highlighter {
-	return &reHighlighter{req.re}
+	return &reHighlighter{req.fieldMatchers}
+}
+
+// TESTONLY: return field matchers to verify regexp params.
+func (req *ReQuery) TestOnlyFieldMatchers() map[string]*regexp.Regexp {
+	return req.fieldMatchers
 }
