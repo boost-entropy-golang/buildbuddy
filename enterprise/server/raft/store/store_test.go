@@ -423,6 +423,40 @@ func waitForRangeLease(t testing.TB, ctx context.Context, stores []*testutil.Tes
 	log.Printf("%s got range lease for range: %d", s.NHID(), rangeID)
 }
 
+func waitForReplicaToCatchUp(t testing.TB, ctx context.Context, r *replica.Replica, desiredLastAppliedIndex uint64) {
+	// Wait for raft replication to finish bringing the new node up to date.
+	waitStart := time.Now()
+	for {
+		newReplicaIndex, err := r.LastAppliedIndex()
+		require.True(t, err == nil || status.IsNotFoundError(err))
+		if err == nil && newReplicaIndex >= desiredLastAppliedIndex {
+			log.Infof("Replica caught up in %s", time.Since(waitStart))
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func includeReplicaWithNHID(rd *rfpb.RangeDescriptor, nhid string) bool {
+	for _, r := range rd.GetReplicas() {
+		if r.GetNhid() == nhid {
+			return true
+		}
+	}
+	return false
+}
+
+func getReplica(t testing.TB, s *testutil.TestingStore, rangeID uint64) *replica.Replica {
+	for {
+		res, err := s.GetReplica(rangeID)
+		if err == nil {
+			return res
+		}
+		require.False(t, status.IsOutOfRangeError(err))
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 func TestSplitNonMetaRange(t *testing.T) {
 	flags.Set(t, "cache.raft.max_range_size_bytes", 0) // disable auto splitting
 	sf := testutil.NewStoreFactory(t)
@@ -560,28 +594,10 @@ func TestPostFactoSplit(t *testing.T) {
 	lastAppliedIndex, err := r1.LastAppliedIndex()
 	require.NoError(t, err)
 
-	var r2 *replica.Replica
-	for {
-		r2, err = s2.GetReplica(2)
-		if err == nil {
-			break
-		}
-		if !status.IsOutOfRangeError(err) {
-			require.FailNowf(t, "unexpected error", "unexpected error %s", err)
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	r2 := getReplica(t, s2, 2)
 
 	// Wait for raft replication to finish bringing the new node up to date.
-	waitStart := time.Now()
-	for {
-		newReplicaIndex, err := r2.LastAppliedIndex()
-		if err == nil && newReplicaIndex >= lastAppliedIndex {
-			log.Infof("Replica caught up in %s", time.Since(waitStart))
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	waitForReplicaToCatchUp(t, ctx, r2, lastAppliedIndex)
 
 	// Transfer Leadership to the new node
 	_, err = s.TransferLeadership(ctx, &rfpb.TransferLeadershipRequest{
@@ -825,4 +841,208 @@ func TestSplitAcrossClusters(t *testing.T) {
 	for _, fr := range written {
 		readRecord(ctx, t, s1, fr)
 	}
+}
+
+func TestUpReplicate(t *testing.T) {
+	flags.Set(t, "cache.raft.max_range_size_bytes", 0) // disable auto splitting
+	// disable txn cleanup and zombie scan, because advance the fake clock can
+	// prematurely trigger txn cleanup and zombie cleanup.
+	flags.Set(t, "cache.raft.enable_txn_cleanup", false)
+	flags.Set(t, "cache.raft.zombie_node_scan_interval", 0)
+
+	clock := clockwork.NewFakeClock()
+	sf := testutil.NewStoreFactoryWithClock(t, clock)
+	s1 := sf.NewStore(t)
+	s2 := sf.NewStore(t)
+	ctx := context.Background()
+
+	// start shards for s1 and s2
+	stores := []*testutil.TestingStore{s1, s2}
+	sf.StartShard(t, ctx, stores...)
+
+	{ // Verify that there are 2 replicas for range 1
+		s := getStoreWithRangeLease(t, ctx, stores, 1)
+		replicas := getMembership(t, s, ctx, 1)
+		require.Equal(t, 2, len(replicas))
+		rd := s.GetRange(1)
+		require.Equal(t, 2, len(rd.GetReplicas()))
+	}
+
+	{ // Verify that there are 2 replicas for range 2, and also write 10 records
+		s := getStoreWithRangeLease(t, ctx, stores, 2)
+		writeNRecords(ctx, t, s, 10)
+		replicas := getMembership(t, s, ctx, 2)
+		require.Equal(t, 2, len(replicas))
+		rd := s.GetRange(2)
+		require.Equal(t, 2, len(rd.GetReplicas()))
+	}
+
+	s := getStoreWithRangeLease(t, ctx, stores, 2)
+	r, err := s.GetReplica(2)
+	require.NoError(t, err)
+	desiredAppliedIndex, err := r.LastAppliedIndex()
+	require.NoError(t, err)
+
+	s3 := sf.NewStore(t)
+	for {
+		// advance the clock to trigger scan replicas
+		clock.Advance(61 * time.Second)
+		// wait some time to allow let driver queue execute
+		time.Sleep(100 * time.Millisecond)
+		list, err := s3.ListReplicas(ctx, &rfpb.ListReplicasRequest{})
+		require.NoError(t, err)
+		if len(list.GetReplicas()) < 2 {
+			continue
+		}
+
+		if len(s1.GetRange(1).GetReplicas()) == 3 &&
+			len(s1.GetRange(2).GetReplicas()) == 3 &&
+			len(s2.GetRange(1).GetReplicas()) == 3 &&
+			len(s2.GetRange(2).GetReplicas()) == 3 {
+			break
+		}
+	}
+	r2 := getReplica(t, s3, 2)
+	waitForReplicaToCatchUp(t, ctx, r2, desiredAppliedIndex)
+	waitStart := time.Now()
+	for {
+		l := len(r2.RangeDescriptor().GetReplicas())
+		if l == 3 {
+			break
+		}
+		if time.Since(waitStart) > 30*time.Second {
+			require.Failf(t, "unexpected range descriptor", "Range 2 on s3 has %d replicas, expected 3", l)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+func TestDownReplicate(t *testing.T) {
+	flags.Set(t, "cache.raft.max_range_size_bytes", 0) // disable auto splitting
+	// disable txn cleanup and zombie scan, because advance the fake clock can
+	// prematurely trigger txn cleanup and zombie cleanup
+	flags.Set(t, "cache.raft.enable_txn_cleanup", false)
+	flags.Set(t, "cache.raft.zombie_node_scan_interval", 0)
+
+	clock := clockwork.NewFakeClock()
+	sf := testutil.NewStoreFactoryWithClock(t, clock)
+	s1 := sf.NewStore(t)
+	s2 := sf.NewStore(t)
+	s3 := sf.NewStore(t)
+	ctx := context.Background()
+
+	// start shards for s1, s2, s3
+	stores := []*testutil.TestingStore{s1, s2, s3}
+	sf.StartShard(t, ctx, stores...)
+
+	s4 := sf.NewStore(t)
+
+	// Added a replica for range 2, so the number of replicas for range 2 exceeds the cache.raft.min_replicas_per_range
+	s := getStoreWithRangeLease(t, ctx, stores, 2)
+	rd := s.GetRange(2)
+	_, err := s.AddReplica(ctx, &rfpb.AddReplicaRequest{
+		Range: rd,
+		Node: &rfpb.NodeDescriptor{
+			Nhid:        s4.NHID(),
+			RaftAddress: s4.RaftAddress,
+			GrpcAddress: s4.GRPCAddress,
+		},
+	})
+	require.NoError(t, err)
+
+	replicas := getMembership(t, s, ctx, 2)
+	require.Equal(t, 4, len(replicas))
+
+	stores = append(stores, s4)
+
+	s = getStoreWithRangeLease(t, ctx, stores, 2)
+	rd = s.GetRange(2)
+	require.Equal(t, 4, len(rd.GetReplicas()))
+
+	// Advance the clock to trigger scan replicas
+	clock.Advance(61 * time.Second)
+	for {
+		clock.Advance(3 * time.Second)
+		time.Sleep(100 * time.Millisecond)
+
+		s = getStoreWithRangeLease(t, ctx, stores, 2)
+		replicas := getMembership(t, s, ctx, 2)
+		if len(replicas) > 3 {
+			continue
+		}
+		rd = s.GetRange(2)
+		if len(rd.GetReplicas()) == 3 {
+			break
+		}
+	}
+}
+
+func TestReplaceDeadReplica(t *testing.T) {
+	flags.Set(t, "cache.raft.max_range_size_bytes", 0) // disable auto splitting
+	// disable txn cleanup and zombie scan, because advance the fake clock can
+	// prematurely trigger txn cleanup and zombie cleanup
+	flags.Set(t, "cache.raft.enable_txn_cleanup", false)
+	flags.Set(t, "cache.raft.zombie_node_scan_interval", 0)
+
+	clock := clockwork.NewFakeClock()
+	sf := testutil.NewStoreFactoryWithClock(t, clock)
+	s1 := sf.NewStore(t)
+	s2 := sf.NewStore(t)
+	s3 := sf.NewStore(t)
+	ctx := context.Background()
+
+	// start shards for s1, s2, s3
+	stores := []*testutil.TestingStore{s1, s2, s3}
+	sf.StartShard(t, ctx, stores...)
+
+	{ // Verify that there are 2 replicas for range 2, and also write 10 records
+		s := getStoreWithRangeLease(t, ctx, stores, 2)
+		writeNRecords(ctx, t, s, 10)
+		replicas := getMembership(t, s, ctx, 2)
+		require.Equal(t, 3, len(replicas))
+		rd := s.GetRange(2)
+		require.Equal(t, 3, len(rd.GetReplicas()))
+	}
+
+	s := getStoreWithRangeLease(t, ctx, stores, 2)
+	r, err := s.GetReplica(2)
+	require.NoError(t, err)
+	desiredAppliedIndex, err := r.LastAppliedIndex()
+	require.NoError(t, err)
+
+	s4 := sf.NewStore(t)
+	// Stop store 3
+	s3.Stop()
+
+	nhid3 := s3.NodeHost().ID()
+	nhid4 := s4.NodeHost().ID()
+
+	// Advance the clock pass the cache.raft.dead_store_timeout so s3 is considered dead.
+	clock.Advance(5*time.Minute + 1*time.Second)
+	for {
+		// advance the clock to trigger scan replicas
+		clock.Advance(61 * time.Second)
+		// wait some time to allow let driver queue execute
+		time.Sleep(100 * time.Millisecond)
+		list, err := s4.ListReplicas(ctx, &rfpb.ListReplicasRequest{})
+		require.NoError(t, err)
+		if len(list.GetReplicas()) < 2 {
+			// s4 should have two ranges
+			continue
+		}
+
+		if !includeReplicaWithNHID(s1.GetRange(1), nhid3) &&
+			!includeReplicaWithNHID(s1.GetRange(2), nhid3) &&
+			!includeReplicaWithNHID(s2.GetRange(1), nhid3) &&
+			!includeReplicaWithNHID(s2.GetRange(2), nhid3) {
+			// nhid4 should be added to range 1 and range2, and nhid3 removed
+			require.True(t, includeReplicaWithNHID(s1.GetRange(1), nhid4))
+			require.True(t, includeReplicaWithNHID(s1.GetRange(2), nhid4))
+			require.True(t, includeReplicaWithNHID(s2.GetRange(1), nhid4))
+			require.True(t, includeReplicaWithNHID(s2.GetRange(2), nhid4))
+			break
+		}
+	}
+	r2 := getReplica(t, s4, 2)
+	waitForReplicaToCatchUp(t, ctx, r2, desiredAppliedIndex)
 }

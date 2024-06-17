@@ -1,4 +1,4 @@
-name: "release-cli"
+name: "Release CLI"
 
 on:
   workflow_dispatch:
@@ -138,8 +138,9 @@ jobs:
       matrix:
         include:
           - os: ubuntu-20.04
-          - os: macos-13 # MacOS amd64 (Intel)
-          - os: macos-13-xlarge # MacOS arm64 (M1)
+          - os: ubuntu-22.04-16cpu-arm64-arm-limited # linux arm64
+          - os: macos-13 # macOS amd64
+          - os: macos-13-xlarge # macOS arm64
     runs-on: ${{ matrix.os }}
     needs: [push-tag, create-release]
     steps:
@@ -167,7 +168,11 @@ jobs:
           else
             OS=linux
           fi
-          ARCH=$(uname -m)  # note: bazel naming convention is "x86_64", not "amd64"
+          ARCH=$(uname -m)
+          # bazelisk uses "x86_64" / "arm64" convention
+          if [[ "$ARCH" == "aarch64" ]]; then
+            ARCH=arm64
+          fi
           VERSION=${{ needs.push-tag.outputs.version }}
 
           cd "${GITHUB_WORKSPACE}/buildbuddy"

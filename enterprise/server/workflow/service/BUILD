@@ -7,6 +7,7 @@ go_library(
     srcs = ["service.go"],
     importpath = "github.com/buildbuddy-io/buildbuddy/enterprise/server/workflow/service",
     deps = [
+        "//enterprise/server/cmd/ci_runner/bundle",
         "//enterprise/server/remote_execution/operation",
         "//enterprise/server/remote_execution/platform",
         "//enterprise/server/webhooks/webhook_data",
@@ -86,7 +87,7 @@ go_test(
         "@com_github_stretchr_testify//require",
         "@org_golang_google_genproto//googleapis/longrunning",
         "@org_golang_google_genproto_googleapis_bytestream//:bytestream",
-        "@org_golang_google_grpc//:go_default_library",
+        "@org_golang_google_grpc//:grpc",
         "@org_golang_google_grpc//metadata",
         "@org_golang_google_protobuf//testing/protocmp",
         "@org_golang_google_protobuf//types/known/anypb",

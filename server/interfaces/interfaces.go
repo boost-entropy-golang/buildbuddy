@@ -853,13 +853,13 @@ type RankedExecutionNode interface {
 }
 
 type ExecutionNode interface {
-	// GetExecutorID returns the ID for this execution node that uniquely
+	// GetExecutorId returns the ID for this execution node that uniquely
 	// identifies it within a node pool.
-	GetExecutorID() string
+	GetExecutorId() string
 
-	// GetExecutorHostID returns the executor host ID for this execution node,
+	// GetExecutorHostId returns the executor host ID for this execution node,
 	// which persists across restarts of a given executor instance.
-	GetExecutorHostID() string
+	GetExecutorHostId() string
 }
 
 type ExecutionSearchService interface {
@@ -1514,4 +1514,8 @@ type CodesearchService interface {
 
 type AuthService interface {
 	Authenticate(ctx context.Context, req *authpb.AuthenticateRequest) (*authpb.AuthenticateResponse, error)
+}
+
+type RegistryService interface {
+	RegisterHandlers(mux HttpServeMux)
 }

@@ -64,7 +64,7 @@ go_library(
         "@com_github_prometheus_client_golang//prometheus",
         "@com_github_sirupsen_logrus//:logrus",
         "@io_bazel_rules_go//go/runfiles:go_default_library",
-        "@org_golang_google_grpc//:go_default_library",
+        "@org_golang_google_grpc//:grpc",
         "@org_golang_x_sync//errgroup",
         "@org_golang_x_sys//unix",
     ],
@@ -77,7 +77,15 @@ genrule(
         "//enterprise/server/vmexec:vmexec.go",
     ],
     outs = ["guest_api_hash.sha256"],
-    cmd_bash = """sha256sum $(SRCS) | sha256sum | awk '{printf "%s", $$1}' > $@""",
+    cmd_bash = """
+    if type sha256sum &>/dev/null; then
+      # Linux
+      sha256sum $(SRCS) | sha256sum | awk '{printf "%s", $$1}' > $@
+    else
+      # macOS
+      shasum -a 256 $(SRCS) | shasum -a 256 | awk '{printf "%s", $$1}' > $@
+    fi
+    """,
     target_compatible_with = [
         "@platforms//os:linux",
         "@platforms//cpu:x86_64",

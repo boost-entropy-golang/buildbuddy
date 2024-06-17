@@ -9,7 +9,7 @@ import { runner } from "../../../proto/runner_ts_proto";
 import { git } from "../../../proto/git_ts_proto";
 import CodeBuildButton from "./code_build_button";
 import CodeEmptyStateComponent from "./code_empty";
-import { ArrowLeft, ArrowUpCircle, ChevronRight, Download, Key, Send, XCircle } from "lucide-react";
+import { ArrowLeft, ArrowUpCircle, ChevronRight, Download, Key, Pencil, Send, XCircle } from "lucide-react";
 import Spinner from "../../../app/components/spinner/spinner";
 import { OutlinedButton, FilledButton } from "../../../app/components/button/button";
 import { createPullRequest, updatePullRequest } from "./code_pull_request";
@@ -268,11 +268,15 @@ export default class CodeComponent extends React.Component<Props, State> {
   }
 
   getRef() {
-    return this.state.commitSHA || this.getBranch();
+    return this.props.search.get("commit") || this.state.commitSHA || this.getBranch();
   }
 
   getBranch() {
     return this.props.search.get("branch") || this.state.repoResponse?.defaultBranch;
+  }
+
+  getQuery() {
+    return this.props.search.get("pq");
   }
 
   fetchInitialContent() {
@@ -285,13 +289,14 @@ export default class CodeComponent extends React.Component<Props, State> {
       return;
     }
     window.addEventListener("resize", () => this.handleWindowResize());
-    window.addEventListener("hashchange", () => this.focusLineNumber());
+    window.addEventListener("hashchange", () => this.focusLineNumberAndHighlightQuery());
 
     this.editor = monaco.editor.create(this.codeViewer.current!, {
       value: "",
       theme: "vs",
-      readOnly: this.isSingleFile(),
+      readOnly: this.isSingleFile() || Boolean(this.getQuery()),
     });
+
     this.forceUpdate();
 
     const bytestreamURL = this.props.search.get("bytestream_url") || "";
@@ -314,12 +319,13 @@ export default class CodeComponent extends React.Component<Props, State> {
         this.fetchContentForPath(this.currentPath())
           .then((response) => {
             this.navigateToContent(this.currentPath(), response.content);
+            this.focusLineNumberAndHighlightQuery();
           })
           .catch((e) => error_service.handleError(e))
           .finally(() => this.setState({ loading: false }));
+      } else {
+        this.focusLineNumberAndHighlightQuery();
       }
-
-      this.focusLineNumber();
 
       if (this.state.mergeConflicts.has(this.currentPath())) {
         this.handleViewConflictClicked(
@@ -340,15 +346,43 @@ export default class CodeComponent extends React.Component<Props, State> {
 
     this.editor.onDidChangeModelContent(() => {
       this.handleContentChanged();
+      this.highlightQuery();
     });
   }
 
-  focusLineNumber() {
+  highlightQuery() {
+    if (this.getQuery()) {
+      let ranges = this.editor
+        ?.getModel()
+        ?.findMatches(
+          this.getQuery()!,
+          /* searchOnlyEditableRanges= */ false,
+          /* isRegex= */ true,
+          /* matchCase= */ false,
+          /* wordSeparators= */ null,
+          /* captureMatches= */ false
+        );
+      this.editor?.removeDecorations(
+        this.editor
+          ?.getModel()
+          ?.getAllDecorations()
+          .map((d) => d.id) || []
+      );
+      this.editor?.createDecorationsCollection(
+        ranges?.map((r) => {
+          return { range: r.range, options: { inlineClassName: "code-query-highlight" } };
+        })
+      );
+    }
+  }
+
+  focusLineNumberAndHighlightQuery() {
     let focusedLineNumber = window.location.hash.startsWith("#L") ? parseInt(window.location.hash.substr(2)) : 0;
     setTimeout(() => {
       this.editor?.setSelection(new monaco.Selection(focusedLineNumber, 0, focusedLineNumber, 0));
       this.editor?.revealLinesInCenter(focusedLineNumber, focusedLineNumber);
       this.editor?.focus();
+      this.highlightQuery();
     });
   }
 
@@ -1158,6 +1192,12 @@ export default class CodeComponent extends React.Component<Props, State> {
     event.stopPropagation();
   }
 
+  handleEditClicked() {
+    const url = new URL(window.location.href);
+    url.searchParams.delete("pq");
+    window.location.href = url.href;
+  }
+
   updateState(newState: Partial<State>, callback?: VoidFunction) {
     this.setState(newState as State, () => {
       this.saveState();
@@ -1235,7 +1275,7 @@ export default class CodeComponent extends React.Component<Props, State> {
                     {this.currentRepo()}
                   </a>
                 </div>
-                {this.getBranch() && this.state.commitSHA != this.getBranch() && (
+                {this.getBranch() && !this.getQuery() && this.getRef() != this.getBranch() && (
                   <>
                     <ChevronRight />
                     <a
@@ -1246,20 +1286,20 @@ export default class CodeComponent extends React.Component<Props, State> {
                     </a>
                   </>
                 )}
-                {this.state.commitSHA && (
+                {this.getRef() && (
                   <>
                     <ChevronRight />
                     <a
                       target="_blank"
-                      title={this.state.commitSHA}
-                      href={`http://github.com/${this.currentOwner()}/${this.currentRepo()}/commit/${
-                        this.state.commitSHA
-                      }`}>
-                      {this.state.commitSHA?.slice(0, 7)}
+                      title={this.getRef()}
+                      href={`http://github.com/${this.currentOwner()}/${this.currentRepo()}/commit/${this.getRef()}`}>
+                      {this.getRef()?.slice(0, 7)}
                     </a>{" "}
-                    <span onClick={this.handleUpdateCommitSha.bind(this, undefined)}>
-                      <ArrowUpCircle className="code-update-commit" />
-                    </span>{" "}
+                    {!this.getQuery() && (
+                      <span onClick={this.handleUpdateCommitSha.bind(this, undefined)}>
+                        <ArrowUpCircle className="code-update-commit" />
+                      </span>
+                    )}{" "}
                   </>
                 )}
                 {this.currentPath() && (
@@ -1300,7 +1340,14 @@ export default class CodeComponent extends React.Component<Props, State> {
               </OutlinedButton>
             </div>
           )}
-          {!this.isSingleFile() && this.currentRepo() && (
+          {Boolean(this.getQuery()) && (
+            <div className="code-menu-actions">
+              <OutlinedButton className="request-review-button" onClick={this.handleEditClicked.bind(this)}>
+                <Pencil className="icon green" /> Edit
+              </OutlinedButton>
+            </div>
+          )}
+          {!this.isSingleFile() && this.currentRepo() && !this.getQuery() && (
             <div className="code-menu-actions">
               {this.state.changes.size > 0 && !this.state.prBranch && (
                 <OutlinedButton
@@ -1370,7 +1417,7 @@ export default class CodeComponent extends React.Component<Props, State> {
             </div>
           )}
           <div className="code-container">
-            {!this.isSingleFile() && (
+            {!this.isSingleFile() && !this.getQuery() && (
               <div className="code-viewer-tabs">
                 {[...this.state.tabs.keys()].reverse().map((t) => (
                   <div
@@ -1411,7 +1458,7 @@ export default class CodeComponent extends React.Component<Props, State> {
                 ref={this.diffViewer}
               />
             </div>
-            {this.state.changes.size > 0 && (
+            {this.state.changes.size > 0 && !this.getQuery() && (
               <div className="code-diff-viewer">
                 <div className="code-diff-viewer-title">
                   Changes{" "}
@@ -1628,6 +1675,9 @@ function getOrCreateModel(url: string, value: string) {
 
 // This revives any non-serializable objects in state from their seralized form.
 function stateReviver(key: string, value: any) {
+  if (key == "loading") {
+    return false;
+  }
   if (typeof value === "object" && value !== null) {
     if (value.dataType === "Map") {
       return new Map(value.value);
