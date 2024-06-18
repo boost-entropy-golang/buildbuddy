@@ -6,6 +6,11 @@ message FrontendConfig {
   // The version of this buildbuddy instance.
   string version = 1;
 
+  // The hash of the static content being served to the client.  This is
+  // sometimes more specific than version (if, for example, we need to
+  // cherrypick a point fix).
+  string app_bundle_hash = 54;
+
   // The issuers configured by the backend.
   repeated string configured_issuers = 2;
 
@@ -156,6 +161,9 @@ message FrontendConfig {
 
   // Whether to stream invocation logs.
   bool invocation_log_streaming_enabled = 52;
+
+  // Enables fancy features for seeing recent flakes by target.
+  bool target_flakes_ui_enabled = 53;
 }
 
 message Region {

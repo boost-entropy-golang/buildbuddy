@@ -61,6 +61,7 @@ var (
 	orgAdminApiKeyCreationEnabled          = flag.Bool("app.org_admin_api_key_creation_enabled", false, "If set, SCIM API keys will be able to be created in the UI.")
 	readerWriterRolesEnabled               = flag.Bool("app.reader_writer_roles_enabled", false, "If set, Reader/Writer roles will be enabled in the user management UI.")
 	invocationLogStreamingEnabled          = flag.Bool("app.invocation_log_streaming_enabled", false, "If set, the UI will stream invocation logs instead of polling.")
+	targetFlakesUIEnabled                  = flag.Bool("app.target_flakes_ui_enabled", false, "If set, show some fancy new features for analyzing flakes.")
 
 	jsEntryPointPath = flag.String("js_entry_point_path", "/app/app_bundle/app.js?hash={APP_BUNDLE_HASH}", "Absolute URL path of the app JS entry point")
 	disableGA        = flag.Bool("disable_ga", false, "If true; ga will be disabled")
@@ -100,7 +101,7 @@ func NewStaticFileServer(env environment.Env, fs fs.FS, rootPaths []string, appB
 			env.GetHealthChecker().AddHealthCheck("app_static_file_server", &healthChecker{jsPath: jsPath})
 		}
 
-		handler = handleRootPaths(env, rootPaths, template, version.AppVersion(), jsPath, stylePath, handler)
+		handler = handleRootPaths(env, rootPaths, template, version.AppVersion(), jsPath, stylePath, appBundleHash, handler)
 	}
 	return &StaticFileServer{
 		handler: setCacheHeaders(handler),
@@ -112,7 +113,7 @@ func (s *StaticFileServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.handler.ServeHTTP(w, r)
 }
 
-func handleRootPaths(env environment.Env, rootPaths []string, template *template.Template, version, jsPath, stylePath string, h http.Handler) http.Handler {
+func handleRootPaths(env environment.Env, rootPaths []string, template *template.Template, version, jsPath, stylePath, appBundleHash string, h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		for _, rootPath := range rootPaths {
 			if strings.HasPrefix(r.URL.Path, rootPath) {
@@ -121,7 +122,7 @@ func handleRootPaths(env environment.Env, rootPaths []string, template *template
 		}
 
 		if r.URL.Path == "/" {
-			serveIndexTemplate(r.Context(), env, template, version, jsPath, stylePath, w)
+			serveIndexTemplate(r.Context(), env, template, version, jsPath, stylePath, appBundleHash, w)
 			return
 		}
 
@@ -129,7 +130,7 @@ func handleRootPaths(env environment.Env, rootPaths []string, template *template
 	})
 }
 
-// Set cache headers if a static file request hash a `hash` query parameter.
+// Set cache headers if a static file request has a `hash` query parameter.
 func setCacheHeaders(h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if (r.URL.Query().Get("hash")) != "" {
@@ -150,9 +151,10 @@ type FrontendTemplateData struct {
 	Config template.JS
 }
 
-func serveIndexTemplate(ctx context.Context, env environment.Env, tpl *template.Template, version, jsPath, stylePath string, w http.ResponseWriter) {
+func serveIndexTemplate(ctx context.Context, env environment.Env, tpl *template.Template, version, jsPath, stylePath, appBundleHash string, w http.ResponseWriter) {
 	config := cfgpb.FrontendConfig{
 		Version:                                version,
+		AppBundleHash:                          appBundleHash,
 		ConfiguredIssuers:                      env.GetAuthenticator().PublicIssuers(),
 		DefaultToDenseMode:                     *defaultToDenseMode,
 		GithubEnabled:                          github.IsLegacyOAuthAppEnabled(),
@@ -199,6 +201,7 @@ func serveIndexTemplate(ctx context.Context, env environment.Env, tpl *template.
 		OrgAdminApiKeyCreationEnabled:          *orgAdminApiKeyCreationEnabled,
 		ReaderWriterRolesEnabled:               *readerWriterRolesEnabled,
 		InvocationLogStreamingEnabled:          *invocationLogStreamingEnabled,
+		TargetFlakesUiEnabled:                  *targetFlakesUIEnabled && env.GetOLAPDBHandle() != nil,
 	}
 
 	configJSON, err := protojson.Marshal(&config)

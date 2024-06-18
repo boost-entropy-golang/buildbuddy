@@ -1564,9 +1564,9 @@ func (s *Store) SplitRange(ctx context.Context, req *rfpb.SplitRangeRequest) (*r
 		return nil, err
 	}
 	mrd := s.sender.GetMetaRangeDescriptor()
-	txn := rbuilder.NewTxn().AddStatement(leftRange.GetReplicas()[0], leftBatch)
-	txn = txn.AddStatement(newRightRange.GetReplicas()[0], rightBatch)
-	txn = txn.AddStatement(mrd.GetReplicas()[0], metaBatch)
+	txn := rbuilder.NewTxn().AddStatement(leftRange, leftBatch)
+	txn = txn.AddStatement(newRightRange, rightBatch)
+	txn = txn.AddStatement(mrd, metaBatch)
 	if err := s.txnCoordinator.RunTxn(ctx, txn); err != nil {
 		return nil, err
 	}
@@ -1707,7 +1707,6 @@ func (s *Store) AddReplica(ctx context.Context, req *rfpb.AddReplicaRequest) (*r
 
 	// Propose the config change (this adds the node as a non-voter to the raft cluster).
 	err = client.RunNodehostFn(ctx, func(ctx context.Context) error {
-		log.Info("called add non voting")
 		return s.nodeHost.SyncRequestAddNonVoting(ctx, shardID, newReplicaID, node.GetNhid(), configChangeID)
 	})
 	if err != nil {
@@ -2000,12 +1999,12 @@ func (s *Store) updateRangeDescriptor(ctx context.Context, shardID uint64, old, 
 	txn := rbuilder.NewTxn()
 	if newReplica.GetShardId() == metaReplica.GetShardId() {
 		localBatch.Add(metaRangeCasReq)
-		txn.AddStatement(newReplica, localBatch)
+		txn.AddStatement(mrd, localBatch)
 	} else {
 		metaRangeBatch := rbuilder.NewBatchBuilder()
 		metaRangeBatch.Add(metaRangeCasReq)
-		txn.AddStatement(newReplica, localBatch)
-		txn = txn.AddStatement(metaReplica, metaRangeBatch)
+		txn.AddStatement(new, localBatch)
+		txn = txn.AddStatement(mrd, metaRangeBatch)
 	}
 	return s.txnCoordinator.RunTxn(ctx, txn)
 }
