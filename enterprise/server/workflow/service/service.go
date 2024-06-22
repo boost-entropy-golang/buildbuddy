@@ -1148,18 +1148,6 @@ func (ws *workflowService) createActionForWorkflow(ctx context.Context, wf *tabl
 		timeout = *workflowAction.Timeout
 	}
 
-	mergeCommitSHA := ""
-	targetRepoURL := ""
-	targetBranch := ""
-	if wd.EventName == webhook_data.EventName.PullRequest {
-		targetRepoURL = wd.TargetRepoURL
-		targetBranch = wd.TargetBranch
-
-		if !workflowAction.Triggers.GetPullRequestTrigger().GetForceManualMerge() {
-			mergeCommitSHA = wd.MergeCommitSHA
-		}
-	}
-
 	// NOTE: By default, the executor is responsible for ensuring the
 	// buildbuddy_ci_runner binary exists at the workspace root when it sees
 	// the `workflow-id` platform property.
@@ -1189,6 +1177,12 @@ func (ws *workflowService) createActionForWorkflow(ctx context.Context, wf *tabl
 		}
 	}
 
+	yamlBytes, err := yaml.Marshal(workflowAction)
+	if err != nil {
+		return nil, err
+	}
+	serializedAction := base64.StdEncoding.EncodeToString(yamlBytes)
+
 	args := []string{
 		"./" + ci_runner_bundle.RunnerName,
 		"--invocation_id=" + invocationID,
@@ -1202,27 +1196,21 @@ func (ws *workflowService) createActionForWorkflow(ctx context.Context, wf *tabl
 		"--pushed_repo_url=" + wd.PushedRepoURL,
 		"--pushed_branch=" + wd.PushedBranch,
 		"--pull_request_number=" + fmt.Sprintf("%d", wd.PullRequestNumber),
-		"--target_repo_url=" + targetRepoURL,
-		"--target_branch=" + targetBranch,
-		"--merge_commit_sha=" + mergeCommitSHA,
+		"--target_repo_url=" + wd.TargetRepoURL,
+		"--target_branch=" + wd.TargetBranch,
 		"--visibility=" + visibility,
 		"--workflow_id=" + wf.WorkflowID,
 		"--trigger_event=" + wd.EventName,
 		"--bazel_command=" + ws.ciRunnerBazelCommand(),
 		"--debug=" + fmt.Sprintf("%v", ws.ciRunnerDebugMode()),
 		"--timeout=" + timeout.String(),
+		"--serialized_action=" + serializedAction,
 	}
 
 	// HACK: Kythe requires some special args, so if the name of this action
 	// indicates it's a Kythe action, add those args.
 	if workflowAction.Name == config.KytheActionName {
-		yamlBytes, err := yaml.Marshal(workflowAction)
-		if err != nil {
-			return nil, err
-		}
-		serializedAction := base64.StdEncoding.EncodeToString(yamlBytes)
 		args = append(args, "--bazel_startup_flags=--bazelrc=$KYTHE_DIR/extractors.bazelrc")
-		args = append(args, "--serialized_action="+serializedAction)
 		args = append(args, "--install_kythe=true")
 	}
 

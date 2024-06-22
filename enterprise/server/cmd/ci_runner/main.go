@@ -172,9 +172,8 @@ var (
 	gitFetchFilters = flag.Slice("git_fetch_filters", []string{}, "Filters to apply to `git fetch` commands.")
 	gitFetchDepth   = flag.Int("git_fetch_depth", smartFetchDepth, "Depth to use for `git fetch` commands.")
 	// Flags to configure merge-with-base behavior
-	targetRepoURL  = flag.String("target_repo_url", "", "If different from pushed_repo_url, indicates a fork (`pushed_repo_url`) is being merged into this repo.")
-	targetBranch   = flag.String("target_branch", "", "If different from pushed_branch, pushed_branch should be merged into this branch in the target repo.")
-	mergeCommitSHA = flag.String("merge_commit_sha", "", "If set and merge-with-base is enabled, checkout this commit sha directly instead of manually fetching the target repo and merging to generate it.")
+	targetRepoURL = flag.String("target_repo_url", "", "If different from pushed_repo_url, indicates a fork (`pushed_repo_url`) is being merged into this repo.")
+	targetBranch  = flag.String("target_branch", "", "If different from pushed_branch, pushed_branch should be merged into this branch in the target repo.")
 
 	shutdownAndExit = flag.Bool("shutdown_and_exit", false, "If set, runs bazel shutdown with the configured bazel_command, and exits. No other commands are run.")
 
@@ -183,6 +182,9 @@ var (
 	extraBazelArgs    = flag.String("extra_bazel_args", "", "Extra flags to pass to the bazel command. The value can include spaces and will be properly tokenized.")
 	debug             = flag.Bool("debug", false, "Print additional debug information in the action logs.")
 	installKythe      = flag.Bool("install_kythe", false, "If true, install kythe in the workspace root and set the KYTHE_DIR env var to the installed location")
+
+	ptyRows = flag.Int("pty_rows", 20, "Terminal height, in rows")
+	ptyCols = flag.Int("pty_cols", 114, "Terminal width, in columns")
 
 	// Test-only flags
 	fallbackToCleanCheckout = flag.Bool("fallback_to_clean_checkout", true, "Fallback to cloning the repo from scratch if sync fails (for testing purposes only).")
@@ -387,7 +389,7 @@ func (r *buildEventReporter) Start(startTime time.Time) error {
 		if err != nil {
 			return err
 		}
-		cmd = parsedArgs.cmd
+		cmd = fmt.Sprintf("remote %s", parsedArgs.cmd)
 		patterns = parsedArgs.patterns
 	}
 	startedEvent := &bespb.BuildEvent{
@@ -1782,9 +1784,6 @@ func (ws *workspace) sync(ctx context.Context) error {
 func (ws *workspace) shouldMergeBranches(actionTriggers *config.Triggers) bool {
 	return *triggerEvent == webhook_data.EventName.PullRequest &&
 		actionTriggers.GetPullRequestTrigger().GetMergeWithBase() &&
-		// If the merge commit SHA already exists, we don't need to re-merge the branches
-		// to generate it
-		*mergeCommitSHA == "" &&
 		ws.hasMultipleBranches()
 }
 
@@ -1800,12 +1799,6 @@ func (ws *workspace) fetchPushedRef(ctx context.Context) error {
 	// If fetch depth is explicitly set, respect it
 	if *gitFetchDepth != smartFetchDepth {
 		fetchDepth = *gitFetchDepth
-	}
-
-	// If the merge commit sha was pre-generated and passed as an argument,
-	// we should fetch it from the target repo.
-	if *mergeCommitSHA != "" {
-		return ws.fetch(ctx, *targetRepoURL, []string{*mergeCommitSHA}, fetchDepth)
 	}
 
 	refToFetch := *commitSHA
@@ -1851,10 +1844,6 @@ func (ws *workspace) checkoutRef(ctx context.Context) error {
 	checkoutRef := *commitSHA
 	if checkoutRef == "" {
 		checkoutRef = fmt.Sprintf("%s/%s", gitRemoteName(*pushedRepoURL), *pushedBranch)
-	}
-	if *mergeCommitSHA != "" {
-		checkoutRef = *mergeCommitSHA
-		writeCommandSummary(ws.log, fmt.Sprintf("Checking out merge commit sha %s...", checkoutRef))
 	}
 
 	if checkoutLocalBranchName != "" {
@@ -2151,7 +2140,8 @@ func runCommand(ctx context.Context, executable string, args []string, env map[s
 	if dir != "" {
 		cmd.Dir = dir
 	}
-	f, err := pty.Start(cmd)
+	size := &pty.Winsize{Rows: uint16(*ptyRows), Cols: uint16(*ptyCols)}
+	f, err := pty.StartWithSize(cmd, size)
 	if err != nil {
 		return err
 	}
@@ -2336,8 +2326,9 @@ func reclaimDiskSpace(ctx context.Context, log *buildEventReporter) error {
 		return nil
 	}
 	// Just print a few dirs for now so this doesn't take excessively long.
+	log.Printf("WARNING: high VM disk usage (%.2f%)", usage*100)
 	duArgs := []string{"--human-readable", "--max-depth=1", ".", filepath.Join("..", outputBaseDirName)}
-	if err = runCommand(ctx, "du", duArgs, nil /*=env*/, "" /*=dir*/, os.Stderr); err != nil {
+	if err = runCommand(ctx, "du", duArgs, nil /*=env*/, "" /*=dir*/, log); err != nil {
 		return fmt.Errorf("du: %w", err)
 	}
 
