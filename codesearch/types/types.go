@@ -62,12 +62,14 @@ type IndexReader interface {
 }
 
 type Scorer interface {
+	Skip() bool
 	Score(doc Document) float64
 }
 
 type HighlightedRegion interface {
 	FieldName() string
 	String() string
+	Line() int
 	CustomSnippet(linesBefore, linesAfter int) string
 }
 

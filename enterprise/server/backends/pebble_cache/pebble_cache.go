@@ -2547,7 +2547,9 @@ func (e *partitionEvictor) generateSamplesForEviction(quitChan chan struct{}) er
 	// We update the iter variable later on, so we need to wrap the Close call
 	// in a func to operate on the correct iterator instance.
 	defer func() {
-		iter.Close()
+		if iter != nil {
+			iter.Close()
+		}
 	}()
 
 	totalCount := 0
@@ -2593,7 +2595,9 @@ func (e *partitionEvictor) generateSamplesForEviction(quitChan chan struct{}) er
 			if err != nil {
 				return err
 			}
-			iter.Close()
+			if iter != nil {
+				iter.Close()
+			}
 			iter = newIter
 		}
 		totalCount += 1
@@ -2650,9 +2654,22 @@ func (e *partitionEvictor) generateSamplesForEviction(quitChan chan struct{}) er
 			case e.samples <- sample:
 			case <-quitChan:
 				return nil
+			default:
+				// e.samples is full. Let's close the iter first, so that zombie
+				// tables can be cleaned up by pebble.
+				iter.Close()
+				shouldCreateNewIter = true
+				iter = nil
+				select {
+				case e.samples <- sample:
+				case <-quitChan:
+					return nil
+				}
 			}
 		}
-		iter.Next()
+		if iter != nil {
+			iter.Next()
+		}
 		fileMetadata.ResetVT()
 	}
 }
@@ -3094,6 +3111,10 @@ func (p *PebbleCache) updatePebbleMetrics() error {
 	count, dur := p.eventListener.writeStallStats()
 	metrics.PebbleCacheWriteStallCount.With(nameLabel).Set(float64(count))
 	metrics.PebbleCacheWriteStallDurationUsec.With(nameLabel).Observe(float64(dur.Microseconds()))
+
+	// Zombie table metrics
+	metrics.PebbleCacheZombieTableCount.With(nameLabel).Set(float64(m.Table.ZombieCount))
+	metrics.PebbleCacheZombieTableSizeBytes.With(nameLabel).Set(float64(m.Table.ZombieSize))
 
 	p.oldMetrics = *m
 

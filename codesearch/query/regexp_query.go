@@ -54,6 +54,11 @@ type region struct {
 
 type reScorer struct {
 	fieldMatchers map[string]*regexp.Regexp
+	skip          bool
+}
+
+func (s *reScorer) Skip() bool {
+	return s.skip
 }
 
 func match(re *regexp.Regexp, buf []byte) []region {
@@ -128,6 +133,10 @@ func makeLine(line []byte, lineNumber int) string {
 	return fmt.Sprintf("%d: %s\n", lineNumber, line)
 }
 
+func (rm regionMatch) Line() int {
+	return rm.region.lineNumber
+}
+
 func (rm regionMatch) CustomSnippet(linesBefore, linesAfter int) string {
 	lineNumber := rm.region.lineNumber
 	snippetText := ""
@@ -165,6 +174,21 @@ func (h *reHighlighter) Highlight(doc types.Document) []types.HighlightedRegion 
 			}))
 		}
 	}
+
+	// HACK: if there are no matching regions, add a fake one that matches
+	// the first line of the file. This way filter-only queries will be able
+	// to display a highlighted region.
+	if len(results) == 0 && h.fieldMatchers[contentField] == nil {
+		field := doc.Field(contentField)
+		results = append(results, types.HighlightedRegion(regionMatch{
+			field: field,
+			region: region{
+				lineNumber:  1,
+				startOffset: 0,
+				endOffset:   0,
+			},
+		}))
+	}
 	return results
 }
 
@@ -177,7 +201,7 @@ type ReQuery struct {
 }
 
 func NewReQuery(q string, numResults int) (*ReQuery, error) {
-	subLog := log.NamedSubLogger("searcher")
+	subLog := log.NamedSubLogger("regexp-query")
 	subLog.Infof("raw query: [%s]", q)
 
 	// A list of s-expression strings that must be satisfied by the query.
@@ -296,7 +320,10 @@ func (req *ReQuery) NumResults() int {
 }
 
 func (req *ReQuery) GetScorer() types.Scorer {
-	return &reScorer{req.fieldMatchers}
+	return &reScorer{
+		fieldMatchers: req.fieldMatchers,
+		skip:          len(req.fieldMatchers) == 0,
+	}
 }
 
 func (req *ReQuery) GetHighlighter() types.Highlighter {

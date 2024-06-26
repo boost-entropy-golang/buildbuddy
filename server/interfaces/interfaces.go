@@ -49,6 +49,7 @@ import (
 	telpb "github.com/buildbuddy-io/buildbuddy/proto/telemetry"
 	usagepb "github.com/buildbuddy-io/buildbuddy/proto/usage"
 	wfpb "github.com/buildbuddy-io/buildbuddy/proto/workflow"
+	wspb "github.com/buildbuddy-io/buildbuddy/proto/workspace"
 	zipb "github.com/buildbuddy-io/buildbuddy/proto/zip"
 	dto "github.com/prometheus/client_model/go"
 
@@ -611,6 +612,13 @@ type WorkflowService interface {
 	InvalidateAllSnapshotsForRepo(ctx context.Context, repoURL string) error
 }
 
+type WorkspaceService interface {
+	GetWorkspace(ctx context.Context, req *wspb.GetWorkspaceRequest) (*wspb.GetWorkspaceResponse, error)
+	SaveWorkspace(ctx context.Context, req *wspb.SaveWorkspaceRequest) (*wspb.SaveWorkspaceResponse, error)
+	GetWorkspaceDirectory(ctx context.Context, req *wspb.GetWorkspaceDirectoryRequest) (*wspb.GetWorkspaceDirectoryResponse, error)
+	GetWorkspaceFile(ctx context.Context, req *wspb.GetWorkspaceFileRequest) (*wspb.GetWorkspaceFileResponse, error)
+}
+
 type SnapshotService interface {
 	InvalidateSnapshot(ctx context.Context, key *fcpb.SnapshotKey) (string, error)
 }
@@ -706,8 +714,10 @@ type GitProvider interface {
 	// UnregisterWebhook unregisters the webhook with the given ID from the repo.
 	UnregisterWebhook(ctx context.Context, accessToken, repoURL, webhookID string) error
 
-	// GetFileContents fetches a single file's contents from the repo. It returns
-	// status.NotFoundError if the file does not exist.
+	// GetFileContents fetches a single file's contents from the repo. It should
+	// return status.NotFoundError if the file does not exist. It should NOT
+	// return status.NotFoundError in any other case, particularly if the repo
+	// doesn't exist or is inaccessible.
 	GetFileContents(ctx context.Context, accessToken, repoURL, filePath, ref string) ([]byte, error)
 
 	// IsTrusted returns whether the given user is a trusted collaborator on the
