@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/binary"
+	"errors"
 	"flag"
 	"fmt"
 	"net"
@@ -264,13 +265,13 @@ func NewWithArgs(env environment.Env, rootDir string, nodeHost *dragonboat.NodeH
 	logSize := len(nodeHostInfo.LogInfo)
 	for i, logInfo := range nodeHostInfo.LogInfo {
 		if nodeHost.HasNodeInfo(logInfo.ShardID, logInfo.ReplicaID) {
-			s.log.Infof("Had info for cluster: %d, node: %d. (%d/%d)", logInfo.ShardID, logInfo.ReplicaID, i+1, logSize)
+			s.log.Infof("Had info for c%dn%d. (%d/%d)", logInfo.ShardID, logInfo.ReplicaID, i+1, logSize)
 			r := raftConfig.GetRaftConfig(logInfo.ShardID, logInfo.ReplicaID)
 			if err := nodeHost.StartOnDiskReplica(nil, false /*=join*/, s.ReplicaFactoryFn, r); err != nil {
 				return nil, status.InternalErrorf("failed to start c%dn%d: %s", logInfo.ShardID, logInfo.ReplicaID, err)
 			}
 			s.configuredClusters++
-			s.log.Infof("Recreated cluster: %d, node: %d.", logInfo.ShardID, logInfo.ReplicaID)
+			s.log.Infof("Recreated c%dn%d.", logInfo.ShardID, logInfo.ReplicaID)
 		}
 	}
 
@@ -913,7 +914,7 @@ func (s *Store) syncRequestDeleteReplica(ctx context.Context, shardID, replicaID
 		return err
 	})
 	if err != nil {
-		return status.InternalErrorf("faile dot request delete replica for c%dn%d: %s", shardID, replicaID, err)
+		return status.InternalErrorf("failed to request delete replica for c%dn%d: %s", shardID, replicaID, err)
 	}
 	return nil
 }
@@ -1050,6 +1051,7 @@ const (
 	membershipStatusUnknown membershipStatus = iota
 	membershipStatusMember
 	membershipStatusNotMember
+	membershipStatusShardNotFound
 )
 
 // checkMembershipStatus checks the status of the membership given the shard info.
@@ -1061,6 +1063,9 @@ func (s *Store) checkMembershipStatus(ctx context.Context, shardInfo dragonboat.
 	// Get the config change index for this shard.
 	membership, err := s.getMembership(ctx, shardInfo.ShardID)
 	if err != nil {
+		if errors.Is(err, dragonboat.ErrShardNotFound) {
+			return membershipStatusShardNotFound
+		}
 		s.log.Errorf("checkMembershipStatus failed to get membership for shard %d: %s", shardInfo.ShardID, err)
 		return membershipStatusUnknown
 	}
@@ -1092,6 +1097,10 @@ func (s *Store) isZombieNode(ctx context.Context, shardInfo dragonboat.ShardInfo
 	membershipStatus := s.checkMembershipStatus(ctx, shardInfo)
 	if membershipStatus == membershipStatusNotMember {
 		return true
+	}
+	if membershipStatus == membershipStatusShardNotFound {
+		// The shard was already deleted.
+		return false
 	}
 
 	rd := s.lookupRange(shardInfo.ShardID)
@@ -1249,7 +1258,7 @@ func (s *Store) processSplitRequests(ctx context.Context) {
 				Range:  rd,
 			}
 			if rsp, err := s.SplitRange(ctx, splitReq); err != nil {
-				s.log.Errorf("Error splitting range: %s", err)
+				s.log.Errorf("Error splitting range, request: %+v: %s", splitReq, err)
 			} else {
 				s.log.Infof("Successfully split range: %+v", rsp)
 			}

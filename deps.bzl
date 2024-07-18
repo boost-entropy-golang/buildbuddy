@@ -9,7 +9,7 @@ PODMAN_VERSION = "v4.9.4"
 PODMAN_STATIC_SHA256_AMD64 = "ac14152d2ef5cb25abbd615893cd56355f951f075a7ae663f0b2c1bc5d3fb77e"
 PODMAN_STATIC_SHA256_ARM64 = "72ab4a9c6ae9d5d00200070cb43b0921117898925a284bfacbfb3873aa82e598"
 
-# bazelisk run //:gazelle -- update-repos -from_file=go.mod -to_macro=deps.bzl%install_go_mod_dependencies
+# bazelisk run //:gazelle -- update-repos -from_file=go.mod -to_macro=deps.bzl%install_go_mod_dependencies -prune
 def install_go_mod_dependencies(workspace_name = "buildbuddy"):
     go_repository(
         name = "cat_dario_mergo",
@@ -6822,10 +6822,11 @@ def install_static_dependencies(workspace_name = "buildbuddy"):
             'package(default_visibility = ["//visibility:public"])',
             'filegroup(name = "firecracker", srcs = ["release-{release}/firecracker-{release}"])',
             'filegroup(name = "jailer", srcs = ["release-{release}/jailer-{release}"])',
-        ]).format(release = "v1.7.0-x86_64"),
-        sha256 = "55bd3e6d599fdd108e36e52f9aee2319f06c18a90f2fa49b64e93fdf06f5ff53",
-        urls = ["https://github.com/firecracker-microvm/firecracker/releases/download/v1.7.0/firecracker-v1.7.0-x86_64.tgz"],
+        ]).format(release = "v1.8.0-x86_64"),
+        sha256 = "bc899bdaef8d0aa7b0fafbf49a2bf647e0298558f4faee44970d87a1c6d1ae2d",
+        urls = ["https://github.com/firecracker-microvm/firecracker/releases/download/v1.8.0/firecracker-v1.8.0-x86_64.tgz"],
     )
+
     http_archive(
         name = "com_github_containerd_stargz_snapshotter-v0.11.4-linux-amd64",
         build_file_content = 'exports_files(["stargz-store"])',
