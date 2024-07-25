@@ -1379,8 +1379,6 @@ func getBootArgs(vmConfig *fcpb.VMConfiguration) string {
 		//  https://github.com/buildbuddy-io/buildbuddy-internal/issues/3255):
 		// remove this workaround.
 		"lapic=notscdeadline",
-		// TODO: Remove this when the underlying issue is fixed (https://github.com/buildbuddy-io/buildbuddy-internal/issues/3620)
-		"acpi=off",
 	}
 	if vmConfig.EnableNetworking {
 		kernelArgs = append(kernelArgs, machineIPBootArgs)
@@ -1710,11 +1708,14 @@ func (c *FirecrackerContainer) setupNetworking(ctx context.Context) error {
 	if err := networking.BringUpTapInNamespace(ctx, c.id, tapDeviceName); err != nil {
 		return err
 	}
-	cleanupVethPair, err := networking.SetupVethPair(ctx, c.id, vmIP, c.vmIdx)
+	vethPair, err := networking.SetupVethPair(ctx, c.id)
 	if err != nil {
 		return err
 	}
-	c.cleanupVethPair = cleanupVethPair
+	c.cleanupVethPair = vethPair.Cleanup
+	if err := networking.ConfigureNATForTapInNamespace(ctx, vethPair, vmIP); err != nil {
+		return err
+	}
 	return nil
 }
 
