@@ -354,9 +354,7 @@ func (c *ociContainer) Exec(ctx context.Context, cmd *repb.Command, stdio *inter
 	args = append(args, c.cid)
 
 	return c.doWithStatsTracking(ctx, func(ctx context.Context) *interfaces.CommandResult {
-		// TODO: Should we specify a non-zero waitDelay so that a process that
-		// spawns children won't block forever?
-		return c.invokeRuntime(ctx, cmd, stdio, 0, args...)
+		return c.invokeRuntime(ctx, cmd, stdio, 1*time.Microsecond, args...)
 	})
 }
 
@@ -588,13 +586,12 @@ func (c *ociContainer) createSpec(cmd *repb.Command) (*specs.Spec, error) {
 				Source:      filepath.Join(c.bundlePath(), "hosts"),
 				Options:     []string{"bind", "rprivate"},
 			},
-			// TODO: shm
-			// {
-			// 		Destination: "/dev/shm",
-			// 		Type:        "bind",
-			// 		Source:      "/run/containers/storage/overlay-containers/99133d16f4f9d0678f87972c01209e308ebafc074f333822805a633620f12507/userdata/shm",
-			// 		Options:     []string{"bind", "rprivate", "nosuid", "noexec", "nodev"},
-			// },
+			{
+				Destination: "/dev/shm",
+				Type:        "tmpfs",
+				Source:      "tmpfs",
+				Options:     []string{"rw", "nosuid", "nodev", "noexec", "relatime", "size=64000k", "inode64"},
+			},
 			// TODO: .containerenv
 			// {
 			// 		Destination: "/run/.containerenv",

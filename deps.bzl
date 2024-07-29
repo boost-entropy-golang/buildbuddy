@@ -6936,8 +6936,8 @@ def install_static_dependencies(workspace_name = "buildbuddy"):
     )
     http_file(
         name = "org_kernel_git_linux_kernel-vmlinux",
-        sha256 = "1b45787fd153c42ed1e64c6ea0f3b6526dd81a31a37a7118f18834be0c08ae6e",
-        urls = ["https://storage.googleapis.com/buildbuddy-tools/binaries/linux/vmlinux-v5.15-1b45787fd153c42ed1e64c6ea0f3b6526dd81a31a37a7118f18834be0c08ae6e"],
+        sha256 = "3fd19c602f2b11969ad563d4d4855c9147cf13c34238537c1e434097a11aa6b7",
+        urls = ["https://storage.googleapis.com/buildbuddy-tools/binaries/linux/vmlinux-v5.15-3fd19c602f2b11969ad563d4d4855c9147cf13c34238537c1e434097a11aa6b7"],
         executable = True,
     )
 
@@ -6973,5 +6973,21 @@ def install_static_dependencies(workspace_name = "buildbuddy"):
         urls = ["https://github.com/containers/crun/releases/download/1.15/crun-1.15-linux-arm64-disable-systemd"],
         sha256 = "1bd840c95e9ae8edc25654dcf2481309724b9ff18ce95dbcd2535da9b026a47d",
         downloaded_file_path = "crun",
+        executable = True,
+    )
+
+    # busybox static builds (see tools/build_busybox.sh)
+    http_file(
+        name = "net_busybox_busybox-linux-amd64",
+        urls = ["https://storage.googleapis.com/buildbuddy-tools/binaries/busybox/busybox-1.36.1_linux-amd64"],
+        sha256 = "f1c20582a7efb70382d63ec71fbeb6f422d7338592ff28ffe0bdff55c839a94c",
+        downloaded_file_path = "busybox",
+        executable = True,
+    )
+    http_file(
+        name = "net_busybox_busybox-linux-arm64",
+        urls = ["https://storage.googleapis.com/buildbuddy-tools/binaries/busybox/busybox-1.36.1_linux-arm64"],
+        sha256 = "19601547c937e9636f64ae2dbd7d2d318dc5bbd58f7d5624bfa452f22cfe33d1",
+        downloaded_file_path = "busybox",
         executable = True,
     )
