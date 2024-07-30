@@ -25,6 +25,7 @@ go_library(
         "//server/util/disk",
         "//server/util/hash",
         "//server/util/log",
+        "//server/util/networking",
         "//server/util/status",
         "@com_github_google_go_containerregistry//pkg/v1:pkg",
         "@com_github_opencontainers_runtime_spec//specs-go",
@@ -43,13 +44,18 @@ go_test(
     ],
     exec_properties = {
         "test.workload-isolation-type": "firecracker",
+        "test.container-image": "docker://gcr.io/flame-public/net-tools@sha256:ac701954d2c522d0d2b5296323127cacaaf77627e69db848a8d6ecb53149d344",
         "test.EstimatedComputeUnits": "2",
     },
-    shard_count = 2,
     tags = [
         "no-sandbox",
     ],
-    target_compatible_with = ["@platforms//os:linux"],
+    target_compatible_with = [
+        "@platforms//os:linux",
+        # TODO: GitHub Actions arm runners are running into cgroup-related issues;
+        # fix and re-enable on arm64.
+        "@platforms//cpu:x86_64",
+    ],
     x_defs = {
         "crunRlocationpath": "$(rlocationpath :crun)",
         "busyboxRlocationpath": "$(rlocationpath :busybox)",
@@ -63,6 +69,7 @@ go_test(
         "//server/interfaces",
         "//server/testutil/testenv",
         "//server/testutil/testfs",
+        "//server/testutil/testnetworking",
         "//server/util/testing/flags",
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",

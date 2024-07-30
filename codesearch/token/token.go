@@ -2,71 +2,18 @@ package token
 
 import (
 	"bufio"
+	"bytes"
 	"fmt"
 	"hash"
 	"hash/fnv"
 	"io"
 	"strings"
+	"unicode"
 
+	"github.com/buildbuddy-io/buildbuddy/codesearch/sparse"
 	"github.com/buildbuddy-io/buildbuddy/codesearch/types"
 	"github.com/buildbuddy-io/buildbuddy/server/util/status"
 )
-
-type Set struct {
-	dense  []uint32
-	sparse []uint32
-}
-
-// This is sparse.Set from:
-// https://github.com/google/codesearch/blob/master/sparse/set.go
-//
-// NewSet returns a new Set with a given maximum size.
-// The set can contain numbers in [0, max-1].
-func NewSet(max uint32) *Set {
-	return &Set{
-		sparse: make([]uint32, max),
-	}
-}
-
-// Init initializes a Set to have a given maximum size.
-// The set can contain numbers in [0, max-1].
-func (s *Set) Init(max uint32) {
-	s.sparse = make([]uint32, max)
-}
-
-// Reset clears (empties) the set.
-func (s *Set) Reset() {
-	s.dense = s.dense[:0]
-}
-
-// Add adds x to the set if it is not already there.
-func (s *Set) Add(x uint32) {
-	v := s.sparse[x]
-	if v < uint32(len(s.dense)) && s.dense[v] == x {
-		return
-	}
-	n := len(s.dense)
-	s.sparse[x] = uint32(n)
-	s.dense = append(s.dense, x)
-}
-
-// Has reports whether x is in the set.
-func (s *Set) Has(x uint32) bool {
-	v := s.sparse[x]
-	return v < uint32(len(s.dense)) && s.dense[v] == x
-}
-
-// Dense returns the values in the set.
-// The values are listed in the order in which they
-// were inserted.
-func (s *Set) Dense() []uint32 {
-	return s.dense
-}
-
-// Len returns the number of values in the set.
-func (s *Set) Len() int {
-	return len(s.dense)
-}
 
 type byteToken struct {
 	fieldType types.FieldType
@@ -113,7 +60,7 @@ func trigramToBytes(tv uint32) []byte {
 type TrigramTokenizer struct {
 	r io.ByteReader
 
-	trigrams *Set
+	trigrams *sparse.Set
 	buf      []byte
 
 	n  uint64
@@ -122,7 +69,7 @@ type TrigramTokenizer struct {
 
 func NewTrigramTokenizer() *TrigramTokenizer {
 	return &TrigramTokenizer{
-		trigrams: NewSet(1 << 24),
+		trigrams: sparse.NewSet(1 << 24),
 		buf:      make([]byte, 16384),
 	}
 }
@@ -139,16 +86,24 @@ func (tt *TrigramTokenizer) Reset(r io.Reader) {
 	tt.tv = 0
 }
 
-func (tt *TrigramTokenizer) Next() (types.Token, error) {
+func (tt *TrigramTokenizer) Type() types.FieldType {
+	return types.TrigramField
+}
+func (tt *TrigramTokenizer) Ngram() []byte {
+	return trigramToBytes(tt.tv)
+}
+
+func (tt *TrigramTokenizer) Next() error {
 	for {
-		c, err := tt.r.ReadByte()
+		b, err := tt.r.ReadByte()
 		if err != nil {
-			return nil, err
+			return err
 		}
+		c := unicode.ToLower(rune(b)) // lowercase
 		tt.tv = (tt.tv << 8) & (1<<24 - 1)
 		tt.tv |= uint32(c)
 		if !validUTF8((tt.tv>>8)&0xFF, tt.tv&0xFF) {
-			return nil, status.FailedPreconditionError("invalid utf8")
+			return status.FailedPreconditionError("invalid utf8")
 		}
 		if tt.n++; tt.n < 3 {
 			continue
@@ -157,7 +112,7 @@ func (tt *TrigramTokenizer) Next() (types.Token, error) {
 		alreadySeen := tt.trigrams.Has(tt.tv)
 		if !alreadySeen && tt.tv != 1<<24-1 {
 			tt.trigrams.Add(tt.tv)
-			return newByteToken(types.TrigramField, trigramToBytes(tt.tv)), nil
+			return nil
 		}
 	}
 }
@@ -166,7 +121,8 @@ type WhitespaceTokenizer struct {
 	r io.ByteReader
 	n uint64
 
-	sb *strings.Builder
+	sb  *strings.Builder
+	tok string
 }
 
 func NewWhitespaceTokenizer() *WhitespaceTokenizer {
@@ -183,31 +139,41 @@ func (wt *WhitespaceTokenizer) Reset(r io.Reader) {
 	}
 	wt.sb.Reset()
 	wt.n = 0
+	wt.tok = ""
 }
 
-func (wt *WhitespaceTokenizer) Next() (types.Token, error) {
-	currentToken := func() types.Token {
-		ngram := []byte(wt.sb.String())
+func (wt *WhitespaceTokenizer) Type() types.FieldType {
+	return types.StringTokenField
+}
+func (wt *WhitespaceTokenizer) Ngram() []byte {
+	return []byte(wt.tok)
+}
+
+func (wt *WhitespaceTokenizer) Next() error {
+	currentToken := func() string {
+		ngram := wt.sb.String()
 		wt.sb.Reset()
-		return newByteToken(types.TrigramField, ngram)
+		return ngram
 	}
 
 	for {
-		c, err := wt.r.ReadByte()
+		b, err := wt.r.ReadByte()
 		if err != nil {
 			if wt.sb.Len() > 0 {
-				return currentToken(), nil
+				wt.tok = currentToken()
+				return nil
 			}
-			return nil, err
+			return err
 		}
+		c := byte(unicode.ToLower(rune(b)))
 		if c != ' ' {
 			wt.sb.WriteByte(c)
 			wt.n++
 		} else {
 			if wt.sb.Len() > 0 {
-				tok := currentToken()
+				wt.tok = currentToken()
 				wt.n++
-				return tok, nil
+				return nil
 			}
 			wt.n++
 		}
@@ -228,6 +194,12 @@ type hashAndPosition struct {
 	pos  int
 }
 
+// maxNgramLength controls how long of ngrams will be emitted by BuildAllNgrams
+// and BuildCoveringNgrams. Increasing this value will result in indexing more
+// ngrams and a bigger index size, but will allow for more selectivity at query
+// time.
+const maxNgramLength = 10
+
 func BuildAllNgrams(s []byte) []string {
 	rv := make([]string, 0)
 
@@ -240,8 +212,9 @@ func BuildAllNgrams(s []byte) []string {
 		for len(st) > 0 && p.hash > st[len(st)-1].hash {
 			start := st[len(st)-1].pos
 			count := i + 2 - start
-			rv = append(rv, string(s[start:start+count]))
-
+			if count <= maxNgramLength {
+				rv = append(rv, string(s[start:start+count]))
+			}
 			for len(st) > 1 && st[len(st)-1].hash == st[len(st)-2].hash {
 				st = st[:len(st)-1]
 			}
@@ -250,7 +223,9 @@ func BuildAllNgrams(s []byte) []string {
 		if len(st) != 0 {
 			start := st[len(st)-1].pos
 			count := i + 2 - start
-			rv = append(rv, string(s[start:start+count]))
+			if count <= maxNgramLength {
+				rv = append(rv, string(s[start:start+count]))
+			}
 		}
 		st = append(st, p)
 	}
@@ -258,7 +233,6 @@ func BuildAllNgrams(s []byte) []string {
 }
 
 func BuildCoveringNgrams(s []byte) []string {
-	const maxNgramLength = 16
 	rv := make([]string, 0)
 
 	st := make([]hashAndPosition, 0)
@@ -307,13 +281,14 @@ func BuildCoveringNgrams(s []byte) []string {
 type SparseNgramTokenizer struct {
 	scanner *bufio.Scanner
 	ngrams  []string
-	seen    *Set
+	seen    *sparse.Set
 	hasher  hash.Hash32
+	ngram   string
 }
 
 func NewSparseNgramTokenizer() *SparseNgramTokenizer {
 	return &SparseNgramTokenizer{
-		seen:   NewSet(1<<32 - 1),
+		seen:   sparse.NewSet(1<<32 - 1),
 		ngrams: make([]string, 0),
 		hasher: fnv.New32(),
 	}
@@ -323,31 +298,40 @@ func (tt *SparseNgramTokenizer) Reset(r io.Reader) {
 	tt.scanner = bufio.NewScanner(r)
 	tt.ngrams = tt.ngrams[:0]
 	tt.seen.Reset()
+	tt.ngram = ""
 }
 
-func (tt *SparseNgramTokenizer) Next() (types.Token, error) {
+func (tt *SparseNgramTokenizer) Type() types.FieldType {
+	return types.SparseNgramField
+}
+func (tt *SparseNgramTokenizer) Ngram() []byte {
+	return []byte(tt.ngram)
+}
+
+func (tt *SparseNgramTokenizer) Next() error {
 	for len(tt.ngrams) == 0 {
 		if !tt.scanner.Scan() {
-			return nil, io.EOF
+			return io.EOF
 		}
 		if err := tt.scanner.Err(); err != nil {
-			return nil, err
+			return err
 		}
-		line := tt.scanner.Text()
-		if len(line) > 0 {
-			for _, ngram := range BuildAllNgrams([]byte(line)) {
-				ngram = strings.ToLower(ngram)
-				tt.hasher.Reset()
-				tt.hasher.Write([]byte(ngram))
-				ngramID := tt.hasher.Sum32()
-				if alreadySeen := tt.seen.Has(ngramID); !alreadySeen {
-					tt.ngrams = append(tt.ngrams, ngram)
-					tt.seen.Add(ngramID)
-				}
+		line := bytes.ToLower(tt.scanner.Bytes())
+		if len(line) == 0 {
+			continue
+		}
+
+		for _, ngram := range BuildAllNgrams(line) {
+			tt.hasher.Reset()
+			tt.hasher.Write([]byte(ngram))
+			ngramID := tt.hasher.Sum32()
+			if alreadySeen := tt.seen.Has(ngramID); !alreadySeen {
+				tt.ngrams = append(tt.ngrams, ngram)
+				tt.seen.Add(ngramID)
 			}
 		}
 	}
-	ngram := tt.ngrams[len(tt.ngrams)-1]
+	tt.ngram = tt.ngrams[len(tt.ngrams)-1]
 	tt.ngrams = tt.ngrams[:len(tt.ngrams)-1]
-	return newByteToken(types.SparseNgramField, []byte(ngram)), nil
+	return nil
 }

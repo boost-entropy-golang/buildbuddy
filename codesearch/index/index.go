@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"runtime"
 	"slices"
+	"sort"
 	"strconv"
 	"sync"
 	"time"
@@ -160,6 +161,8 @@ func (w *Writer) AddDocument(doc types.Document) error {
 		// created for this field type then make it.
 		if _, ok := w.tokenizers[field.Type()]; !ok {
 			switch field.Type() {
+			case types.SparseNgramField:
+				w.tokenizers[field.Type()] = token.NewSparseNgramTokenizer()
 			case types.TrigramField:
 				w.tokenizers[field.Type()] = token.NewTrigramTokenizer()
 			case types.StringTokenField:
@@ -171,12 +174,8 @@ func (w *Writer) AddDocument(doc types.Document) error {
 		tokenizer := w.tokenizers[field.Type()]
 		tokenizer.Reset(bytes.NewReader(field.Contents()))
 
-		for {
-			tok, err := tokenizer.Next()
-			if err != nil {
-				break
-			}
-			ngram := string(tok.Ngram())
+		for tokenizer.Next() == nil {
+			ngram := string(tokenizer.Ngram())
 			postingLists[ngram] = append(postingLists[ngram], doc.ID())
 		}
 
@@ -231,7 +230,11 @@ func (w *Writer) Flush() error {
 		}
 		return nil
 	}
-	for fieldName, postingLists := range w.fieldPostingLists {
+	fieldNames := maps.Keys(w.fieldPostingLists)
+	sort.Strings(fieldNames)
+	for _, fieldName := range fieldNames {
+		postingLists := w.fieldPostingLists[fieldName]
+		log.Printf("field: %q had %d ngrams", fieldName, len(postingLists))
 		for ngram, docIDs := range postingLists {
 			ngram := ngram
 			fieldName := fieldName

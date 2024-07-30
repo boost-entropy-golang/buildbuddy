@@ -30,6 +30,7 @@ import (
 	"github.com/buildbuddy-io/buildbuddy/server/util/disk"
 	"github.com/buildbuddy-io/buildbuddy/server/util/hash"
 	"github.com/buildbuddy-io/buildbuddy/server/util/log"
+	"github.com/buildbuddy-io/buildbuddy/server/util/networking"
 	"github.com/buildbuddy-io/buildbuddy/server/util/status"
 	"golang.org/x/sync/errgroup"
 	"golang.org/x/sync/singleflight"
@@ -43,6 +44,8 @@ import (
 var (
 	Runtime     = flag.String("executor.oci.runtime", "", "OCI runtime")
 	runtimeRoot = flag.String("executor.oci.runtime_root", "", "Root directory for storage of container state (see <runtime> --help for default)")
+	pidsLimit   = flag.Int64("executor.oci.pids_limit", 2048, "PID limit for OCI runtime. Set to -1 for unlimited PIDs.")
+	dns         = flag.String("executor.oci.dns", "8.8.8.8", "Specifies a custom DNS server for use inside OCI containers. If set to the empty string, mount /etc/resolv.conf from the host.")
 )
 
 const (
@@ -73,15 +76,12 @@ var (
 	// Allowed capabilities.
 	// TODO: allow customizing this (for self-hosted executors).
 	capabilities = []string{
-		"CAP_AUDIT_WRITE",
 		"CAP_CHOWN",
 		"CAP_DAC_OVERRIDE",
 		"CAP_FOWNER",
 		"CAP_FSETID",
 		"CAP_KILL",
-		"CAP_MKNOD",
 		"CAP_NET_BIND_SERVICE",
-		"CAP_NET_RAW",
 		"CAP_SETFCAP",
 		"CAP_SETGID",
 		"CAP_SETPCAP",
@@ -93,6 +93,7 @@ var (
 	// These can be overridden either by the image or the command.
 	baseEnv = []string{
 		"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+		"HOSTNAME=localhost",
 	}
 )
 
@@ -122,6 +123,11 @@ type provider struct {
 }
 
 func NewProvider(env environment.Env, buildRoot string) (*provider, error) {
+	// Enable masquerading on the host if it isn't enabled already.
+	if err := networking.EnableMasquerading(env.GetServerContext()); err != nil {
+		return nil, status.WrapError(err, "enable masquerading")
+	}
+
 	// Try to find a usable runtime if the runtime flag is not explicitly set.
 	rt := *Runtime
 	if rt == "" {
@@ -164,7 +170,9 @@ func (p *provider) New(ctx context.Context, args *container.Init) (container.Com
 		cgroupPaths:    p.cgroupPaths,
 		layersRoot:     p.layersRoot,
 		imageStore:     p.imageStore,
+
 		imageRef:       args.Props.ContainerImage,
+		networkEnabled: args.Props.DockerNetwork != "off",
 	}, nil
 }
 
@@ -177,12 +185,14 @@ type ociContainer struct {
 	layersRoot     string
 	imageStore     *ImageStore
 
-	cid     string
-	workDir string
-	stats   container.UsageStats
-
-	imageRef         string
+	cid              string
+	workDir          string
 	overlayfsMounted bool
+	stats            container.UsageStats
+	network          *networking.ContainerNetwork
+
+	imageRef       string
+	networkEnabled bool
 }
 
 // Returns the OCI bundle directory for the container.
@@ -206,8 +216,13 @@ func (c *ociContainer) configPath() string {
 	return filepath.Join(c.bundlePath(), "config.json")
 }
 
-func (c *ociContainer) hostname() string {
-	return c.cid
+// containerName returns the container short-name.
+func (c *ociContainer) containerName() string {
+	const cidPrefixLen = 12
+	if len(c.cid) <= cidPrefixLen {
+		return c.cid
+	}
+	return c.cid[:cidPrefixLen]
 }
 
 // createBundle creates the OCI bundle directory, which includes the OCI spec
@@ -219,12 +234,18 @@ func (c *ociContainer) createBundle(ctx context.Context, cmd *repb.Command) erro
 	}
 
 	hostnamePath := filepath.Join(c.bundlePath(), "hostname")
-	if err := os.WriteFile(hostnamePath, []byte(c.hostname()), 0644); err != nil {
+	if err := os.WriteFile(hostnamePath, []byte("localhost"), 0644); err != nil {
 		return fmt.Errorf("write %s: %w", hostnamePath, err)
 	}
 	// TODO: append 'hosts.container.internal' and <cid> host to match podman?
 	if err := os.WriteFile(filepath.Join(c.bundlePath(), "hosts"), hostsFile, 0644); err != nil {
 		return fmt.Errorf("write hosts file: %w", err)
+	}
+	if *dns != "" {
+		dnsLine := "nameserver " + *dns + "\n"
+		if err := os.WriteFile(filepath.Join(c.bundlePath(), "resolv.conf"), []byte(dnsLine), 0644); err != nil {
+			return fmt.Errorf("write resolv.conf file: %w", err)
+		}
 	}
 
 	// Create rootfs
@@ -286,6 +307,9 @@ func (c *ociContainer) Run(ctx context.Context, cmd *repb.Command, workDir strin
 	if err := container.PullImageIfNecessary(ctx, c.env, c, creds, c.imageRef); err != nil {
 		return commandutil.ErrorResult(status.UnavailableErrorf("pull image: %s", err))
 	}
+	if err := c.createNetwork(ctx); err != nil {
+		return commandutil.ErrorResult(status.UnavailableErrorf("create network: %s", err))
+	}
 	if err := c.createBundle(ctx, cmd); err != nil {
 		return commandutil.ErrorResult(status.UnavailableErrorf("create OCI bundle: %s", err))
 	}
@@ -303,6 +327,9 @@ func (c *ociContainer) Create(ctx context.Context, workDir string) error {
 	}
 	c.cid = cid
 
+	if err := c.createNetwork(ctx); err != nil {
+		return status.UnavailableErrorf("create network: %s", err)
+	}
 	pid1 := &repb.Command{Arguments: []string{"sleep", "999999999999"}}
 	// Provision bundle directory (OCI config JSON, rootfs, etc.)
 	if err := c.createBundle(ctx, pid1); err != nil {
@@ -330,8 +357,14 @@ func (c *ociContainer) Create(ctx context.Context, workDir string) error {
 }
 
 func (c *ociContainer) Exec(ctx context.Context, cmd *repb.Command, stdio *interfaces.Stdio) *interfaces.CommandResult {
-	// Reset CPU usage and peak memory since we're starting a new task.
-	c.stats.Reset()
+	// Set the baseline for stats to ensure that we only report the usage
+	// incurred during this Exec() call.
+	s, err := c.Stats(ctx)
+	if err != nil {
+		return commandutil.ErrorResult(status.UnavailableErrorf("failed to get baseline stats for execution: %s", err))
+	}
+	c.stats.SetBaseline(s)
+
 	args := []string{"exec", "--cwd=" + execrootPath}
 	// Respect command env. Note, when setting any --env vars at all, it
 	// completely overrides the env from the bundle, rather than just adding
@@ -344,7 +377,7 @@ func (c *ociContainer) Exec(ctx context.Context, cmd *repb.Command, stdio *inter
 	if !ok {
 		return commandutil.ErrorResult(status.UnavailableError("exec called before pulling image"))
 	}
-	cmd, err := withImageConfig(cmd, image)
+	cmd, err = withImageConfig(cmd, image)
 	if err != nil {
 		return commandutil.ErrorResult(status.UnavailableErrorf("apply image config: %s", err))
 	}
@@ -385,6 +418,12 @@ func (c *ociContainer) Remove(ctx context.Context) error {
 		}
 	}
 
+	if c.network != nil {
+		if err := c.network.Cleanup(ctx); err != nil && firstErr == nil {
+			firstErr = status.UnavailableErrorf("cleanup network: %s", err)
+		}
+	}
+
 	if err := os.RemoveAll(c.bundlePath()); err != nil && firstErr == nil {
 		firstErr = status.UnavailableErrorf("remove bundle: %s", err)
 	}
@@ -392,19 +431,48 @@ func (c *ociContainer) Remove(ctx context.Context) error {
 	return firstErr
 }
 
+func (c *ociContainer) createNetwork(ctx context.Context) error {
+	if !c.networkEnabled {
+		return nil
+	}
+	network, err := networking.CreateContainerNetwork(ctx)
+	if err != nil {
+		return status.WrapError(err, "create network")
+	}
+	c.network = network
+	return nil
+}
+
 func (c *ociContainer) Stats(ctx context.Context) (*repb.UsageStats, error) {
-	return c.cgroupPaths.Stats(ctx, c.cid)
+	lifetimeStats, err := c.cgroupPaths.Stats(ctx, c.cid)
+	if err != nil {
+		return nil, err
+	}
+	c.stats.Update(lifetimeStats)
+	return c.stats.TaskStats(), nil
 }
 
 // Instruments an OCI runtime call with monitor() to ensure that resource usage
 // metrics are updated while the function is being executed, and that the
 // resource usage results are populated in the returned CommandResult.
-func (c *ociContainer) doWithStatsTracking(ctx context.Context, fn func(ctx context.Context) *interfaces.CommandResult) *interfaces.CommandResult {
+func (c *ociContainer) doWithStatsTracking(ctx context.Context, invokeRuntimeFn func(ctx context.Context) *interfaces.CommandResult) *interfaces.CommandResult {
 	stop, statsCh := container.TrackStats(ctx, c)
-	defer stop()
-	res := fn(ctx)
+	res := invokeRuntimeFn(ctx)
 	stop()
-	res.UsageStats = <-statsCh
+	// statsCh will report stats for processes inside the container, and
+	// res.UsageStats will report stats for the container runtime itself.
+	// Combine these stats to get the total usage.
+	runtimeProcessStats := res.UsageStats
+	taskStats := <-statsCh
+	if taskStats == nil {
+		taskStats = &repb.UsageStats{}
+	}
+	combinedStats := taskStats.CloneVT()
+	combinedStats.CpuNanos += runtimeProcessStats.GetCpuNanos()
+	if runtimeProcessStats.GetPeakMemoryBytes() > taskStats.GetPeakMemoryBytes() {
+		combinedStats.PeakMemoryBytes = runtimeProcessStats.GetPeakMemoryBytes()
+	}
+	res.UsageStats = combinedStats
 	return res
 }
 
@@ -507,11 +575,21 @@ func installBusybox(path string) error {
 
 func (c *ociContainer) createSpec(cmd *repb.Command) (*specs.Spec, error) {
 	env := append(baseEnv, commandutil.EnvStringList(cmd)...)
+	netnsPath := ""
+	if c.network != nil {
+		netnsPath = "/var/run/netns/" + c.network.NetNamespace()
+	}
+	var pids *specs.LinuxPids
+	if *pidsLimit >= 0 {
+		pids = &specs.LinuxPids{Limit: *pidsLimit}
+	}
 	spec := specs.Spec{
 		Version: ociVersion,
 		Process: &specs.Process{
 			Terminal: false,
-			// TODO: parse USER[:GROUP] from dockerUser
+			// TODO: parse USER[:GROUP] from dockerUser.
+			// Make sure to also update the ping_group_range sysctl below
+			// to match the GID here.
 			User: specs.User{
 				UID:   0,
 				GID:   0,
@@ -520,9 +598,9 @@ func (c *ociContainer) createSpec(cmd *repb.Command) (*specs.Spec, error) {
 			Args: cmd.GetArguments(),
 			Cwd:  execrootPath,
 			Env:  env,
-			// TODO: rlimits
-			Rlimits: []specs.POSIXRlimit{},
-			// TODO: audit these
+			Rlimits: []specs.POSIXRlimit{
+				{Type: "RLIMIT_NPROC", Hard: 4194304, Soft: 4194304},
+			},
 			Capabilities: &specs.LinuxCapabilities{
 				Bounding:  capabilities,
 				Effective: capabilities,
@@ -535,7 +613,7 @@ func (c *ociContainer) createSpec(cmd *repb.Command) (*specs.Spec, error) {
 			Path:     c.rootfsPath(),
 			Readonly: false,
 		},
-		Hostname: c.hostname(),
+		Hostname: c.containerName(),
 		Mounts: []specs.Mount{
 			{
 				Destination: "/proc",
@@ -555,31 +633,23 @@ func (c *ociContainer) createSpec(cmd *repb.Command) (*specs.Spec, error) {
 				Source:      "sysfs",
 				Options:     []string{"nosuid", "noexec", "nodev", "ro"},
 			},
-			// TODO: enable devpts
-			// {
-			// 	Destination: "/dev/pts",
-			// 	Type:        "devpts",
-			// 	Source:      "devpts",
-			// 	Options: []string{
-			// 		"nosuid", "noexec", "newinstance", "ptmxmode=0666", "mode=0620",
-			// 		// TODO: gid=5 doesn't work in some circumstances.
-			// 		// See https://github.com/containers/podman/blob/b8d95a5893572b37c8257407e964ad06ba87ade6/pkg/specgen/generate/oci_linux.go#L141-L173
-			// 		"gid=5",
-			// 	},
-			// },
+			{
+				Destination: "/dev/pts",
+				Type:        "devpts",
+				Source:      "devpts",
+				Options: []string{
+					"nosuid", "noexec", "newinstance", "ptmxmode=0666", "mode=0620",
+					// TODO: gid=5 doesn't work in some circumstances.
+					// See https://github.com/containers/podman/blob/b8d95a5893572b37c8257407e964ad06ba87ade6/pkg/specgen/generate/oci_linux.go#L141-L173
+					"gid=5",
+				},
+			},
 			{
 				Destination: "/dev/mqueue",
 				Type:        "mqueue",
 				Source:      "mqueue",
 				Options:     []string{"nosuid", "noexec", "nodev"},
 			},
-			// TODO: resolv.conf
-			// {
-			// 		Destination: "/etc/resolv.conf",
-			// 		Type:        "bind",
-			// 		Source:      "/run/containers/storage/overlay-containers/99133d16f4f9d0678f87972c01209e308ebafc074f333822805a633620f12507/userdata/resolv.conf",
-			// 		Options:     []string{"bind", "rprivate"},
-			// },
 			{
 				Destination: "/etc/hosts",
 				Type:        "bind",
@@ -589,7 +659,7 @@ func (c *ociContainer) createSpec(cmd *repb.Command) (*specs.Spec, error) {
 			{
 				Destination: "/dev/shm",
 				Type:        "tmpfs",
-				Source:      "tmpfs",
+				Source:      "shm",
 				Options:     []string{"rw", "nosuid", "nodev", "noexec", "relatime", "size=64000k", "inode64"},
 			},
 			// TODO: .containerenv
@@ -632,15 +702,18 @@ func (c *ociContainer) createSpec(cmd *repb.Command) (*specs.Spec, error) {
 				{Type: specs.UTSNamespace},
 				{Type: specs.MountNamespace},
 				{Type: specs.CgroupNamespace},
-				// TODO: setup networking and set the correct namespace path
-				// here
-				{Type: specs.NetworkNamespace},
+				{
+					Type: specs.NetworkNamespace,
+					Path: netnsPath,
+				},
 			},
 			Seccomp: &seccomp,
 			Devices: []specs.LinuxDevice{},
+			Sysctl: map[string]string{
+				"net.ipv4.ping_group_range": "0 0",
+			},
 			Resources: &specs.LinuxResources{
-				// TODO: networking
-				Network: nil,
+				Pids: pids,
 			},
 			// TODO: grok MaskedPaths and ReadonlyPaths - just copied from podman.
 			MaskedPaths: []string{
@@ -666,27 +739,22 @@ func (c *ociContainer) createSpec(cmd *repb.Command) (*specs.Spec, error) {
 			},
 		},
 	}
-
-	// Provision devices based on host device node info.
-	// TODO: set up devices the same way podman does.
-	for _, path := range []string{
-		"/dev/null",
-		"/dev/zero",
-		"/dev/random",
-		"/dev/urandom",
-	} {
-		d, err := statDevice(path)
-		if err != nil {
-			return nil, fmt.Errorf("get %s device spec: %w", path, err)
-		}
-		spec.Linux.Devices = append(spec.Linux.Devices, *d)
-		spec.Linux.Resources.Devices = append(spec.Linux.Resources.Devices, specs.LinuxDeviceCgroup{
-			Allow:  true,
-			Access: "rw",
-			Type:   d.Type,
-			Major:  &d.Major,
-			Minor:  &d.Minor,
+	if *dns != "" {
+		spec.Mounts = append(spec.Mounts, specs.Mount{
+			Destination: "/etc/resolv.conf",
+			Type:        "bind",
+			Source:      filepath.Join(c.bundlePath(), "resolv.conf"),
+			Options:     []string{"bind", "rprivate"},
 		})
+	} else {
+		if _, err := os.Stat("/etc/resolv.conf"); err == nil {
+			spec.Mounts = append(spec.Mounts, specs.Mount{
+				Destination: "/etc/resolv.conf",
+				Type:        "bind",
+				Source:      "/etc/resolv.conf",
+				Options:     []string{"bind", "rprivate"},
+			})
+		}
 	}
 
 	return &spec, nil
@@ -959,6 +1027,14 @@ func pull(ctx context.Context, layersDir, imageName string, creds oci.Credential
 			} else {
 				return nil
 			}
+
+			size, err := layer.Size()
+			if err != nil {
+				return status.UnavailableErrorf("get layer size: %s", err)
+			}
+			start := time.Now()
+			log.CtxDebugf(ctx, "Pulling layer %s (%.2f MiB)", d.Hex, float64(size)/1e6)
+			defer func() { log.CtxDebugf(ctx, "Pulled layer %s in %s", d.Hex, time.Since(start)) }()
 
 			rc, err := layer.Compressed()
 			if err != nil {

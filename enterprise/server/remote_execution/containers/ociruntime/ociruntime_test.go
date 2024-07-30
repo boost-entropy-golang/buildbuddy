@@ -8,7 +8,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -23,6 +22,7 @@ import (
 	"github.com/buildbuddy-io/buildbuddy/server/interfaces"
 	"github.com/buildbuddy-io/buildbuddy/server/testutil/testenv"
 	"github.com/buildbuddy-io/buildbuddy/server/testutil/testfs"
+	"github.com/buildbuddy-io/buildbuddy/server/testutil/testnetworking"
 	"github.com/buildbuddy-io/buildbuddy/server/util/testing/flags"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -82,6 +82,13 @@ func realBusyboxImage(t *testing.T) string {
 	return "mirror.gcr.io/library/busybox"
 }
 
+func netToolsImage(t *testing.T) string {
+	if !hasMountPermissions(t) {
+		t.Skipf("using a real container image with overlayfs requires mount permissions")
+	}
+	return "gcr.io/flame-public/net-tools@sha256:ac701954d2c522d0d2b5296323127cacaaf77627e69db848a8d6ecb53149d344"
+}
+
 // Returns a remote reference to the image in //dockerfiles/test_images/ociruntime_test/env_test_image
 func envTestImage(t *testing.T) string {
 	if !hasMountPermissions(t) {
@@ -91,6 +98,8 @@ func envTestImage(t *testing.T) string {
 }
 
 func TestRun(t *testing.T) {
+	testnetworking.Setup(t)
+
 	image := manuallyProvisionedBusyboxImage(t)
 
 	ctx := context.Background()
@@ -126,11 +135,13 @@ func TestRun(t *testing.T) {
 	res := c.Run(ctx, cmd, wd, oci.Credentials{})
 	require.NoError(t, res.Error)
 	assert.Equal(t, "Hello world!\n", string(res.Stdout))
-	assert.Empty(t, "", string(res.Stderr))
+	assert.Empty(t, string(res.Stderr))
 	assert.Equal(t, 0, res.ExitCode)
 }
 
 func TestRunUsageStats(t *testing.T) {
+	testnetworking.Setup(t)
+
 	image := realBusyboxImage(t)
 
 	ctx := context.Background()
@@ -162,11 +173,13 @@ func TestRunUsageStats(t *testing.T) {
 	res := c.Run(ctx, cmd, wd, oci.Credentials{})
 	require.NoError(t, res.Error)
 	require.Equal(t, 0, res.ExitCode)
-	assert.Greater(t, res.UsageStats.GetMemoryBytes(), int64(0), "memory")
+	assert.Greater(t, res.UsageStats.GetPeakMemoryBytes(), int64(0), "memory")
 	assert.Greater(t, res.UsageStats.GetCpuNanos(), int64(0), "CPU")
 }
 
 func TestRunWithImage(t *testing.T) {
+	testnetworking.Setup(t)
+
 	image := envTestImage(t)
 
 	ctx := context.Background()
@@ -194,7 +207,7 @@ func TestRunWithImage(t *testing.T) {
 	cmd := &repb.Command{
 		Arguments: []string{"sh", "-c", `
 			echo "$GREETING world!"
-			env | grep -v 'HOSTNAME' | sort
+			env | sort
 		`},
 		EnvironmentVariables: []*repb.Command_EnvironmentVariable{
 			{Name: "GREETING", Value: "Hello"},
@@ -205,16 +218,19 @@ func TestRunWithImage(t *testing.T) {
 	assert.Equal(t, `Hello world!
 GREETING=Hello
 HOME=/root
+HOSTNAME=localhost
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/test/bin
 PWD=/buildbuddy-execroot
 SHLVL=1
 TEST_ENV_VAR=foo
 `, string(res.Stdout))
-	assert.Empty(t, "", string(res.Stderr))
+	assert.Empty(t, string(res.Stderr))
 	assert.Equal(t, 0, res.ExitCode)
 }
 
 func TestCreateExecRemove(t *testing.T) {
+	testnetworking.Setup(t)
+
 	image := manuallyProvisionedBusyboxImage(t)
 
 	ctx := context.Background()
@@ -257,6 +273,8 @@ func TestCreateExecRemove(t *testing.T) {
 }
 
 func TestExecUsageStats(t *testing.T) {
+	testnetworking.Setup(t)
+
 	image := realBusyboxImage(t)
 
 	ctx := context.Background()
@@ -300,6 +318,8 @@ func TestExecUsageStats(t *testing.T) {
 }
 
 func TestPullCreateExecRemove(t *testing.T) {
+	testnetworking.Setup(t)
+
 	image := envTestImage(t)
 
 	ctx := context.Background()
@@ -344,7 +364,7 @@ func TestPullCreateExecRemove(t *testing.T) {
 		Arguments: []string{"sh", "-ec", `
 			touch /bin/foo.txt
 			pwd
-			env | grep -v HOSTNAME | sort
+			env | sort
 		`},
 		EnvironmentVariables: []*repb.Command_EnvironmentVariable{
 			{Name: "GREETING", Value: "Hello"},
@@ -359,6 +379,7 @@ func TestPullCreateExecRemove(t *testing.T) {
 	assert.Equal(t, `/buildbuddy-execroot
 GREETING=Hello
 HOME=/root
+HOSTNAME=localhost
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/test/bin
 PWD=/buildbuddy-execroot
 SHLVL=1
@@ -378,11 +399,7 @@ TEST_ENV_VAR=foo
 }
 
 func TestCreateExecPauseUnpause(t *testing.T) {
-	if runtime.GOARCH == "arm64" {
-		// TODO: fix test on arm64. It fails due to some issue with cgroups on
-		// the GH Actions runners.
-		t.Skipf("test is skipped on arm64")
-	}
+	testnetworking.Setup(t)
 
 	image := manuallyProvisionedBusyboxImage(t)
 
@@ -427,6 +444,8 @@ func TestCreateExecPauseUnpause(t *testing.T) {
 	`}}
 	res := c.Exec(ctx, cmd, &interfaces.Stdio{})
 	require.NoError(t, res.Error)
+
+	t.Logf("Started update process in container")
 
 	assert.Empty(t, string(res.Stderr))
 	assert.Empty(t, string(res.Stdout))
@@ -483,6 +502,8 @@ func TestCreateExecPauseUnpause(t *testing.T) {
 }
 
 func TestCreateFailureHasStderr(t *testing.T) {
+	testnetworking.Setup(t)
+
 	image := manuallyProvisionedBusyboxImage(t)
 
 	ctx := context.Background()
@@ -506,6 +527,99 @@ func TestCreateFailureHasStderr(t *testing.T) {
 	require.NoError(t, err)
 	err = c.Create(ctx, wd+"nonexistent")
 	require.ErrorContains(t, err, "nonexistent")
+}
+
+func TestDevices(t *testing.T) {
+	testnetworking.Setup(t)
+
+	image := manuallyProvisionedBusyboxImage(t)
+
+	ctx := context.Background()
+	env := testenv.GetTestEnv(t)
+
+	runtimeRoot := testfs.MakeTempDir(t)
+	flags.Set(t, "executor.oci.runtime_root", runtimeRoot)
+
+	buildRoot := testfs.MakeTempDir(t)
+
+	provider, err := ociruntime.NewProvider(env, buildRoot)
+	require.NoError(t, err)
+	wd := testfs.MakeDirAll(t, buildRoot, "work")
+
+	// Create
+	c, err := provider.New(ctx, &container.Init{
+		Props: &platform.Properties{
+			ContainerImage: image,
+		},
+	})
+	require.NoError(t, err)
+	res := c.Run(ctx, &repb.Command{
+		Arguments: []string{"sh", "-e", "-c", `
+			# Print out device file types and major/minor device numbers
+			stat -c '%n: %F (%t,%T)' /dev/null /dev/zero /dev/random /dev/urandom
+
+			# Perform a bit of device I/O
+			cat /dev/random | head -c1 >/dev/null
+			cat /dev/urandom | head -c1 >/dev/null
+			cat /dev/zero | head -c1 >/dev/null
+			echo foo >/dev/null
+		`},
+	}, wd, oci.Credentials{})
+	require.NoError(t, res.Error)
+	assert.Equal(t, 0, res.ExitCode)
+	expectedLines := []string{
+		"/dev/null: character special file (1,3)",
+		"/dev/zero: character special file (1,5)",
+		"/dev/random: character special file (1,8)",
+		"/dev/urandom: character special file (1,9)",
+	}
+	assert.Equal(t, strings.Join(expectedLines, "\n")+"\n", string(res.Stdout))
+	assert.Equal(t, "", string(res.Stderr))
+}
+
+func TestNetwork(t *testing.T) {
+	testnetworking.Setup(t)
+
+	// Note: busybox has ping, but it fails with 'permission denied (are you
+	// root?)' This is fixed by adding CAP_NET_RAW but we don't want to do this.
+	// So just use the net-tools image which doesn't have this issue for
+	// whatever reason (presumably it's some difference in the ping
+	// implementation) - it's enough to just set `net.ipv4.ping_group_range`.
+	// (Note that podman has this same issue.)
+	image := netToolsImage(t)
+
+	ctx := context.Background()
+	env := testenv.GetTestEnv(t)
+
+	runtimeRoot := testfs.MakeTempDir(t)
+	flags.Set(t, "executor.oci.runtime_root", runtimeRoot)
+
+	buildRoot := testfs.MakeTempDir(t)
+
+	provider, err := ociruntime.NewProvider(env, buildRoot)
+	require.NoError(t, err)
+	wd := testfs.MakeDirAll(t, buildRoot, "work")
+
+	c, err := provider.New(ctx, &container.Init{Props: &platform.Properties{
+		ContainerImage: image,
+	}})
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		err := c.Remove(ctx)
+		require.NoError(t, err)
+	})
+
+	// Run
+	cmd := &repb.Command{
+		Arguments: []string{"sh", "-ec", `
+			ping -c1 -W2 8.8.8.8
+			ping -c1 -W2 example.com
+		`},
+	}
+	res := c.Run(ctx, cmd, wd, oci.Credentials{})
+	require.NoError(t, res.Error)
+	assert.Empty(t, string(res.Stderr))
+	assert.Equal(t, 0, res.ExitCode)
 }
 
 func hasMountPermissions(t *testing.T) bool {
