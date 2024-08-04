@@ -179,6 +179,9 @@ const (
 	// Binary version. Example: `v2.0.0`.
 	VersionLabel = "version"
 
+	// Binary git commit SHA. Example: `4bd7046417608d785094aa5ec7aa009a9ae53753`
+	CommitLabel = "commit"
+
 	// Whether or not the API Key lookup hit the in memory
 	// cache or not: "cache_hit", "cache_miss" or "invalid_key".
 	APIKeyLookupStatus = "status"
@@ -909,6 +912,15 @@ var (
 		Subsystem: "remote_execution",
 		Name:      "merged_actions",
 		Help:      "Number of identical execution requests that have been merged.",
+	}, []string{
+		GroupID,
+	})
+
+	RemoteExecutionHedgedActions = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: bbNamespace,
+		Subsystem: "remote_execution",
+		Name:      "hedged_actions",
+		Help:      "Number of identicial execution request which were merged for which a hedged execution was run in the background.",
 	}, []string{
 		GroupID,
 	})
@@ -1907,6 +1919,7 @@ var (
 		Help:      "Binary version of the running instance. Always reports a value of 1 similar to the `up` metric, but has a label containing the version.",
 	}, []string{
 		VersionLabel,
+		CommitLabel,
 	})
 
 	UnexpectedEvent = promauto.NewCounterVec(prometheus.CounterOpts{
