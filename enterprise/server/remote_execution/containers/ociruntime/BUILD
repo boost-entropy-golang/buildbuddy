@@ -27,6 +27,7 @@ go_library(
         "//server/util/log",
         "//server/util/networking",
         "//server/util/status",
+        "//server/util/unixcred",
         "@com_github_google_go_containerregistry//pkg/v1:pkg",
         "@com_github_opencontainers_runtime_spec//specs-go",
         "@org_golang_x_sync//errgroup",
@@ -48,6 +49,7 @@ go_test(
         "test.EstimatedComputeUnits": "2",
     },
     tags = [
+        "docker",
         "no-sandbox",
     ],
     target_compatible_with = [
@@ -71,6 +73,7 @@ go_test(
         "//server/testutil/testfs",
         "//server/testutil/testnetworking",
         "//server/util/testing/flags",
+        "//server/util/uuid",
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",
         "@io_bazel_rules_go//go/runfiles:go_default_library",
