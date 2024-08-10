@@ -28,10 +28,10 @@ go_library(
         "//server/util/networking",
         "//server/util/status",
         "//server/util/unixcred",
+        "//third_party/singleflight",
         "@com_github_google_go_containerregistry//pkg/v1:pkg",
         "@com_github_opencontainers_runtime_spec//specs-go",
         "@org_golang_x_sync//errgroup",
-        "@org_golang_x_sync//singleflight",
         "@org_golang_x_sys//unix",
     ],
 )
@@ -42,12 +42,16 @@ go_test(
     data = [
         ":busybox",
         ":crun",
+        "//enterprise/server/remote_execution/runner/testworker",
     ],
     exec_properties = {
         "test.workload-isolation-type": "firecracker",
         "test.container-image": "docker://gcr.io/flame-public/net-tools@sha256:ac701954d2c522d0d2b5296323127cacaaf77627e69db848a8d6ecb53149d344",
         "test.EstimatedComputeUnits": "2",
     },
+    # NOTE: if testing locally, use --test_sharding_strategy=disabled to work
+    # around the networking package not supporting cross-process locks.
+    shard_count = 4,
     tags = [
         "docker",
         "no-sandbox",
@@ -61,17 +65,25 @@ go_test(
     x_defs = {
         "crunRlocationpath": "$(rlocationpath :crun)",
         "busyboxRlocationpath": "$(rlocationpath :busybox)",
+        "testworkerRlocationpath": "$(rlocationpath //enterprise/server/remote_execution/runner/testworker)",
     },
     deps = [
         ":ociruntime",
         "//enterprise/server/remote_execution/container",
+        "//enterprise/server/remote_execution/persistentworker",
         "//enterprise/server/remote_execution/platform",
+        "//enterprise/server/remote_execution/workspace",
         "//enterprise/server/util/oci",
         "//proto:remote_execution_go_proto",
+        "//proto:worker_go_proto",
         "//server/interfaces",
         "//server/testutil/testenv",
         "//server/testutil/testfs",
         "//server/testutil/testnetworking",
+        "//server/testutil/testshell",
+        "//server/util/disk",
+        "//server/util/proto",
+        "//server/util/status",
         "//server/util/testing/flags",
         "//server/util/uuid",
         "@com_github_stretchr_testify//assert",

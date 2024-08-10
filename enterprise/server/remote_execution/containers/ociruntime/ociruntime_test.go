@@ -2,9 +2,12 @@ package ociruntime_test
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/binary"
 	"fmt"
 	"io/fs"
 	"log"
+	"math/rand/v2"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -17,23 +20,31 @@ import (
 	"github.com/bazelbuild/rules_go/go/runfiles"
 	"github.com/buildbuddy-io/buildbuddy/enterprise/server/remote_execution/container"
 	"github.com/buildbuddy-io/buildbuddy/enterprise/server/remote_execution/containers/ociruntime"
+	"github.com/buildbuddy-io/buildbuddy/enterprise/server/remote_execution/persistentworker"
 	"github.com/buildbuddy-io/buildbuddy/enterprise/server/remote_execution/platform"
+	"github.com/buildbuddy-io/buildbuddy/enterprise/server/remote_execution/workspace"
 	"github.com/buildbuddy-io/buildbuddy/enterprise/server/util/oci"
 	"github.com/buildbuddy-io/buildbuddy/server/interfaces"
 	"github.com/buildbuddy-io/buildbuddy/server/testutil/testenv"
 	"github.com/buildbuddy-io/buildbuddy/server/testutil/testfs"
 	"github.com/buildbuddy-io/buildbuddy/server/testutil/testnetworking"
+	"github.com/buildbuddy-io/buildbuddy/server/testutil/testshell"
+	"github.com/buildbuddy-io/buildbuddy/server/util/disk"
+	"github.com/buildbuddy-io/buildbuddy/server/util/proto"
+	"github.com/buildbuddy-io/buildbuddy/server/util/status"
 	"github.com/buildbuddy-io/buildbuddy/server/util/testing/flags"
 	"github.com/buildbuddy-io/buildbuddy/server/util/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	repb "github.com/buildbuddy-io/buildbuddy/proto/remote_execution"
+	wkpb "github.com/buildbuddy-io/buildbuddy/proto/worker"
 )
 
 // Set via x_defs in BUILD file.
 var crunRlocationpath string
 var busyboxRlocationpath string
+var testworkerRlocationpath string
 
 func init() {
 	// Set up cgroup v2-only on Firecracker.
@@ -821,6 +832,193 @@ func TestOverlayfsEdgeCases(t *testing.T) {
 	assert.Empty(t, string(res.Stdout))
 	assert.Empty(t, string(res.Stderr))
 	assert.Equal(t, 0, res.ExitCode)
+}
+
+func TestPersistentWorker(t *testing.T) {
+	testnetworking.Setup(t)
+
+	image := manuallyProvisionedBusyboxImage(t)
+
+	ctx := context.Background()
+	env := testenv.GetTestEnv(t)
+
+	runtimeRoot := testfs.MakeTempDir(t)
+	flags.Set(t, "executor.oci.runtime_root", runtimeRoot)
+
+	// Create workspace with testworker binary
+	buildRoot := testfs.MakeTempDir(t)
+	ws, err := workspace.New(env, buildRoot, &workspace.Opts{Preserve: true})
+	require.NoError(t, err)
+	testworkerPath, err := runfiles.Rlocation(testworkerRlocationpath)
+	require.NoError(t, err)
+	testfs.CopyFile(t, testworkerPath, ws.Path(), "testworker")
+
+	provider, err := ociruntime.NewProvider(env, buildRoot)
+	require.NoError(t, err)
+
+	c, err := provider.New(ctx, &container.Init{Props: &platform.Properties{
+		ContainerImage: image,
+	}})
+	require.NoError(t, err)
+
+	// Create container
+	require.NoError(t, err)
+	err = c.Create(ctx, ws.Path())
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		err = c.Remove(ctx)
+		require.NoError(t, err)
+	})
+
+	// Prepare a static response that the persistent worker will return on each
+	// request.
+	responseBase64 := ""
+	{
+		rsp := &wkpb.WorkResponse{
+			Output:   "test-output",
+			ExitCode: 42,
+		}
+		b, err := proto.Marshal(rsp)
+		require.NoError(t, err)
+		size := make([]byte, binary.MaxVarintLen64)
+		n := binary.PutUvarint(size, uint64(len(b)))
+		responseBase64 = base64.StdEncoding.EncodeToString(append(size[:n], b...))
+	}
+
+	// Start worker (Exec)
+	worker := persistentworker.Start(ctx, ws, c, "proto" /*=protocol*/, &repb.Command{
+		Arguments: []string{"./testworker", "--persistent_worker", "--response_base64", responseBase64},
+	})
+
+	// Send work request.
+	// The command doesn't matter - the test worker always just returns a fixed
+	// response.
+	res := worker.Exec(ctx, &repb.Command{})
+
+	assert.Equal(t, "test-output", string(res.Stderr))
+	assert.Equal(t, 42, res.ExitCode)
+
+	// Pause container and stop worker
+	err = c.Pause(ctx)
+	require.NoError(t, err)
+	err = worker.Stop()
+	assert.NoError(t, err)
+}
+
+func TestCancelRun(t *testing.T) {
+	testnetworking.Setup(t)
+
+	image := manuallyProvisionedBusyboxImage(t)
+
+	ctx := context.Background()
+	env := testenv.GetTestEnv(t)
+
+	runtimeRoot := testfs.MakeTempDir(t)
+	flags.Set(t, "executor.oci.runtime_root", runtimeRoot)
+
+	buildRoot := testfs.MakeTempDir(t)
+
+	provider, err := ociruntime.NewProvider(env, buildRoot)
+	require.NoError(t, err)
+	wd := testfs.MakeDirAll(t, buildRoot, "work")
+
+	c, err := provider.New(ctx, &container.Init{Props: &platform.Properties{
+		ContainerImage: image,
+	}})
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		err := c.Remove(context.Background())
+		require.NoError(t, err)
+	})
+
+	// Run
+	childID := "child" + fmt.Sprint(rand.Uint64())
+	cmd := &repb.Command{
+		Arguments: []string{"sh", "-c", `
+			echo "Hello world!"
+			touch ./DONE
+			sh -c "sleep 1000000000 # ` + childID + `" &
+			sleep 1000000000
+		`},
+	}
+	// Wait for the command to write the file "DONE" which means it is done
+	// writing to stdout.
+	ctx, cancel := context.WithCancel(ctx)
+	go func() {
+		defer cancel()
+		err := disk.WaitUntilExists(ctx, filepath.Join(wd, "DONE"), disk.WaitOpts{Timeout: -1})
+		require.NoError(t, err)
+	}()
+	res := c.Run(ctx, cmd, wd, oci.Credentials{})
+	assert.True(t, status.IsCanceledError(res.Error), "expected CanceledError, got %+#v", res.Error)
+	assert.Equal(t, "Hello world!\n", string(res.Stdout))
+	assert.Empty(t, string(res.Stderr))
+	// Make sure all child processes were killed.
+	out := testshell.Run(t, wd, `( ps aux | grep `+childID+` | grep -v grep ) || true`)
+	assert.Empty(t, out)
+}
+
+func TestCancelExec(t *testing.T) {
+	testnetworking.Setup(t)
+
+	image := manuallyProvisionedBusyboxImage(t)
+
+	ctx := context.Background()
+	env := testenv.GetTestEnv(t)
+
+	runtimeRoot := testfs.MakeTempDir(t)
+	flags.Set(t, "executor.oci.runtime_root", runtimeRoot)
+
+	buildRoot := testfs.MakeTempDir(t)
+
+	provider, err := ociruntime.NewProvider(env, buildRoot)
+	require.NoError(t, err)
+	wd := testfs.MakeDirAll(t, buildRoot, "work")
+
+	c, err := provider.New(ctx, &container.Init{Props: &platform.Properties{
+		ContainerImage: image,
+	}})
+	require.NoError(t, err)
+	// Create
+	err = c.Create(ctx, wd)
+	require.NoError(t, err)
+	removed := false
+	t.Cleanup(func() {
+		if removed {
+			return
+		}
+		err := c.Remove(context.Background())
+		require.NoError(t, err)
+	})
+	childID := "child" + fmt.Sprint(rand.Uint64())
+	cmd := &repb.Command{
+		Arguments: []string{"sh", "-c", `
+			echo "Hello world!"
+			touch ./DONE
+			sh -c "sleep 1000000000 # ` + childID + `" &
+			sleep 1000000000
+		`},
+	}
+	// Wait for the command to write the file "DONE" which means it is done
+	// writing to stdout.
+	ctx, cancel := context.WithCancel(ctx)
+	go func() {
+		defer cancel()
+		err := disk.WaitUntilExists(ctx, filepath.Join(wd, "DONE"), disk.WaitOpts{Timeout: -1})
+		require.NoError(t, err)
+	}()
+	res := c.Exec(ctx, cmd, &interfaces.Stdio{})
+	assert.True(t, status.IsCanceledError(res.Error), "expected CanceledError, got %+#v", res.Error)
+	assert.Equal(t, "Hello world!\n", string(res.Stdout))
+	assert.Empty(t, string(res.Stderr))
+	// Make sure all child processes were killed.
+	// In the Exec() case, it's fine if child processes stick around until we
+	// call Remove().
+	err = c.Remove(context.Background())
+	require.NoError(t, err)
+	removed = true
+	out := testshell.Run(t, wd, `( ps aux | grep `+childID+` | grep -v grep ) || true`)
+	assert.Empty(t, out)
 }
 
 func hasMountPermissions(t *testing.T) bool {
