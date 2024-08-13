@@ -1,6 +1,7 @@
 package metrics
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -101,6 +102,13 @@ const (
 	// `worker`, includes all stages during which a worker is handling the action,
 	// which is all stages except the `queued` stage.
 	ExecutedActionStageLabel = "stage"
+
+	// System resource: "cpu", "memory", or "io".
+	PSIResourceLabel = "resource"
+
+	// Pressure stall type: "some" (task is partially stalled on the resource)
+	// or "full" (task is completely stalled on the resource).
+	PSIStallTypeLabel = "stall_type"
 
 	// Type of event sent to BuildBuddy's webhook handler: `push` or
 	// `pull_request`.
@@ -811,6 +819,17 @@ var (
 	//   sum(rate(buildbuddy_remote_execution_executed_action_metadata_durations_usec_bucket{stage="execution"}[5m])) by (le)
 	// )
 	// ```
+
+	RemoteExecutionTaskPressureStallDurationUsec = promauto.NewHistogramVec(prometheus.HistogramOpts{
+		Namespace: bbNamespace,
+		Subsystem: "remote_execution",
+		Name:      "task_pressure_stall_duration_usec",
+		Help:      "Linux PSI metrics for each executed action, in **microseconds**.",
+		Buckets:   durationUsecBuckets(1*time.Microsecond, 10*time.Minute, 1.2),
+	}, []string{
+		PSIResourceLabel,
+		PSIStallTypeLabel,
+	})
 
 	RemoteExecutionTaskSizeReadRequests = promauto.NewCounterVec(prometheus.CounterOpts{
 		Namespace: bbNamespace,
@@ -2690,6 +2709,12 @@ var (
 // terms of a min and max value, rather than needing to explicitly calculate the
 // number of buckets.
 func exponentialBucketRange(min, max, factor float64) []float64 {
+	if min < 0 || min >= max {
+		panic(fmt.Sprintf("exponentialBucketRange: expected 0 < min < max, got min=%f, max=%f", min, max))
+	}
+	if factor <= 1 {
+		panic(fmt.Sprintf("exponentialBucketRange: expected factor > 1, got factor=%f", factor))
+	}
 	buckets := []float64{}
 	current := min
 	for current < max {

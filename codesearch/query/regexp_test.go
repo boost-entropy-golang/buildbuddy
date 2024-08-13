@@ -7,13 +7,14 @@ package query
 import (
 	"regexp/syntax"
 	"testing"
+
+	"github.com/buildbuddy-io/buildbuddy/codesearch/token"
 )
 
 var queryTests = []struct {
 	re string
 	q  string
 }{
-	{`Abcdef`, `"abc" "bcd" "cde" "def"`},
 	{`(abc)(def)`, `"abc" "bcd" "cde" "def"`},
 	{`abc.*(def|ghi)`, `"abc" ("def"|"ghi")`},
 	{`abc(def|ghi)`, `"abc" ("bcd" "cde" "def")|("bcg" "cgh" "ghi")`},
@@ -79,6 +80,28 @@ func TestQuery(t *testing.T) {
 			t.Fatal(err)
 		}
 		q := RegexpQuery(re).String()
+		if q != tt.q {
+			t.Errorf("RegexpQuery(%#q) = %#q, want %#q", tt.re, q, tt.q)
+		}
+	}
+}
+
+var sparseQueryTests = []struct {
+	re string
+	q  string
+}{
+	// Sparse ngrams
+	{`Abcdef`, `"Abcd" "cde" "def"`},
+	{`FailedPrecondition`, `"Fai" "ail" "cond" "dPre" "diti" "edP" "iled" "ion" "ndi" "reco" "tio"`},
+}
+
+func TestSparseQuery(t *testing.T) {
+	for _, tt := range sparseQueryTests {
+		re, err := syntax.Parse(tt.re, syntax.Perl)
+		if err != nil {
+			t.Fatal(err)
+		}
+		q := RegexpQuery(re, token.WithMaxNgramLength(6), token.WithLowerCase(false)).String()
 		if q != tt.q {
 			t.Errorf("RegexpQuery(%#q) = %#q, want %#q", tt.re, q, tt.q)
 		}

@@ -633,6 +633,11 @@ func run() error {
 	}
 	os.Setenv("BUILDBUDDY_CI_RUNNER_ABSPATH", absPath)
 
+	// Store the original task workspace dir since we change directories later.
+	taskWorkspaceDir, err := os.Getwd()
+	if err != nil {
+		return err
+	}
 	// Change the current working directory to respect WORKDIR_OVERRIDE, if set.
 	if wd := os.Getenv("WORKDIR_OVERRIDE"); wd != "" {
 		if err := os.MkdirAll(wd, 0755); err != nil {
@@ -713,22 +718,18 @@ func run() error {
 		if err := os.Chdir(repoDirName); err != nil {
 			return err
 		}
-		cfg, err := readConfig()
-		if err != nil {
-			log.Warningf("Failed to read BuildBuddy config; will run `bazel shutdown` from repo root: %s", err)
-		}
-		wsPath := ""
-		if cfg != nil {
-			wsPath = bazelWorkspacePath(cfg)
-		}
-		args, err := bazelArgsWithCustomBazelrc(rootDir, wsPath, "shutdown")
+		args, err := ws.bazelArgsWithCustomBazelrc("shutdown")
 		if err != nil {
 			return err
 		}
 		if err := printCommandLine(os.Stderr, *bazelCommand, args...); err != nil {
 			return err
 		}
-		if err := runCommand(ctx, *bazelCommand, args, nil, wsPath, os.Stderr); err != nil {
+		bazelWorkspacePath, err := ws.bazelWorkspacePath()
+		if err != nil {
+			return err
+		}
+		if err := runCommand(ctx, *bazelCommand, args, nil, bazelWorkspacePath, os.Stderr); err != nil {
 			return err
 		}
 		log.Info("Shutdown complete.")
@@ -745,11 +746,9 @@ func run() error {
 		return err
 	}
 	buildEventReporter.PublishFinishedEvent(result.exitCode, result.exitCodeName)
-	// After the invocation is complete, attempt to reclaim disk space if
-	// we're low on disk.
-	if err := reclaimDiskSpace(ctx, buildEventReporter); err != nil {
-		log.Warningf("Failed to reclaim disk space: %s", err)
-	}
+
+	ws.prepareRunnerForNextInvocation(ctx, taskWorkspaceDir)
+
 	if err := buildEventReporter.Stop(); err != nil {
 		return err
 	}
@@ -757,6 +756,33 @@ func run() error {
 		return result // as error
 	}
 	return nil
+}
+
+// Prepares the runner for the next invocation to be executed. This is intended
+// to be called after the current invocation has completed, to avoid blocking
+// the invocation status from being reported.
+func (ws *workspace) prepareRunnerForNextInvocation(ctx context.Context, taskWorkspaceDir string) {
+	log := ws.log
+
+	// After the invocation is complete, ensure that the bazel lock is not
+	// still held. If it is, avoid recycling.
+	if err := ws.checkBazelWorkspaceLock(ctx); err != nil {
+		log.Printf("WARNING: command 'bazel --noblock_for_lock info workspace' failed: %s", err)
+		log.Printf("WARNING: bazel workspace lock check failed. Runner will not be recycled")
+		marker := filepath.Join(taskWorkspaceDir, ".BUILDBUDDY_DO_NOT_RECYCLE")
+		if err := os.WriteFile(marker, nil, 0644); err != nil {
+			log.Printf("ERROR: failed to create %s: %s", marker, err)
+		}
+
+		// Don't proceed to reclaim disk space since we aren't recycling anyway.
+		return
+	}
+
+	// After the invocation is complete, attempt to reclaim disk space if
+	// we're low on disk.
+	if err := reclaimDiskSpace(ctx, ws.log); err != nil {
+		log.Printf("WARNING: failed to reclaim disk space: %s", err)
+	}
 }
 
 // parseFlags should not fail when parsing an undefined flag.
@@ -1111,7 +1137,7 @@ func (ar *actionRunner) Run(ctx context.Context, ws *workspace) error {
 		}
 
 		iid := wfc.GetInvocation()[i].GetInvocationId()
-		args, err := bazelArgsWithCustomBazelrc(ar.rootDir, action.BazelWorkspaceDir, bazelCmd)
+		args, err := ws.bazelArgsWithCustomBazelrc(bazelCmd)
 		if err != nil {
 			return status.InvalidArgumentErrorf("failed to parse bazel command: %s", err)
 		}
@@ -1577,9 +1603,17 @@ func printCommandLine(out io.Writer, command string, args ...string) error {
 	return nil
 }
 
+func (ws *workspace) bazelWorkspacePath() (string, error) {
+	action, err := getActionToRun()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(ws.rootDir, repoDirName, action.BazelWorkspaceDir), nil
+}
+
 // Returns the tokenized bazel command with a startup option to use the custom
 // baelrc written by the ci_runner.
-func bazelArgsWithCustomBazelrc(rootAbsPath, bazelWorkspaceRelPath, cmd string) ([]string, error) {
+func (ws *workspace) bazelArgsWithCustomBazelrc(cmd string) ([]string, error) {
 	tokens, err := shlex.Split(cmd)
 	if err != nil {
 		return nil, err
@@ -1587,7 +1621,11 @@ func bazelArgsWithCustomBazelrc(rootAbsPath, bazelWorkspaceRelPath, cmd string) 
 	if tokens[0] == bazelBinaryName || tokens[0] == bazeliskBinaryName {
 		tokens = tokens[1:]
 	}
-	startupFlags, err := customBazelrcOptions(rootAbsPath, bazelWorkspaceRelPath)
+	bazelWorkspacePath, err := ws.bazelWorkspacePath()
+	if err != nil {
+		return nil, err
+	}
+	startupFlags, err := customBazelrcOptions(ws.rootDir, bazelWorkspacePath)
 	if err != nil {
 		return nil, err
 	}
@@ -1595,32 +1633,27 @@ func bazelArgsWithCustomBazelrc(rootAbsPath, bazelWorkspaceRelPath, cmd string) 
 }
 
 // Returns the startup options to use the custom bazelrc written by the ci_runner.
-func customBazelrcOptions(rootAbsPath string, bazelWorkspaceRelPath string) ([]string, error) {
+func customBazelrcOptions(rootAbsPath string, bazelWorkspaceAbsPath string) ([]string, error) {
 	startupFlags := []string{"--bazelrc=" + filepath.Join(rootAbsPath, buildbuddyBazelrcPath)}
 
 	// Bazel will treat the user's workspace .bazelrc file with lower precedence
 	// than our --bazelrc, which is undesired. So instead, explicitly add the
 	// workspace rc as a --bazelrc flag after ours, and also set --noworkspace_rc
 	// to prevent the workspace rc from getting loaded twice.
-	workspaceRcPath := ".bazelrc"
-	if bazelWorkspaceRelPath == "" {
-		bazelWorkspaceAbsPath, err := getBazelWorkspaceAbsPath()
-		if err != nil {
+	if bazelWorkspaceAbsPath != "" {
+		workspaceRcPath := filepath.Join(bazelWorkspaceAbsPath, ".bazelrc")
+		_, err := os.Stat(workspaceRcPath)
+		if err != nil && !os.IsNotExist(err) {
 			return nil, err
 		}
-		workspaceRcPath = filepath.Join(bazelWorkspaceAbsPath, ".bazelrc")
-	}
-	_, err := os.Stat(workspaceRcPath)
-	if err != nil && !os.IsNotExist(err) {
-		return nil, err
-	}
-	if exists := err == nil; exists {
-		startupFlags = append(startupFlags, "--noworkspace_rc", "--bazelrc="+workspaceRcPath)
+		if exists := err == nil; exists {
+			startupFlags = append(startupFlags, "--noworkspace_rc", "--bazelrc="+workspaceRcPath)
+		}
 	}
 	return startupFlags, nil
 }
 
-func getBazelWorkspaceAbsPath() (string, error) {
+func currentBazelWorkspaceAbsPath() (string, error) {
 	dir, err := os.Getwd()
 	if err != nil {
 		return "", err
@@ -2471,13 +2504,16 @@ func configureGlobalCredentialHelper(ctx context.Context) error {
 // necessarily have any SSH private keys available that we can use to clone
 // repos over SSH.
 func configureGlobalURLRewrites(ctx context.Context) error {
+	// Discard any existing rewrites initially, then append.
+	flag := "--replace-all"
 	for original, replacement := range map[string]string{
 		"ssh://git@github.com:": "https://github.com/",
 		"git@github.com:":       "https://github.com/",
 	} {
-		if _, err := git(ctx, io.Discard, "config", "--global", "url."+replacement+".insteadOf", original); err != nil {
+		if _, err := git(ctx, io.Discard, "config", "--global", flag, "url."+replacement+".insteadOf", original); err != nil {
 			return err
 		}
+		flag = "--add"
 	}
 	return nil
 }
@@ -2521,8 +2557,15 @@ func runBazelWrapper() error {
 		return err
 	}
 
+	// Get the current bazel workspace path where we expect to find the
+	// workspace rc file.
+	workspacePath, err := currentBazelWorkspaceAbsPath()
+	if err != nil && !status.IsNotFoundError(err) {
+		return fmt.Errorf("find bazel workspace: %w", err)
+	}
+
 	args := os.Args[1:]
-	startupArgs, err := customBazelrcOptions(rootPath, "")
+	startupArgs, err := customBazelrcOptions(rootPath, workspacePath)
 	if err != nil {
 		return err
 	}
@@ -2559,6 +2602,27 @@ func reclaimDiskSpace(ctx context.Context, log *buildEventReporter) error {
 		return fmt.Errorf("du: %w", err)
 	}
 
+	return nil
+}
+
+// Creates a marker file that prevents the runner from being recycled if bazel
+// still has the workspace lock.
+func (ws *workspace) checkBazelWorkspaceLock(ctx context.Context) error {
+	var buf bytes.Buffer
+	bazelWorkspacePath, err := ws.bazelWorkspacePath()
+	if err != nil {
+		return fmt.Errorf("get bazel workspace path: %s", err)
+	}
+	startupArgs, err := customBazelrcOptions(ws.rootDir, bazelWorkspacePath)
+	if err != nil {
+		return fmt.Errorf("get bazel command: %w", err)
+	}
+	// 'bazel --noblock_for_lock info workspace' should either succeed quickly
+	// if the workspace lock is not held, or fail quickly if it is held.
+	bazelArgs := append(startupArgs, "--noblock_for_lock", "info", "workspace")
+	if err := runCommand(ctx, *bazelCommand, bazelArgs, nil, bazelWorkspacePath, &buf); err != nil {
+		return fmt.Errorf("%w: %s", err, buf.String())
+	}
 	return nil
 }
 

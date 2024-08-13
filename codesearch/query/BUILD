@@ -9,6 +9,8 @@ go_library(
     importpath = "github.com/buildbuddy-io/buildbuddy/codesearch/query",
     visibility = ["//visibility:public"],
     deps = [
+        "//codesearch/dfa",
+        "//codesearch/token",
         "//codesearch/types",
         "//server/util/log",
         "//server/util/status",
@@ -24,6 +26,7 @@ go_test(
     ],
     embed = [":query"],
     deps = [
+        "//codesearch/token",
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",
     ],
