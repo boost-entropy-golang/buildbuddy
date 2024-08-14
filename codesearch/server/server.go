@@ -14,14 +14,17 @@ import (
 	"time"
 
 	"github.com/buildbuddy-io/buildbuddy/codesearch/index"
+	"github.com/buildbuddy-io/buildbuddy/codesearch/performance"
 	"github.com/buildbuddy-io/buildbuddy/codesearch/query"
 	"github.com/buildbuddy-io/buildbuddy/codesearch/searcher"
 	"github.com/buildbuddy-io/buildbuddy/codesearch/types"
 	"github.com/buildbuddy-io/buildbuddy/server/util/disk"
+	"github.com/buildbuddy-io/buildbuddy/server/util/git"
 	"github.com/buildbuddy-io/buildbuddy/server/util/log"
 	"github.com/cockroachdb/pebble"
 	"github.com/gabriel-vasile/mimetype"
 	"github.com/go-enry/go-enry/v2"
+	"golang.org/x/sync/errgroup"
 
 	inpb "github.com/buildbuddy-io/buildbuddy/proto/index"
 	srpb "github.com/buildbuddy-io/buildbuddy/proto/search"
@@ -69,10 +72,15 @@ type codesearchServer struct {
 	scratchDirectory string
 }
 
-func makeDoc(name, repo, commitSha string, buf []byte) (types.Document, error) {
+func makeDoc(name, repoURLString, commitSha string, buf []byte) (types.Document, error) {
 	// Skip long files.
 	if len(buf) > maxFileLen {
 		return nil, fmt.Errorf("%s: too long, ignoring\n", name)
+	}
+
+	repoURL, err := git.ParseGitHubRepoURL(repoURLString)
+	if err != nil {
+		return nil, err
 	}
 
 	// Compute a hash of the file.
@@ -99,27 +107,23 @@ func makeDoc(name, repo, commitSha string, buf []byte) (types.Document, error) {
 			filenameField: types.NewNamedField(types.TrigramField, filenameField, []byte(name), true /*=stored*/),
 			contentField:  types.NewNamedField(types.SparseNgramField, contentField, buf, true /*=stored*/),
 			languageField: types.NewNamedField(types.StringTokenField, languageField, []byte(lang), true /*=stored*/),
-			repoField:     types.NewNamedField(types.StringTokenField, repoField, []byte(repo), true /*=stored*/),
+			repoField:     types.NewNamedField(types.StringTokenField, repoField, []byte(repoURL.Owner+"/"+repoURL.Repo), true /*=stored*/),
 			shaField:      types.NewNamedField(types.StringTokenField, shaField, []byte(commitSha), true /*=stored*/),
 		},
 	)
 	return doc, nil
 }
 
-func (css *codesearchServer) Index(ctx context.Context, req *inpb.IndexRequest) (*inpb.IndexResponse, error) {
-	gitRepo := req.GetGitRepo()
-	if gitRepo == nil || gitRepo.GetOwnerRepo() == "" {
-		return nil, fmt.Errorf("a git_repo must be specified")
-	}
-	if req.GetNamespace() == "" {
-		return nil, fmt.Errorf("a non-empty namespace must be specified")
-	}
+func (css *codesearchServer) syncIndex(ctx context.Context, req *inpb.IndexRequest) (*inpb.IndexResponse, error) {
+	repoURL := req.GetGitRepo().GetRepoUrl()
+	commitSHA := req.GetRepoState().GetCommitSha()
+
 	// https://github.com/buildbuddy-io/buildbuddy/archive/1d8a3184c996c3d167a281b70a4eeccd5188e5e1.tar.gz
-	archiveURL := fmt.Sprintf("https://github.com/%s/archive/%s.zip", gitRepo.GetOwnerRepo(), gitRepo.GetCommitSha())
+	archiveURL := fmt.Sprintf("%s/archive/%s.zip", repoURL, commitSHA)
 	log.Debugf("archive URL is %q", archiveURL)
 
 	start := time.Now()
-	log.Printf("Started indexing %s @ %s", gitRepo.GetOwnerRepo(), gitRepo.GetCommitSha())
+	log.Printf("Started indexing %s @ %s", repoURL, commitSHA)
 
 	httpRsp, err := http.Get(archiveURL)
 	if err != nil {
@@ -165,7 +169,7 @@ func (css *codesearchServer) Index(ctx context.Context, req *inpb.IndexRequest) 
 		if err != nil {
 			return nil, err
 		}
-		doc, err := makeDoc(filename, gitRepo.GetOwnerRepo(), gitRepo.GetCommitSha(), buf)
+		doc, err := makeDoc(filename, repoURL, commitSHA, buf)
 		if err != nil {
 			log.Debugf(err.Error())
 			continue
@@ -179,22 +183,46 @@ func (css *codesearchServer) Index(ctx context.Context, req *inpb.IndexRequest) 
 		return nil, err
 	}
 
-	log.Printf("Finished indexing %s @ %s [%s]", gitRepo.GetOwnerRepo(), gitRepo.GetCommitSha(), time.Since(start))
-	return &inpb.IndexResponse{
-		GitRepo: &inpb.GitRepoResponse{},
-	}, nil
+	log.Printf("Finished indexing %s @ %s [%s]", repoURL, commitSHA, time.Since(start))
+	return &inpb.IndexResponse{}, nil
+}
+
+func (css *codesearchServer) Index(ctx context.Context, req *inpb.IndexRequest) (*inpb.IndexResponse, error) {
+	if req.GetNamespace() == "" {
+		return nil, fmt.Errorf("a non-empty namespace must be specified")
+	}
+
+	var rsp *inpb.IndexResponse
+	eg := &errgroup.Group{}
+	eg.Go(func() error {
+		r, err := css.syncIndex(ctx, req)
+		if err != nil {
+			return err
+		}
+		rsp = r
+		return nil
+	})
+	if req.GetAsync() {
+		return &inpb.IndexResponse{}, nil
+	}
+	if err := eg.Wait(); err != nil {
+		return nil, err
+	}
+	return rsp, nil
 }
 
 func (css *codesearchServer) Search(ctx context.Context, req *srpb.SearchRequest) (*srpb.SearchResponse, error) {
 	if req.GetNamespace() == "" {
 		return nil, fmt.Errorf("a non-empty namespace must be specified")
 	}
+	log.Printf("search req: %+v", req)
+	ctx = performance.WrapContext(ctx)
 	numResults := defaultNumResults
 	if req.GetNumResults() > 0 && req.GetNumResults() < maxNumResults {
 		numResults = int(req.GetNumResults())
 	}
-	codesearcher := searcher.New(index.NewReader(css.db, req.GetNamespace()))
-	q, err := query.NewReQuery(req.GetQuery().GetTerm(), numResults)
+	codesearcher := searcher.New(ctx, index.NewReader(ctx, css.db, req.GetNamespace()))
+	q, err := query.NewReQuery(ctx, req.GetQuery().GetTerm(), numResults)
 	if err != nil {
 		return nil, err
 	}
@@ -243,6 +271,8 @@ func (css *codesearchServer) Search(ctx context.Context, req *srpb.SearchRequest
 		}
 		rsp.Results = append(rsp.Results, result)
 	}
-
+	if t := performance.TrackerFromContext(ctx); t != nil {
+		t.PrettyPrint()
+	}
 	return rsp, nil
 }
