@@ -8,10 +8,10 @@ load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive", "http_file"
 
 http_archive(
     name = "platforms",
-    sha256 = "5308fc1d8865406a49427ba24a9ab53087f17f5266a7aabbfc28823f3916e1ca",
+    sha256 = "218efe8ee736d26a3572663b374a253c012b716d8af0c07e842e82f238a0a7ee",
     urls = [
-        "https://mirror.bazel.build/github.com/bazelbuild/platforms/releases/download/0.0.6/platforms-0.0.6.tar.gz",
-        "https://github.com/bazelbuild/platforms/releases/download/0.0.6/platforms-0.0.6.tar.gz",
+        "https://mirror.bazel.build/github.com/bazelbuild/platforms/releases/download/0.0.10/platforms-0.0.10.tar.gz",
+        "https://github.com/bazelbuild/platforms/releases/download/0.0.10/platforms-0.0.10.tar.gz",
     ],
 )
 
@@ -502,7 +502,7 @@ web_test_go_repositories()
 http_file(
     name = "aws_rds_certs",
     downloaded_file_path = "rds-combined-ca-bundle.pem",
-    sha256 = "51b107da46717aed974d97464b63f7357b220fe8737969db1492d1cae74b3947",
+    sha256 = "d72191eaa5d48fe2b6e044a0ae0b0e9f35e325b34b1ecab6ffe11d490d5cdb8f",
     url = "https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem",
 )
 

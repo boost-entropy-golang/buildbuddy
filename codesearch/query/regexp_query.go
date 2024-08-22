@@ -6,17 +6,15 @@ import (
 	"context"
 	"encoding/csv"
 	"fmt"
-	"regexp"
 	"regexp/syntax"
 	"strconv"
 	"strings"
 
 	"github.com/buildbuddy-io/buildbuddy/codesearch/dfa"
+	"github.com/buildbuddy-io/buildbuddy/codesearch/filters"
 	"github.com/buildbuddy-io/buildbuddy/codesearch/token"
 	"github.com/buildbuddy-io/buildbuddy/codesearch/types"
 	"github.com/buildbuddy-io/buildbuddy/server/util/log"
-	"github.com/buildbuddy-io/buildbuddy/server/util/status"
-	"github.com/go-enry/go-enry/v2"
 )
 
 const (
@@ -101,15 +99,13 @@ func match(re *dfa.Regexp, buf []byte) []region {
 
 func (s *reScorer) Score(docMatch types.DocumentMatch, doc types.Document) float64 {
 	docScore := 0.0
-	for _, fieldName := range docMatch.FieldNames() {
-		re, ok := s.fieldMatchers[fieldName]
-		if !ok {
-			continue
-		}
+	for fieldName := range s.fieldMatchers {
+		re := s.fieldMatchers[fieldName]
 		field := doc.Field(fieldName)
 		if len(field.Contents()) == 0 {
 			continue
 		}
+
 		matchingRegions := match(re.Clone(), field.Contents())
 		f_qi_d := float64(len(matchingRegions))
 		D := float64(len(strings.Fields(string(field.Contents()))))
@@ -217,11 +213,11 @@ func (h *reHighlighter) Highlight(doc types.Document) []types.HighlightedRegion 
 }
 
 type ReQuery struct {
-	ctx           context.Context
-	log           log.Logger
-	parsed        string
-	squery        []byte
-	numResults    int
+	ctx    context.Context
+	log    log.Logger
+	parsed string
+	squery string
+
 	fieldMatchers map[string]*dfa.Regexp
 }
 
@@ -233,7 +229,7 @@ func expressionToSquery(expr string, fieldName string) (string, error) {
 	return RegexpQuery(syn).SQuery(fieldName), nil
 }
 
-func NewReQuery(ctx context.Context, q string, numResults int) (*ReQuery, error) {
+func NewReQuery(ctx context.Context, q string) (*ReQuery, error) {
 	subLog := log.NamedSubLogger("regexp-query")
 	subLog.Infof("raw query: [%s]", q)
 
@@ -247,51 +243,35 @@ func NewReQuery(ctx context.Context, q string, numResults int) (*ReQuery, error)
 	// Regexp matches (for highlighting) by fieldname.
 	fieldMatchers := make(map[string]*dfa.Regexp)
 
-	// Match `case:yes` or `case:y` and enable case-sensitive searches.
-	caseMatcher := regexp.MustCompile(`case:(yes|y|no|n)`)
-	caseMatch := caseMatcher.FindStringSubmatch(q)
-	if len(caseMatch) == 2 {
-		q = caseMatcher.ReplaceAllString(q, "")
-		if strings.HasPrefix(caseMatch[1], "n") {
-			regexFlags += "i"
-		}
-	} else {
-		// otherwise default to case-insensitive
+	q, caseSensitive := filters.ExtractCaseSensitivity(q)
+	if !caseSensitive {
 		regexFlags += "i"
 	}
 
-	// match `file:test.js`, `f:test.js`, and `path:test.js`
-	fileMatcher := regexp.MustCompile(`(?:file:|f:|path:)(?P<filepath>[[:graph:]]+)`)
-	fileMatch := fileMatcher.FindStringSubmatch(q)
-
-	if len(fileMatch) == 2 {
-		q = fileMatcher.ReplaceAllString(q, "")
-		subQ, err := expressionToSquery(fileMatch[1], filenameField)
+	q, filename := filters.ExtractFilenameFilter(q)
+	if len(filename) > 0 {
+		subQ, err := expressionToSquery(filename, filenameField)
 		if err != nil {
 			return nil, err
 		}
 		requiredSClauses = append(requiredSClauses, subQ)
-		fileMatchRe, err := dfa.Compile(fileMatch[1])
+		fileMatchRe, err := dfa.Compile(filename)
 		if err != nil {
 			return nil, err
 		}
 		fieldMatchers[filenameField] = fileMatchRe
 	}
 
-	// match `lang:go`, `lang:java`, etc.
-	// the list of supported languages (and their aliases) is here:
-	// https://github.com/github-linguist/linguist/blob/master/lib/linguist/languages.yml
-	langMatcher := regexp.MustCompile(`(?:lang:)(?P<lang>[[:graph:]]+)`)
-	langMatch := langMatcher.FindStringSubmatch(q)
-	if len(langMatch) == 2 {
-		q = langMatcher.ReplaceAllString(q, "")
-		lang, ok := enry.GetLanguageByAlias(langMatch[1])
-		if ok {
-			subQ := fmt.Sprintf("(:eq language %s)", strconv.Quote(strings.ToLower(lang)))
-			requiredSClauses = append(requiredSClauses, subQ)
-		} else {
-			return nil, status.InvalidArgumentErrorf("unknown lang %q", langMatch[1])
-		}
+	q, lang := filters.ExtractLanguageFilter(q)
+	if len(lang) > 0 {
+		subQ := fmt.Sprintf("(:eq language %s)", strconv.Quote(strings.ToLower(lang)))
+		requiredSClauses = append(requiredSClauses, subQ)
+	}
+
+	q, repo := filters.ExtractRepoFilter(q)
+	if len(repo) > 0 {
+		subQ := fmt.Sprintf("(:eq repo %s)", strconv.Quote(repo))
+		requiredSClauses = append(requiredSClauses, subQ)
 	}
 
 	q = strings.TrimSpace(q)
@@ -350,20 +330,18 @@ func NewReQuery(ctx context.Context, q string, numResults int) (*ReQuery, error)
 		}
 		squery = "(:and " + squery + " " + clauses + ")"
 	}
-	subLog.Infof("squery: %q", squery)
 
 	req := &ReQuery{
 		ctx:           ctx,
 		log:           subLog,
-		squery:        []byte(squery),
+		squery:        squery,
 		parsed:        q,
-		numResults:    numResults,
 		fieldMatchers: fieldMatchers,
 	}
 	return req, nil
 }
 
-func (req *ReQuery) SQuery() []byte {
+func (req *ReQuery) SQuery() string {
 	return req.squery
 }
 
@@ -371,18 +349,14 @@ func (req *ReQuery) ParsedQuery() string {
 	return req.parsed
 }
 
-func (req *ReQuery) NumResults() int {
-	return req.numResults
-}
-
-func (req *ReQuery) GetScorer() types.Scorer {
+func (req *ReQuery) Scorer() types.Scorer {
 	return &reScorer{
 		fieldMatchers: req.fieldMatchers,
 		skip:          len(req.fieldMatchers) == 0,
 	}
 }
 
-func (req *ReQuery) GetHighlighter() types.Highlighter {
+func (req *ReQuery) Highlighter() types.Highlighter {
 	return &reHighlighter{req.fieldMatchers}
 }
 

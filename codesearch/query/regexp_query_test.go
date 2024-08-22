@@ -10,11 +10,11 @@ import (
 
 func TestCaseSensitive(t *testing.T) {
 	ctx := context.Background()
-	q, err := NewReQuery(ctx, "case:y foo", 1)
+	q, err := NewReQuery(ctx, "case:y foo")
 	require.NoError(t, err)
 
 	squery := string(q.SQuery())
-	assert.Contains(t, squery, "(:eq content foo)")
+	assert.Contains(t, squery, `(:eq content "foo")`)
 
 	fieldMatchers := q.TestOnlyFieldMatchers()
 	require.Contains(t, fieldMatchers, "content")
@@ -23,11 +23,11 @@ func TestCaseSensitive(t *testing.T) {
 
 func TestCaseInsensitive(t *testing.T) {
 	ctx := context.Background()
-	q, err := NewReQuery(ctx, "Foo", 1)
+	q, err := NewReQuery(ctx, "Foo")
 	require.NoError(t, err)
 
 	squery := string(q.SQuery())
-	assert.Contains(t, squery, `(:eq content foo)`)
+	assert.Contains(t, squery, `(:eq content "foo")`)
 
 	fieldMatchers := q.TestOnlyFieldMatchers()
 	require.Contains(t, fieldMatchers, "content")
@@ -37,11 +37,11 @@ func TestCaseInsensitive(t *testing.T) {
 
 func TestCaseNo(t *testing.T) {
 	ctx := context.Background()
-	q, err := NewReQuery(ctx, "fOO case:no", 1)
+	q, err := NewReQuery(ctx, "fOO case:no")
 	require.NoError(t, err)
 
 	squery := string(q.SQuery())
-	assert.Contains(t, squery, `(:eq content foo)`)
+	assert.Contains(t, squery, `(:eq content "foo")`)
 
 	fieldMatchers := q.TestOnlyFieldMatchers()
 	require.Contains(t, fieldMatchers, "content")
@@ -51,7 +51,7 @@ func TestCaseNo(t *testing.T) {
 
 func TestLangAtom(t *testing.T) {
 	ctx := context.Background()
-	q, err := NewReQuery(ctx, "lang:java foo", 1)
+	q, err := NewReQuery(ctx, "lang:java foo")
 	require.NoError(t, err)
 
 	squery := string(q.SQuery())
@@ -64,7 +64,7 @@ func TestLangAtom(t *testing.T) {
 
 func TestFileAtom(t *testing.T) {
 	ctx := context.Background()
-	q, err := NewReQuery(ctx, "f:foo/bar/baz.a", 1)
+	q, err := NewReQuery(ctx, "f:foo/bar/baz.a")
 	require.NoError(t, err)
 
 	squery := string(q.SQuery())
@@ -83,7 +83,7 @@ func TestFileAtom(t *testing.T) {
 
 func TestGroupedTerms(t *testing.T) {
 	ctx := context.Background()
-	q, err := NewReQuery(ctx, `"grp trm" case:y`, 1)
+	q, err := NewReQuery(ctx, `"grp trm" case:y`)
 	require.NoError(t, err)
 
 	squery := string(q.SQuery())
@@ -96,11 +96,11 @@ func TestGroupedTerms(t *testing.T) {
 
 func TestUngroupedTerms(t *testing.T) {
 	ctx := context.Background()
-	q, err := NewReQuery(ctx, "grp trm case:y", 1)
+	q, err := NewReQuery(ctx, "grp trm case:y")
 	require.NoError(t, err)
 
 	squery := string(q.SQuery())
-	assert.Contains(t, squery, `(:and (:eq content grp) (:eq content trm))`)
+	assert.Contains(t, squery, `(:and (:eq content "grp") (:eq content "trm"))`)
 
 	fieldMatchers := q.TestOnlyFieldMatchers()
 	require.Contains(t, fieldMatchers, "content")

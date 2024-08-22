@@ -191,6 +191,10 @@ var (
 	ptyRows = flag.Int("pty_rows", 20, "Terminal height, in rows")
 	ptyCols = flag.Int("pty_cols", 114, "Terminal width, in columns")
 
+	// These command line options are used in the UI, even if they aren't used
+	// directly by this binary.
+	digestFunction = flag.String("digest_function", repb.DigestFunction_BLAKE3.String(), "The digest function used for the ci_runner execution.")
+
 	// Test-only flags
 	fallbackToCleanCheckout = flag.Bool("fallback_to_clean_checkout", true, "Fallback to cloning the repo from scratch if sync fails (for testing purposes only).")
 
@@ -1056,7 +1060,7 @@ func (ar *actionRunner) Run(ctx context.Context, ws *workspace) error {
 			return err
 		}
 
-		_, runErr := runBashCommand(ctx, step.Run, nil, action.BazelWorkspaceDir, ar.reporter)
+		runErr := runBashCommand(ctx, step.Run, nil, action.BazelWorkspaceDir, ar.reporter)
 		exitCode := getExitCode(runErr)
 
 		// Flush progress after every command.
@@ -2014,13 +2018,13 @@ func (ws *workspace) checkoutRef(ctx context.Context) error {
 }
 
 func (ws *workspace) config(ctx context.Context) error {
+	useSystemGitCredentials := os.Getenv("USE_SYSTEM_GIT_CREDENTIALS") == "1"
+
 	// Set up repo-local config.
 	cfg := [][]string{
 		{"user.email", "ci-runner@buildbuddy.io"},
 		{"user.name", "BuildBuddy"},
 		{"advice.detachedHead", "false"},
-		// Disable any credential helpers (in particular, osxkeychain)
-		{"credential.helper", ""},
 		// With the version of git that we have installed in the CI runner
 		// image, --filter=blob:none requires the partialClone extension to be
 		// enabled.
@@ -2031,6 +2035,12 @@ func (ws *workspace) config(ctx context.Context) error {
 		// the case where we don't sync successfully.
 		{"gc.auto", "0"},
 	}
+	if !useSystemGitCredentials {
+		// Disable any credential helpers (in particular, osxkeychain which
+		// displays a blocking popup dialog)
+		cfg = append(cfg, []string{"credential.helper", ""})
+	}
+
 	writeCommandSummary(ws.log, "Configuring repository...")
 	for _, kv := range cfg {
 		// Don't show the config output.
@@ -2042,7 +2052,7 @@ func (ws *workspace) config(ctx context.Context) error {
 	// Set up global config (~/.gitconfig) but only on Linux for now since Linux
 	// workflows are isolated.
 	// TODO(bduffany): find a solution that works for Mac workflows too.
-	if runtime.GOOS == "linux" {
+	if !useSystemGitCredentials && runtime.GOOS == "linux" {
 		// SSH URL rewrites and git credential helper are used for external git
 		// deps fetched by bazel, so these need to be in the global config.
 		if err := configureGlobalURLRewrites(ctx); err != nil {
@@ -2067,20 +2077,28 @@ func (ws *workspace) fetch(ctx context.Context, remoteURL string, refs []string,
 	if len(refs) == 0 {
 		return nil
 	}
-	authURL, err := gitutil.AuthRepoURL(remoteURL, os.Getenv(repoUserEnvVarName), os.Getenv(repoTokenEnvVarName))
-	if err != nil {
-		return err
+
+	fetchURL := remoteURL
+	useSystemGitCredentials := os.Getenv("USE_SYSTEM_GIT_CREDENTIALS") == "1"
+	if !useSystemGitCredentials {
+		authURL, err := gitutil.AuthRepoURL(remoteURL, os.Getenv(repoUserEnvVarName), os.Getenv(repoTokenEnvVarName))
+		if err != nil {
+			return err
+		}
+		fetchURL = authURL
 	}
+
 	remoteName := gitRemoteName(remoteURL)
 	writeCommandSummary(ws.log, "Configuring remote %q...", remoteName)
+
 	// Don't show `git remote add` command or the error message since the URL may
 	// contain the repo access token.
-	if _, err := git(ctx, io.Discard, "remote", "add", remoteName, authURL); err != nil {
+	if _, err := git(ctx, io.Discard, "remote", "add", remoteName, fetchURL); err != nil {
 		// Rename the existing remote. Removing then re-adding would be simpler,
 		// but unfortunately that drops the "partialclonefilter" options on the
 		// existing remote.
 		if isRemoteAlreadyExists(err) {
-			if _, err := git(ctx, io.Discard, "remote", "set-url", remoteName, authURL); err != nil {
+			if _, err := git(ctx, io.Discard, "remote", "set-url", remoteName, fetchURL); err != nil {
 				return err
 			}
 		} else {
@@ -2334,12 +2352,12 @@ func gitRemoteName(repoURL string) string {
 	return forkGitRemoteName
 }
 
-func runBashCommand(ctx context.Context, cmd string, env map[string]string, dir string, outputSink io.Writer) (string, *commandError) {
+func runBashCommand(ctx context.Context, cmd string, env map[string]string, dir string, outputSink io.Writer) error {
 	if err := printCommandLine(outputSink, cmd); err != nil {
-		return "", &commandError{err, ""}
+		return err
 	}
 
-	return runCommandWithOutput(ctx, "bash", []string{"-eo", "pipefail", "-c", cmd}, env, dir, outputSink)
+	return runCommand(ctx, "bash", []string{"-eo", "pipefail", "-c", cmd}, env, dir, outputSink)
 }
 
 func runCommandWithOutput(ctx context.Context, executable string, args []string, env map[string]string, dir string, outputSink io.Writer) (string, *commandError) {
