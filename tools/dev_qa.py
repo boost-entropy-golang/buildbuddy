@@ -33,7 +33,7 @@ REPO_CONFIGS = [
     {
         "name": "buildbuddy",
         "repo_url": "https://github.com/buildbuddy-io/buildbuddy",
-        "commit_sha": "3d001c946273dca873086b58170f35cfb0c06cbb",
+        "commit_sha": "4d85d58a7d3967a448c430a80fb6ecc2beef886b",
         "command": """
             bazel test //... \
                 --config=remote-dev \
@@ -162,7 +162,7 @@ def run_test(name, repo_url, commit_sha, command, clean_repos=False):
         fi
 
         # Pin to a specific bazel version
-        echo '7.0.2' > .bazelversion
+        echo '7.3.1' > .bazelversion
 
         set -x
         bazel clean
