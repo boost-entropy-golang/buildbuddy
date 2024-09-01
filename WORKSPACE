@@ -67,9 +67,9 @@ http_archive(
 
 http_archive(
     name = "com_google_absl",
-    sha256 = "f50e5ac311a81382da7fa75b97310e4b9006474f9560ac46f54a9967f07d4ae3",
-    strip_prefix = "abseil-cpp-20240722.0",
-    urls = ["https://github.com/abseil/abseil-cpp/releases/download/20240722.0/abseil-cpp-20240722.0.tar.gz"],
+    sha256 = "987ce98f02eefbaf930d6e38ab16aa05737234d7afbab2d5c4ea7adbe50c28ed",
+    strip_prefix = "abseil-cpp-20230802.1",
+    urls = ["https://github.com/abseil/abseil-cpp/archive/refs/tags/20230802.1.tar.gz"],
 )
 
 load(":deps.bzl", "install_go_mod_dependencies", "install_static_dependencies")
@@ -251,9 +251,9 @@ googletest_deps()
 
 http_archive(
     name = "com_google_protobuf",
-    sha256 = "1535151efbc7893f38b0578e83cac584f2819974f065698976989ec71c1af84a",
-    strip_prefix = "protobuf-27.3",
-    urls = ["https://github.com/protocolbuffers/protobuf/releases/download/v27.3/protobuf-27.3.tar.gz"],
+    sha256 = "e32100a8013870d24ffc37dad6781a61e5d0c99501bcb04d39c340a1c44a8e63",
+    strip_prefix = "protobuf-26.0",
+    urls = ["https://github.com/protocolbuffers/protobuf/releases/download/v26.0/protobuf-26.0.tar.gz"],
 )
 
 http_archive(
