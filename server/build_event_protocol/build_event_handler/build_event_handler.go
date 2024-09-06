@@ -719,6 +719,14 @@ func isWorkspaceStatusEvent(bazelBuildEvent *build_event_stream.BuildEvent) bool
 	return false
 }
 
+func isChildInvocationsConfiguredEvent(bazelBuildEvent *build_event_stream.BuildEvent) bool {
+	switch bazelBuildEvent.Payload.(type) {
+	case *build_event_stream.BuildEvent_ChildInvocationsConfigured:
+		return true
+	}
+	return false
+}
+
 func readBazelEvent(obe *pepb.OrderedBuildEvent, out *build_event_stream.BuildEvent) error {
 	switch buildEvent := obe.Event.Event.(type) {
 	case *bepb.BuildEvent_BazelEvent:
@@ -1120,8 +1128,8 @@ func (e *EventChannel) processSingleEvent(event *inpb.InvocationEvent, iid strin
 	switch p := event.BuildEvent.Payload.(type) {
 	case *build_event_stream.BuildEvent_Progress:
 		if e.logWriter != nil {
-			if _, err := e.logWriter.Write(e.ctx, append([]byte(p.Progress.Stderr), []byte(p.Progress.Stdout)...)); err != nil {
-				log.Errorf("Error writing build logs for event: %s\nEvent: %s", err, event)
+			if _, err := e.logWriter.Write(e.ctx, append([]byte(p.Progress.Stderr), []byte(p.Progress.Stdout)...)); err != nil && err != context.Canceled {
+				log.CtxWarningf(e.ctx, "Failed to write build logs for event: %s", err)
 			}
 			// Don't store the log in the protostream if we're
 			// writing it separately to blobstore
@@ -1143,11 +1151,11 @@ func (e *EventChannel) processSingleEvent(event *inpb.InvocationEvent, iid strin
 			return err
 		}
 
-		// Small optimization: Flush the event stream after the workspace status event. Most of the
-		// command line options and workspace info has come through by then, so we have
-		// something to show the user. Flushing the proto file here allows that when the
-		// client fetches status for the incomplete build. Also flush if we haven't in over a minute.
-		if isWorkspaceStatusEvent(event.BuildEvent) || e.pw.TimeSinceLastWrite().Minutes() > 1 {
+		// Small optimization: For certain event types, flush the event stream
+		// immediately to show things to the user faster when fetching status
+		// of an incomplete build.
+		/// Also flush if we haven't in over a minute.
+		if shouldFlushImmediately(event.BuildEvent) || e.pw.TimeSinceLastWrite().Minutes() > 1 {
 			if err := e.pw.Flush(e.ctx); err != nil {
 				return err
 			}
@@ -1165,6 +1173,16 @@ func (e *EventChannel) processSingleEvent(event *inpb.InvocationEvent, iid strin
 	}
 
 	return nil
+}
+
+func shouldFlushImmediately(bazelBuildEvent *build_event_stream.BuildEvent) bool {
+	// Workspace status event: Most of the command line options and workspace info
+	// has come through by then, so we have a good amount of info to show the user
+	// about the in-progress build
+	//
+	// Child invocations configured event: If a child invocation starts, flush
+	// the event stream so we can link to the child invocation in the UI
+	return isWorkspaceStatusEvent(bazelBuildEvent) || isChildInvocationsConfiguredEvent(bazelBuildEvent)
 }
 
 const apiFacetsExpiration = 1 * time.Hour

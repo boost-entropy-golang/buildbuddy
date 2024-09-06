@@ -100,8 +100,7 @@ common:workflows --flaky_test_attempts=2
 common:workflows --config=buildbuddy_bes_backend
 common:workflows --config=buildbuddy_bes_results_url
 common:workflows --config=buildbuddy_remote_cache
-# Temporarily disabled while testing blake3.
-#common:workflows --config=buildbuddy_experimental_remote_downloader
+common:workflows --config=buildbuddy_experimental_remote_downloader
 
 common:race --@io_bazel_rules_go//go/config:race
 
@@ -159,7 +158,7 @@ common:auto-release --remote_instance_name=buildbuddy-io/buildbuddy/auto-release
 common:auto-release -c opt
 common:auto-release --@io_bazel_rules_go//go/config:pgoprofile=enterprise/tools/pgo:prod.pprof
 
-# Build fully static binaries linked against musl on Linux or macOS.
+# Build fully static binaries linked against musl on Linux.
 common:static --platforms=//platforms:linux_x86_64_musl
 common:static-arm64 --platforms=//platforms:linux_arm64_musl
 

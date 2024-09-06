@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/buildbuddy-io/buildbuddy/cli/remotebazel"
+	"github.com/buildbuddy-io/buildbuddy/enterprise/server/execution_service"
 	"github.com/buildbuddy-io/buildbuddy/enterprise/server/hostedrunner"
 	"github.com/buildbuddy-io/buildbuddy/enterprise/server/invocation_search_service"
 	"github.com/buildbuddy-io/buildbuddy/enterprise/server/test/integration/remote_execution/rbetest"
@@ -22,6 +23,7 @@ import (
 	"github.com/buildbuddy-io/buildbuddy/server/testutil/testgit"
 	"github.com/buildbuddy-io/buildbuddy/server/testutil/testshell"
 	"github.com/buildbuddy-io/buildbuddy/server/util/bazel"
+	"github.com/buildbuddy-io/buildbuddy/server/util/log"
 	"github.com/buildbuddy-io/buildbuddy/server/util/testing/flags"
 	"github.com/stretchr/testify/require"
 
@@ -33,6 +35,15 @@ import (
 	inspb "github.com/buildbuddy-io/buildbuddy/proto/invocation_status"
 	uidpb "github.com/buildbuddy-io/buildbuddy/proto/user_id"
 )
+
+func init() {
+	// There is a race condition when the cli redirects stdout to a file to
+	// capture some output. Mean while the health checker logs to stdout on
+	// startup. Silence the logs to remove the race.
+	*log.LogLevel = "warn"
+	log.Configure()
+
+}
 
 func waitForInvocationCreated(t *testing.T, ctx context.Context, bb bbspb.BuildBuddyServiceClient, reqCtx *ctxpb.RequestContext) {
 	for delay := 50 * time.Millisecond; delay < 1*time.Minute; delay *= 2 {
@@ -105,7 +116,6 @@ func TestWithPublicRepo(t *testing.T) {
 	bbClient := env.GetBuildBuddyServiceClient()
 	apiRsp, err := bbClient.CreateApiKey(ctx, &akpb.CreateApiKeyRequest{
 		RequestContext: reqCtx,
-		GroupId:        env.GroupID1,
 		Capability: []akpb.ApiKey_Capability{
 			akpb.ApiKey_CAS_WRITE_CAPABILITY,
 			akpb.ApiKey_CACHE_WRITE_CAPABILITY,
@@ -243,6 +253,7 @@ func runLocalServerAndExecutor(t *testing.T, githubToken string) (*rbetest.Env, 
 			keyValStore, err := memory_kvstore.NewMemoryKeyValStore()
 			require.NoError(t, err)
 			e.SetKeyValStore(keyValStore)
+			e.SetExecutionService(execution_service.NewExecutionService(e))
 		},
 	})
 
@@ -298,7 +309,6 @@ func TestCancel(t *testing.T) {
 	bbClient := env.GetBuildBuddyServiceClient()
 	apiRsp, err := bbClient.CreateApiKey(ctx, &akpb.CreateApiKeyRequest{
 		RequestContext: reqCtx,
-		GroupId:        env.GroupID1,
 		Capability: []akpb.ApiKey_Capability{
 			akpb.ApiKey_CAS_WRITE_CAPABILITY,
 			akpb.ApiKey_CACHE_WRITE_CAPABILITY,

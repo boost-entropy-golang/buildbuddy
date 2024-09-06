@@ -26,6 +26,7 @@ go_test(
     ],
     deps = [
         "//cli/remotebazel",
+        "//enterprise/server/execution_service",
         "//enterprise/server/hostedrunner",
         "//enterprise/server/invocation_search_service",
         "//enterprise/server/test/integration/remote_execution/rbetest",
@@ -45,6 +46,7 @@ go_test(
         "//server/testutil/testgit",
         "//server/testutil/testshell",
         "//server/util/bazel",
+        "//server/util/log",
         "//server/util/testing/flags",
         "@com_github_stretchr_testify//require",
     ],
