@@ -15,7 +15,8 @@ const (
 	StringTokenField
 	SparseNgramField
 
-	DocIDField = "_id"
+	DocIDField   = "_id"
+	DeletesField = "_del"
 )
 
 func (ft FieldType) String() string {
@@ -92,9 +93,7 @@ type Highlighter interface {
 
 type Query interface {
 	SQuery() string
-	ParsedQuery() string
 	Scorer() Scorer
-	Highlighter() Highlighter
 }
 
 type Searcher interface {

@@ -31,6 +31,8 @@ go_library(
         "//server/util/log",
         "//server/util/status",
         "//server/util/statusz",
+        "@com_github_jonboulle_clockwork//:clockwork",
+        "@org_golang_x_sync//errgroup",
     ],
 )
 
@@ -40,6 +42,7 @@ go_test(
     shard_count = 5,
     deps = [
         ":cache",
+        "//enterprise/server/raft/usagetracker",
         "//proto:resource_go_proto",
         "//server/gossip",
         "//server/interfaces",
@@ -48,8 +51,11 @@ go_test(
         "//server/testutil/testenv",
         "//server/testutil/testfs",
         "//server/testutil/testport",
+        "//server/util/disk",
         "//server/util/log",
         "//server/util/prefix",
+        "//server/util/testing/flags",
+        "@com_github_jonboulle_clockwork//:clockwork",
         "@com_github_stretchr_testify//require",
         "@org_golang_x_sync//errgroup",
     ],

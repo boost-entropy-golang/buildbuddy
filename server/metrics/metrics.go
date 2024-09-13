@@ -263,6 +263,11 @@ const (
 
 	// Name of a file.
 	FileName = "file_name"
+
+	// Outcome of attempting to enqueue a remote atime update. One of
+	// "enqueued", "duplicate", "dropped_batch_too_large", or
+	// "dropped_too_many_batches"
+	AtimeUpdateOutcome = "status"
 )
 
 // Label value constants
@@ -827,7 +832,7 @@ var (
 		Namespace: bbNamespace,
 		Subsystem: "remote_execution",
 		Name:      "executed_action_metadata_durations_usec",
-		Buckets:   durationUsecBuckets(1*time.Microsecond, 1*day, 5),
+		Buckets:   durationUsecBuckets(1*time.Microsecond, 1*day, 2),
 		Help:      "Time spent in each stage of action execution, in **microseconds**. Queries should filter or group by the `stage` label, taking care not to aggregate different stages.",
 	}, []string{
 		ExecutedActionStageLabel,
@@ -838,7 +843,7 @@ var (
 		Namespace: bbNamespace,
 		Subsystem: "remote_execution",
 		Name:      "duration_usec_exported",
-		Buckets:   durationUsecBuckets(1*time.Microsecond, 1*day, 5),
+		Buckets:   durationUsecBuckets(1*time.Microsecond, 1*day, 2),
 		Help:      "Time spent in remote execution, in **microseconds**. ",
 	}, []string{
 		OS,
@@ -2773,6 +2778,27 @@ var (
 	}, []string{
 		CASOperation,
 		CacheHitMissStatus,
+	})
+
+	// ## Cache Proxy Remote Atime Update Metrics
+	RemoteAtimeUpdates = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: bbNamespace,
+		Subsystem: "proxy",
+		Name:      "remote_atime_updates",
+		Help:      "The number of remote atime updates enqueued, with the outcome of the enqueue operation.",
+	}, []string{
+		GroupID,
+		AtimeUpdateOutcome,
+	})
+
+	RemoteAtimeUpdatesSent = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: bbNamespace,
+		Subsystem: "proxy",
+		Name:      "remote_atime_update_requests",
+		Help:      "The number of FindMissingBlobRequests sent to the remote cache to update remote blob atimes.",
+	}, []string{
+		GroupID,
+		StatusLabel,
 	})
 )
 

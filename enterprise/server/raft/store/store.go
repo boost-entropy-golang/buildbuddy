@@ -174,16 +174,16 @@ func New(env environment.Env, rootDir, raftAddress, grpcAddr string, partitions 
 		return nil, err
 	}
 	leaser := pebble.NewDBLeaser(db)
-	clock := clockwork.NewRealClock()
-	return NewWithArgs(env, rootDir, nodeHost, gossipManager, sender, registry, raftListener, apiClient, grpcAddr, partitions, db, leaser, clock)
+	return NewWithArgs(env, rootDir, nodeHost, gossipManager, sender, registry, raftListener, apiClient, grpcAddr, partitions, db, leaser)
 }
 
-func NewWithArgs(env environment.Env, rootDir string, nodeHost *dragonboat.NodeHost, gossipManager interfaces.GossipService, sender *sender.Sender, registry registry.NodeRegistry, listener *listener.RaftListener, apiClient *client.APIClient, grpcAddress string, partitions []disk.Partition, db pebble.IPebbleDB, leaser pebble.Leaser, clock clockwork.Clock) (*Store, error) {
+func NewWithArgs(env environment.Env, rootDir string, nodeHost *dragonboat.NodeHost, gossipManager interfaces.GossipService, sender *sender.Sender, registry registry.NodeRegistry, listener *listener.RaftListener, apiClient *client.APIClient, grpcAddress string, partitions []disk.Partition, db pebble.IPebbleDB, leaser pebble.Leaser) (*Store, error) {
 	nodeLiveness := nodeliveness.New(env.GetServerContext(), nodeHost.ID(), sender)
 
 	nhLog := log.NamedSubLogger(nodeHost.ID())
 	eventsChan := make(chan events.Event, 100)
 
+	clock := env.GetClock()
 	session := client.NewSessionWithClock(clock)
 	lkSession := client.NewSessionWithClock(clock)
 
@@ -265,20 +265,41 @@ func NewWithArgs(env environment.Env, rootDir string, nodeHost *dragonboat.NodeH
 
 	s.updateTagsWorker.Start()
 
-	// rejoin configured clusters
 	nodeHostInfo := nodeHost.GetNodeHostInfo(dragonboat.NodeHostInfoOption{})
-
-	logSize := len(nodeHostInfo.LogInfo)
-	for i, logInfo := range nodeHostInfo.LogInfo {
-		if nodeHost.HasNodeInfo(logInfo.ShardID, logInfo.ReplicaID) {
-			s.log.Infof("Had info for c%dn%d. (%d/%d)", logInfo.ShardID, logInfo.ReplicaID, i+1, logSize)
+	previouslyStartedReplicas := make([]*rfpb.ReplicaDescriptor, 0, len(nodeHostInfo.LogInfo))
+	for _, logInfo := range nodeHostInfo.LogInfo {
+		if !nodeHost.HasNodeInfo(logInfo.ShardID, logInfo.ReplicaID) {
+			// Skip nodes not on this machine.
+			continue
+		}
+		if logInfo.ShardID == constants.MetaRangeID {
+			s.log.Infof("Starting metarange replica: %+v", logInfo)
 			s.replicaInitStatusWaiter.MarkStarted(logInfo.ShardID)
-			r := raftConfig.GetRaftConfig(logInfo.ShardID, logInfo.ReplicaID)
-			if err := nodeHost.StartOnDiskReplica(nil, false /*=join*/, s.ReplicaFactoryFn, r); err != nil {
+			rc := raftConfig.GetRaftConfig(logInfo.ShardID, logInfo.ReplicaID)
+			if err := nodeHost.StartOnDiskReplica(nil, false /*=join*/, s.ReplicaFactoryFn, rc); err != nil {
 				return nil, status.InternalErrorf("failed to start c%dn%d: %s", logInfo.ShardID, logInfo.ReplicaID, err)
 			}
-			s.configuredClusters++
-			s.log.Infof("Recreated c%dn%d.", logInfo.ShardID, logInfo.ReplicaID)
+		} else {
+			replicaDescriptor := &rfpb.ReplicaDescriptor{RangeId: logInfo.ShardID, ReplicaId: logInfo.ReplicaID}
+			previouslyStartedReplicas = append(previouslyStartedReplicas, replicaDescriptor)
+		}
+	}
+
+	ctx := context.Background()
+
+	// Scan the metarange and start any clusters we own that have not been
+	// removed. If previouslyStartedReplicas is an empty list, then
+	// LookupActiveReplicas will return nil, nil, and the following loop
+	// will be a no-op.
+	activeReplicas, err := s.sender.LookupActiveReplicas(ctx, previouslyStartedReplicas)
+	if err != nil {
+		return nil, err
+	}
+	for _, r := range activeReplicas {
+		s.replicaInitStatusWaiter.MarkStarted(r.GetRangeId())
+		rc := raftConfig.GetRaftConfig(r.GetRangeId(), r.GetReplicaId())
+		if err := nodeHost.StartOnDiskReplica(nil, false /*=join*/, s.ReplicaFactoryFn, rc); err != nil {
+			return nil, status.InternalErrorf("failed to start c%dn%d: %s", r.GetRangeId(), r.GetReplicaId(), err)
 		}
 	}
 
@@ -492,6 +513,7 @@ func (s *Store) Stop(ctx context.Context) error {
 		s.log.Infof("Store: shutdown finished in %s", time.Since(now))
 	}()
 
+	s.usages.Stop()
 	if s.egCancel != nil {
 		s.egCancel()
 		s.leaseKeeper.Stop()
@@ -499,6 +521,7 @@ func (s *Store) Stop(ctx context.Context) error {
 		s.eg.Wait()
 	}
 	s.updateTagsWorker.Stop()
+	s.replicaInitStatusWaiter.Stop()
 
 	s.log.Info("Store: waitgroups finished")
 	s.nodeHost.Close()
@@ -512,6 +535,10 @@ func (s *Store) Stop(ctx context.Context) error {
 	// Wait for all active requests to be finished.
 	s.leaser.Close()
 	s.log.Info("Store: leaser closed")
+
+	if err := s.db.Close(); err != nil {
+		return err
+	}
 	return grpc_server.GRPCShutdown(ctx, s.grpcServer)
 }
 
@@ -2401,4 +2428,8 @@ func (s *Store) GetReplicaStates(ctx context.Context, rd *rfpb.RangeDescriptor) 
 		}
 	}
 	return res
+}
+
+func (s *Store) TestingWaitForGC() {
+	s.usages.TestingWaitForGC()
 }

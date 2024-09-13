@@ -288,7 +288,7 @@ type buildEventReporter struct {
 	cancelBackgroundFlush func()
 
 	// Child invocations detected by scanning the build logs
-	childInvocations map[string]struct{}
+	childInvocations []string
 
 	mu            sync.Mutex // protects(progressCount)
 	progressCount int32
@@ -319,7 +319,7 @@ func newBuildEventReporter(ctx context.Context, besBackend string, apiKey string
 		uploader = ul
 	}
 
-	return &buildEventReporter{apiKey: apiKey, bep: bep, uploader: uploader, log: newInvocationLog(), invocationID: iid, isWorkflow: isWorkflow, childInvocations: map[string]struct{}{}}, nil
+	return &buildEventReporter{apiKey: apiKey, bep: bep, uploader: uploader, log: newInvocationLog(), invocationID: iid, isWorkflow: isWorkflow, childInvocations: []string{}}, nil
 }
 
 func (r *buildEventReporter) InvocationID() string {
@@ -437,8 +437,8 @@ func (r *buildEventReporter) Start(startTime time.Time) error {
 		return err
 	}
 
-	r.log.writeListener = func(b []byte) {
-		r.emitBuildEventsForBazelCommands(b)
+	r.log.writeListener = func(s string) {
+		r.emitBuildEventsForBazelCommands(s)
 		// Flush whenever the log buffer fills past a certain threshold.
 		if size := r.log.Len(); size >= progressFlushThresholdBytes {
 			r.FlushProgress() // ignore error; it will surface in `bep.Finish()`
@@ -560,17 +560,12 @@ func (r *buildEventReporter) startBackgroundProgressFlush() func() {
 //
 // Event publishing errors will be surfaced in the caller func when calling
 // `buildEventPublisher.Finish()`
-//
-// TODO: Emit TargetConfigured and TargetCompleted events to render artifacts
-// for each command
-func (r *buildEventReporter) emitBuildEventsForBazelCommands(b []byte) {
-	output := string(b)
-
+func (r *buildEventReporter) emitBuildEventsForBazelCommands(output string) {
 	// Check whether a bazel invocation was invoked
 	iidMatches := invocationIDRegex.FindAllStringSubmatch(output, -1)
 	for _, m := range iidMatches {
 		iid := m[1]
-		_, childStarted := r.childInvocations[iid]
+		childStarted := slices.Contains(r.childInvocations, iid)
 
 		var buildEvent *bespb.BuildEvent
 		if childStarted {
@@ -586,7 +581,7 @@ func (r *buildEventReporter) emitBuildEventsForBazelCommands(b []byte) {
 				Payload: &bespb.BuildEvent_ChildInvocationCompleted{ChildInvocationCompleted: &bespb.ChildInvocationCompleted{}},
 			}
 		} else {
-			r.childInvocations[iid] = struct{}{}
+			r.childInvocations = append(r.childInvocations, iid)
 
 			cic := &bespb.ChildInvocationsConfigured{
 				Invocation: []*bespb.ChildInvocationsConfigured_InvocationMetadata{
@@ -619,7 +614,6 @@ func main() {
 		*backendLog.LogLevel = "debug"
 		backendLog.Configure()
 	}
-	backendLog.Debugf("Top of main")
 	if err := run(); err != nil {
 		if result, ok := err.(*actionResult); ok {
 			os.Exit(result.exitCode)
@@ -640,13 +634,10 @@ func run() error {
 			return err
 		}
 	}
-	backendLog.Debugf("Finished parsing flags")
 	if *credentialHelper {
-		backendLog.Debugf("Running credential helper")
 		return runCredentialHelper()
 	}
 	if isBazelWrapper {
-		backendLog.Debugf("Running bazel wrapper")
 		return runBazelWrapper()
 	}
 
@@ -678,7 +669,6 @@ func run() error {
 
 	// Use a context without a timeout for the build event reporter, so that even
 	// if the `timeout` is reached, any events will finish getting published
-	backendLog.Debugf("Initializing build event reporter")
 	buildEventReporter, err := newBuildEventReporter(contextWithoutTimeout, *besBackend, ws.buildbuddyAPIKey, *invocationID, *workflowID != "" /*=isWorkflow*/)
 	if err != nil {
 		return err
@@ -704,7 +694,6 @@ func run() error {
 	}
 	// Change the current working directory to respect WORKDIR_OVERRIDE, if set.
 	if wd := os.Getenv("WORKDIR_OVERRIDE"); wd != "" {
-		backendLog.Debugf("Initializing working directory %s", wd)
 		if err := os.MkdirAll(wd, 0755); err != nil {
 			return status.WrapError(err, "create WORKDIR_OVERRIDE directory")
 		}
@@ -738,13 +727,10 @@ func run() error {
 		return status.WrapError(err, "disable interactivity")
 	}
 
-	backendLog.Debugf("Completed checking configuration requirements")
-
 	// Write default bazelrc
 	if err := writeBazelrc(buildbuddyBazelrcPath, buildEventReporter.invocationID, runID, rootDir); err != nil {
 		return status.WrapError(err, "write "+buildbuddyBazelrcPath)
 	}
-	backendLog.Debugf("Completed writing bazelrc")
 	// Delete bazelrc before exiting. Use abs path since we might cd after this
 	// point.
 	absBazelrcPath, err := filepath.Abs(buildbuddyBazelrcPath)
@@ -765,22 +751,18 @@ func run() error {
 	// Make sure we have a bazel / bazelisk binary available.
 	if *bazelCommand == "" {
 		bazeliskPath := filepath.Join(rootDir, bazeliskBinaryName)
-		backendLog.Debugf("Preparing to extract bazelisk")
 		if err := extractBazelisk(bazeliskPath); err != nil {
 			return status.WrapError(err, "failed to extract bazelisk")
 		}
-		backendLog.Debugf("Finished extracting bazelisk")
 		*bazelCommand = bazeliskPath
 
 	}
 
 	// Use the bazel wrapper script, which adds some common flags to all
 	// Bazel builds.
-	backendLog.Debugf("Preparing to write bazel wrapper script")
 	if err := ws.writeBazelWrapperScript(); err != nil {
 		return status.WrapError(err, "write bazel wrapper script")
 	}
-	backendLog.Debugf("Finished write bazel wrapper script")
 
 	if *shutdownAndExit {
 		ws.log.Println("--shutdown_and_exit requested; will run bazel shutdown then exit.")
@@ -809,7 +791,6 @@ func run() error {
 		return nil
 	}
 
-	backendLog.Debugf("Starting build event reporter")
 	if err := buildEventReporter.Start(ws.startTime); err != nil {
 		return status.WrapError(err, "could not publish started event")
 	}
@@ -936,19 +917,26 @@ func (r *buildEventReporter) Printf(format string, vals ...interface{}) {
 type invocationLog struct {
 	lockingbuffer.LockingBuffer
 	writer        io.Writer
-	writeListener func(b []byte)
+	writeListener func(s string)
 }
 
 func newInvocationLog() *invocationLog {
-	invLog := &invocationLog{writeListener: func(b []byte) {}}
+	invLog := &invocationLog{writeListener: func(s string) {}}
 	invLog.writer = io.MultiWriter(&invLog.LockingBuffer, os.Stderr)
 	return invLog
 }
 
 func (invLog *invocationLog) Write(b []byte) (int, error) {
-	invLog.writeListener(b)
-	n, err := invLog.writer.Write(b)
-	return n, err
+	output := string(b)
+
+	redacted := redact.RedactText(output)
+
+	invLog.writeListener(redacted)
+	_, err := invLog.writer.Write([]byte(redacted))
+
+	// Return the size of the original buffer even if a redacted size was written,
+	// or clients will return a short write error
+	return len(b), err
 }
 
 func (invLog *invocationLog) Println(vals ...interface{}) {
@@ -1064,9 +1052,6 @@ func (ar *actionRunner) Run(ctx context.Context, ws *workspace) error {
 				InvocationId: iid,
 				BazelCommand: bazelCmd,
 			})
-			wfcEvent.Children = append(wfcEvent.Children, &bespb.BuildEventId{
-				Id: &bespb.BuildEventId_WorkflowCommandCompleted{WorkflowCommandCompleted: &bespb.BuildEventId_WorkflowCommandCompletedId{}},
-			})
 		}
 	}
 
@@ -1103,9 +1088,22 @@ func (ar *actionRunner) Run(ctx context.Context, ws *workspace) error {
 		}
 	}()
 
-	// TODO(Maggie): Emit BES events for each bazel command
 	for i, step := range action.Steps {
 		cmdStartTime := time.Now()
+
+		// The UI uses TargetConfigured/Completed build events to render artifacts
+		// associated with targets.
+		// Here we consider the step a "target" and publish the events for it,
+		// so that we can render artifacts for it.
+		targetLabel := fmt.Sprintf("steps[%d]", i)
+		ar.reporter.Publish(&bespb.BuildEvent{
+			Id: &bespb.BuildEventId{Id: &bespb.BuildEventId_TargetConfigured{
+				TargetConfigured: &bespb.BuildEventId_TargetConfiguredId{
+					Label: targetLabel,
+				},
+			}},
+			Payload: &bespb.BuildEvent_Configured{Configured: &bespb.TargetConfigured{}},
+		})
 		if err := provisionArtifactsDir(ws, i); err != nil {
 			return err
 		}
@@ -1113,11 +1111,25 @@ func (ar *actionRunner) Run(ctx context.Context, ws *workspace) error {
 		runErr := runBashCommand(ctx, step.Run, nil, action.BazelWorkspaceDir, ar.reporter)
 		exitCode := getExitCode(runErr)
 
-		// Flush progress after every command.
-		// Stop execution early on BEP failure, but ignore error -- it will surface in `bep.Finish()`.
-		if err := ar.reporter.FlushProgress(); err != nil {
-			break
-		}
+		artifactsDir := artifactsPathForCommand(ws, i)
+		namedSetID := filepath.Base(artifactsDir)
+		ar.reporter.Publish(&bespb.BuildEvent{
+			Id: &bespb.BuildEventId{Id: &bespb.BuildEventId_TargetCompleted{
+				TargetCompleted: &bespb.BuildEventId_TargetCompletedId{
+					Label: targetLabel,
+				},
+			}},
+			Payload: &bespb.BuildEvent_Completed{Completed: &bespb.TargetComplete{
+				Success: runErr == nil,
+				OutputGroup: []*bespb.OutputGroup{
+					{
+						FileSets: []*bespb.BuildEventId_NamedSetOfFilesId{
+							{Id: namedSetID},
+						},
+					},
+				},
+			}},
+		})
 
 		if exitCode != noExitCode {
 			ar.reporter.Printf("%s(command exited with code %d)%s\n", ansiGray, exitCode, ansiReset)
@@ -1140,8 +1152,6 @@ func (ar *actionRunner) Run(ctx context.Context, ws *workspace) error {
 
 		// If we get an OOM or a Bazel internal error, copy debug outputs to the
 		// artifacts directory so they get uploaded as workflow artifacts.
-		artifactsDir := artifactsPathForCommand(ws, i)
-		namedSetID := filepath.Base(artifactsDir)
 		if exitCode == bazelOOMErrorExitCode || exitCode == bazelInternalErrorExitCode {
 			jvmOutPath := filepath.Join(ar.rootDir, outputBaseDirName, "server/jvm.out")
 			if err := os.Link(jvmOutPath, filepath.Join(artifactsDir, "jvm.out")); err != nil {
@@ -1149,10 +1159,13 @@ func (ar *actionRunner) Run(ctx context.Context, ws *workspace) error {
 			}
 		}
 		if exitCode == bazelOOMErrorExitCode {
-			// TODO(Maggie): Use invocation ID of failed bazel command
-			heapDumpPath := filepath.Join(ar.rootDir, outputBaseDirName, fmt.Sprintf("%d.heapdump.hprof", i))
-			if err := os.Link(heapDumpPath, filepath.Join(artifactsDir, "heapdump.hprof")); err != nil {
-				ar.reporter.Printf("%sfailed to preserve heapdump.hprof: %s%s\n", ansiGray, err, ansiReset)
+			bazelInvocationIDs := ar.reporter.childInvocations
+			if len(bazelInvocationIDs) > 0 {
+				lastInvocationID := bazelInvocationIDs[len(bazelInvocationIDs)-1]
+				heapDumpPath := filepath.Join(ar.rootDir, outputBaseDirName, fmt.Sprintf("%s.heapdump.hprof", lastInvocationID))
+				if err := os.Link(heapDumpPath, filepath.Join(artifactsDir, "heapdump.hprof")); err != nil {
+					ar.reporter.Printf("%sfailed to preserve heapdump.hprof: %s%s\n", ansiGray, err, ansiReset)
+				}
 			}
 		}
 
@@ -1163,10 +1176,10 @@ func (ar *actionRunner) Run(ctx context.Context, ws *workspace) error {
 
 		duration := time.Since(cmdStartTime)
 		completedEvent := &bespb.BuildEvent{
-			Id: &bespb.BuildEventId{Id: &bespb.BuildEventId_WorkflowCommandCompleted{
-				WorkflowCommandCompleted: &bespb.BuildEventId_WorkflowCommandCompletedId{},
+			Id: &bespb.BuildEventId{Id: &bespb.BuildEventId_RemoteRunnerStepCompleted{
+				RemoteRunnerStepCompleted: &bespb.BuildEventId_RemoteRunnerStepCompletedId{},
 			}},
-			Payload: &bespb.BuildEvent_WorkflowCommandCompleted{WorkflowCommandCompleted: &bespb.WorkflowCommandCompleted{
+			Payload: &bespb.BuildEvent_RemoteRunnerStepCompleted{RemoteRunnerStepCompleted: &bespb.RemoteRunnerStepCompleted{
 				ExitCode:  int32(exitCode),
 				StartTime: timestamppb.New(cmdStartTime),
 				Duration:  durationpb.New(duration),
@@ -1178,6 +1191,12 @@ func (ar *actionRunner) Run(ctx context.Context, ws *workspace) error {
 
 		if exitCode != 0 {
 			return runErr
+		}
+
+		// Flush progress after every command.
+		// Stop execution early on BEP failure, but ignore error -- it will surface in `bep.Finish()`.
+		if err := ar.reporter.FlushProgress(); err != nil {
+			break
 		}
 	}
 
@@ -1315,8 +1334,8 @@ func (ar *actionRunner) Run(ctx context.Context, ws *workspace) error {
 
 		duration := time.Since(cmdStartTime)
 		completedEvent := &bespb.BuildEvent{
-			Id: &bespb.BuildEventId{Id: &bespb.BuildEventId_WorkflowCommandCompleted{WorkflowCommandCompleted: &bespb.BuildEventId_WorkflowCommandCompletedId{}}},
-			Payload: &bespb.BuildEvent_WorkflowCommandCompleted{WorkflowCommandCompleted: &bespb.WorkflowCommandCompleted{
+			Id: &bespb.BuildEventId{Id: &bespb.BuildEventId_RemoteRunnerStepCompleted{RemoteRunnerStepCompleted: &bespb.BuildEventId_RemoteRunnerStepCompletedId{}}},
+			Payload: &bespb.BuildEvent_RemoteRunnerStepCompleted{RemoteRunnerStepCompleted: &bespb.RemoteRunnerStepCompleted{
 				ExitCode:  int32(exitCode),
 				StartTime: timestamppb.New(cmdStartTime),
 				Duration:  durationpb.New(duration),
@@ -1644,12 +1663,8 @@ func printCommandLine(out io.Writer, command string, args ...string) error {
 	for _, arg := range args {
 		cmdLine += " " + toShellToken(arg)
 	}
-	redactedCmdLine, err := redact.RedactCommand(cmdLine)
-	if err != nil {
-		return status.WrapError(err, "redact command")
-	}
 	io.WriteString(out, ansiGray+formatNowUTC()+ansiReset+" ")
-	io.WriteString(out, aurora.Sprintf("%s %s\n", aurora.Green("$"), redactedCmdLine))
+	io.WriteString(out, aurora.Sprintf("%s %s\n", aurora.Green("$"), cmdLine))
 	return nil
 }
 

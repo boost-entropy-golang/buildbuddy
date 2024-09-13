@@ -221,15 +221,37 @@ Some rules (like protobuf) are particularly sensitive to changes in environment 
 
 [Bazel docs](https://docs.bazel.build/versions/master/command-line-reference.html#flag--incompatible_strict_action_env)
 
-### --action_env
+### --action_env, --test_env
 
-You can set environment variables that are available to actions with the `--action_env` flag. This is commonly used to set `BAZEL_DO_NOT_DETECT_CPP_TOOLCHAIN` which tells bazel not to auto-detect the C++ toolchain.
+You can set environment variables that are available to actions with the `--action_env` flag.
+If you want to set environment variables that are only available to test actions, you can use the `--test_env` flag.
+
+This is commonly used to set environment variables such as `GO_TEST_WRAP_TESTV=1`, which modifies how the `go_test` rule handles the XML reports.
 
 ```bash
---action_env=BAZEL_DO_NOT_DETECT_CPP_TOOLCHAIN=1
+--test_env=GO_TEST_WRAP_TESTV=1
 ```
 
-[Bazel docs](https://docs.bazel.build/versions/master/command-line-reference.html#flag--define)
+[`--action_env` Bazel docs](https://docs.bazel.build/versions/master/command-line-reference.html#flag--action_env)
+[`--test_env` Bazel docs](https://docs.bazel.build/versions/master/command-line-reference.html#flag--test_env)
+
+### --repo_env
+
+This flag sets additional environment variables that are available to repository rules executions.
+It's commonly used to set environment variables that are used to augment how toolchains and external repositories are prepared.
+
+```bash
+# Tell Bazel to not detect the CC toolchain automatically from the host machine to improve hermeticity.
+# This requires you to declare and register a CC toolchain explicitly.
+--repo_env=BAZEL_DO_NOT_DETECT_CPP_TOOLCHAIN=1
+
+# Tell Gazelle's go_repository rule to use the path set in GOMODCACHE (or GOPATH) as a local cache directory.
+# This can be useful to speed up Go modules downloads.
+--repo_env=GO_REPOSITORY_USE_HOST_CACHE=1
+--repo_env=GOMODCACHE=/some-path/my-go-mod-cache
+```
+
+[Bazel docs](https://docs.bazel.build/versions/master/command-line-reference.html#flag--repo_env)
 
 ### --define
 
@@ -260,6 +282,30 @@ Explicitly setting strategies should [no longer be needed](https://github.com/ba
 ```
 
 [Bazel docs](https://docs.bazel.build/versions/master/command-line-reference.html#flag--strategy)
+
+### --remote_execution_priority
+
+Sets the priority of remotely executed actions within a build, relative to
+other builds within your BuildBuddy organization.
+
+The default value is 0, and BuildBuddy accepts values between -1000 and
+1000 (inclusive). Lower priority values cause actions to be executed
+_before_ actions with larger priority values.
+
+Examples:
+
+```bash
+# Run a build that is deprioritized relative to other builds in the org:
+bazel test //experimental/... --remote_execution_priority=1000
+
+# Run a build that is prioritized over all other builds in the org:
+bazel run //emergency_deployment --remote_execution_priority=-1000
+```
+
+Note: remote execution priority is applied on a best-effort basis. Setting
+this flag doesn't provide a strong guarantee of execution ordering.
+
+[Bazel docs](https://docs.bazel.build/versions/master/command-line-reference.html#flag--remote_execution_priority)
 
 ### --experimental_inmemory_dotd_files
 
@@ -332,7 +378,7 @@ build:remote --tool_java_language_version=11
 build:remote --java_runtime_version=remotejdk_11
 build:remote --tool_java_runtime_version=remotejdk_11
 build:remote --crosstool_top=@rbe_default//cc:toolchain
-build:remote --action_env=BAZEL_DO_NOT_DETECT_CPP_TOOLCHAIN=1
+build:remote --repo_env=BAZEL_DO_NOT_DETECT_CPP_TOOLCHAIN=1
 # Platform flags:
 # The toolchain container used for execution is defined in the target indicated
 # by "extra_execution_platforms", "host_platform" and "platforms".
