@@ -21,7 +21,7 @@ switched_rules.use_languages(
 )
 
 # Needed for com_google_protobuf
-bazel_dep(name = "rules_python", version = "0.31.0")
+bazel_dep(name = "rules_python", version = "0.33.2")
 
 python = use_extension("@rules_python//python/extensions:python.bzl", "python")
 python.toolchain(
@@ -40,6 +40,34 @@ single_version_override(
     patches = [
         "@@//buildpatches:gazelle.patch",
     ],
+)
+
+bazel_dep(name = "abseil-cpp", version = "20240722.0", repo_name = "com_google_absl")
+
+# abseil-cpp 20240722.0 in BCR does not have feature parity with its github analog
+archive_override(
+    module_name = "abseil-cpp",
+    integrity = "sha256-9Q5awxGoE4Laf6dblzEOS5AGR0+VYKxG9UqZZ/B9SuM=",
+    strip_prefix = "abseil-cpp-20240722.0",
+    urls = ["https://github.com/abseil/abseil-cpp/releases/download/20240722.0/abseil-cpp-20240722.0.tar.gz"],
+)
+
+bazel_dep(name = "protobuf", version = "28.0", repo_name = "com_google_protobuf")
+
+# 28.1 is not released yet on BCR
+archive_override(
+    module_name = "protobuf",
+    integrity = "sha256-O4v26WSZp0S9AUxgtY95dxWnWAk6v4WfHZAhlLjh+Mk=",
+    patches = [
+        # https://github.com/protocolbuffers/protobuf/pull/18241
+        "//buildpatches:com_google_protobuf_18241.patch",
+        # https://github.com/protocolbuffers/protobuf/pull/18242
+        "//buildpatches:com_google_protobuf_18242.patch",
+        # https://github.com/protocolbuffers/protobuf/pull/18243
+        "//buildpatches:com_google_protobuf_18243.patch",
+    ],
+    strip_prefix = "protobuf-28.1",
+    urls = ["https://github.com/protocolbuffers/protobuf/releases/download/v28.1/protobuf-28.1.tar.gz"],
 )
 
 go_sdk = use_extension("@io_bazel_rules_go//go:extensions.bzl", "go_sdk")
@@ -119,11 +147,6 @@ go_deps.module_override(
 )
 go_deps.module_override(
     patch_strip = 1,
-    patches = ["@@//buildpatches:com_github_hanwen_go_fuse_v2.patch"],
-    path = "github.com/hanwen/go-fuse/v2",
-)
-go_deps.module_override(
-    patch_strip = 1,
     patches = ["@@//buildpatches:com_github_mattn_go_sqlite3.patch"],
     path = "github.com/mattn/go-sqlite3",
 )
@@ -151,6 +174,33 @@ go_deps.module_override(
     ],
     path = "kythe.io",
 )
+go_deps.module_override(
+    patches = [
+        "@@//buildpatches:com_github_containerd_containerd_api.patch",
+        # Can remove once https://github.com/bazelbuild/bazel/issues/23605 is
+        # merged in bazel 7.4
+        "@@//buildpatches:com_github_containerd_containerd_api_for_bzlmod.patch",
+    ],
+    path = "github.com/containerd/containerd/api",
+)
+go_deps.module_override(
+    patches = [
+        "@@//buildpatches:com_github_containerd_ttrpc.patch",
+        # Can remove once https://github.com/bazelbuild/bazel/issues/23605 is
+        # merged in bazel 7.4
+        "@@//buildpatches:com_github_containerd_ttrpc_for_bzlmod.patch",
+    ],
+    path = "github.com/containerd/ttrpc",
+)
+go_deps.module_override(
+    patches = [
+        "@@//buildpatches:dev_cel_expr.patch",
+        # Can remove once https://github.com/bazelbuild/bazel/issues/23605 is
+        # merged in bazel 7.4
+        "@@//buildpatches:dev_cel_expr_for_bzlmod.patch",
+    ],
+    path = "cel.dev/expr",
+)
 
 # Go repos with custom directives
 go_deps.gazelle_override(
@@ -177,6 +227,35 @@ go_deps.gazelle_override(
     path = "github.com/jhump/protoreflect",
 )
 go_deps.gazelle_override(
+    directives = ["gazelle:resolve go cel.dev/expr @dev_cel_expr//proto/cel/expr:expr_go_proto"],
+    path = "github.com/cncf/xds/go",
+)
+go_deps.gazelle_override(
+    directives = [
+        "gazelle:proto file",
+        "gazelle:proto_import_prefix github.com/containerd/containerd/api",
+        "gazelle:resolve proto go github.com/containerd/containerd/api/types //types:types",
+        "gazelle:resolve go github.com/containerd/containerd/api/types/descriptor //types:types",
+        "gazelle:resolve go github.com/containerd/containerd/api/types/fieldpath //types:types",
+        "gazelle:resolve go github.com/containerd/containerd/api/types/metrics //types:types",
+        "gazelle:resolve go github.com/containerd/containerd/api/types/mount //types:types",
+        "gazelle:resolve go github.com/containerd/containerd/api/types/platform //types:types",
+        "gazelle:resolve go github.com/containerd/containerd/api/types/sandbox //types:types",
+        "gazelle:resolve go github.com/containerd/containerd/api/types/task //types/task:task",
+        "gazelle:resolve proto google/rpc/status.proto @@//:googleapis_status_proto",
+        "gazelle:resolve proto go google/rpc/status.proto @org_golang_google_genproto_googleapis_rpc//status",
+    ],
+    path = "github.com/containerd/containerd/api",
+)
+go_deps.gazelle_override(
+    directives = [
+        "gazelle:proto file",
+        "gazelle:resolve proto proto/status.proto @@//:googleapis_status_proto",
+        "gazelle:resolve proto go proto/status.proto @org_golang_google_genproto_googleapis_rpc//status",
+    ],
+    path = "github.com/containerd/ttrpc",
+)
+go_deps.gazelle_override(
     # Force a Gazelle run to ensure build targets in Bazelisk follow
     # Gazelle naming conventions.
     build_file_generation = "on",
@@ -186,8 +265,18 @@ go_deps.gazelle_override(
     # Force Gazelle to wipe out the existing build files before regenerate them.
     build_file_generation = "clean",
     directives = [
+        "gazelle:proto file",
+        "gazelle:proto_strip_import_prefix /proto/cel/expr",
+        "gazelle:proto_import_prefix cel/expr",
+        "gazelle:resolve proto go google/api/expr/v1alpha1/checked.proto @org_golang_google_genproto_googleapis_rpc//api/expr/v1alpha1:checked_proto",
+        "gazelle:resolve proto go google/api/expr/v1alpha1/eval.proto @org_golang_google_genproto_googleapis_rpc//api/expr/v1alpha1:eval_proto",
+        "gazelle:resolve proto go google/api/expr/v1alpha1/value.proto @org_golang_google_genproto_googleapis_rpc//api/expr/v1alpha1:value_proto",
         "gazelle:resolve proto go google/rpc/status.proto @org_golang_google_genproto_googleapis_rpc//status",
-        "gazelle:resolve proto proto google/rpc/status.proto @googleapis//google/rpc:status_proto",
+        "gazelle:resolve proto proto google/rpc/status.proto @@//:googleapis_status_proto",
+        "gazelle:resolve proto go cel/expr/syntax.proto //proto/cel/expr:syntax_proto",
+        "gazelle:resolve proto proto cel/expr/syntax.proto //proto/cel/expr:syntax_proto",
+        "gazelle:resolve proto go cel/expr/value.proto //proto/cel/expr:value_proto",
+        "gazelle:resolve proto proto cel/expr/value.proto //proto/cel/expr:value_proto",
     ],
     path = "cel.dev/expr",
 )
@@ -276,6 +365,7 @@ use_repo(
     "com_github_opencontainers_go_digest",
     "com_github_opencontainers_image_spec",
     "com_github_opencontainers_runtime_spec",
+    "com_github_otiai10_copy",
     "com_github_pkg_errors",
     "com_github_planetscale_vtprotobuf",
     "com_github_pmezard_go_difflib",
