@@ -278,6 +278,7 @@ func NewWithArgs(env environment.Env, rootDir string, nodeHost *dragonboat.NodeH
 			if err := nodeHost.StartOnDiskReplica(nil, false /*=join*/, s.ReplicaFactoryFn, rc); err != nil {
 				return nil, status.InternalErrorf("failed to start c%dn%d: %s", logInfo.ShardID, logInfo.ReplicaID, err)
 			}
+			s.configuredClusters++
 		} else {
 			replicaDescriptor := &rfpb.ReplicaDescriptor{RangeId: logInfo.ShardID, ReplicaId: logInfo.ReplicaID}
 			previouslyStartedReplicas = append(previouslyStartedReplicas, replicaDescriptor)
@@ -300,6 +301,7 @@ func NewWithArgs(env environment.Env, rootDir string, nodeHost *dragonboat.NodeH
 		if err := nodeHost.StartOnDiskReplica(nil, false /*=join*/, s.ReplicaFactoryFn, rc); err != nil {
 			return nil, status.InternalErrorf("failed to start c%dn%d: %s", r.GetRangeId(), r.GetReplicaId(), err)
 		}
+		s.configuredClusters++
 	}
 
 	gossipManager.AddListener(s)
@@ -1260,7 +1262,11 @@ func (s *Store) checkIfReplicasNeedSplitting(ctx context.Context) {
 				if !s.leaseKeeper.HaveLease(ctx, rangeID) {
 					continue
 				}
-				if rangeUsageEvent.ReplicaUsage.GetEstimatedDiskBytesUsed() < raftConfig.MaxRangeSizeBytes() {
+				estimatedDiskBytes := rangeUsageEvent.ReplicaUsage.GetEstimatedDiskBytesUsed()
+				metrics.RaftBytes.With(prometheus.Labels{
+					metrics.RaftRangeIDLabel: strconv.Itoa(int(rangeID)),
+				}).Set(float64(estimatedDiskBytes))
+				if estimatedDiskBytes < raftConfig.MaxRangeSizeBytes() {
 					continue
 				}
 				repl, err := s.GetReplica(rangeID)

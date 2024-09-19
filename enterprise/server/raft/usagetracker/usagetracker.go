@@ -403,12 +403,12 @@ func (pu *partitionUsage) doEvict(ctx context.Context, sample *approxlru.Sample[
 		return status.InternalErrorf("eviction request failed: %s", err)
 	}
 
-	ageMillis := float64(time.Since(sample.Timestamp).Milliseconds())
+	age := time.Since(sample.Timestamp)
 	lbls := prometheus.Labels{metrics.PartitionID: pu.part.ID, metrics.CacheNameLabel: cacheName}
 	metrics.DiskCacheNumEvictions.With(lbls).Inc()
 	metrics.DiskCacheBytesEvicted.With(lbls).Add(float64(sample.SizeBytes))
-	metrics.DiskCacheEvictionAgeMsec.With(lbls).Observe(float64(ageMillis))
-	metrics.DiskCacheLastEvictionAgeUsec.With(lbls).Set(float64(ageMillis))
+	metrics.DiskCacheEvictionAgeMsec.With(lbls).Observe(float64(age.Milliseconds()))
+	metrics.DiskCacheLastEvictionAgeUsec.With(lbls).Set(float64(age.Microseconds()))
 
 	globalSizeBytes := pu.GlobalSizeBytes()
 
@@ -578,7 +578,6 @@ func (ut *Tracker) Statusz(ctx context.Context) string {
 			}
 			buf += fmt.Sprintf("\t\t\t%s: %s\n", nhid, units.BytesSize(float64(nu.sizeBytes)))
 		}
-		u.mu.Unlock()
 	}
 	return buf
 }
@@ -675,7 +674,6 @@ func (ut *Tracker) broadcast(force bool) error {
 
 	// If not forced, check whether there's enough changes to force a broadcast.
 	if !force {
-		log.Infof("broadcast without force")
 		significantChange := false
 		ut.mu.Lock()
 		for _, u := range usage.GetPartitionUsage() {
