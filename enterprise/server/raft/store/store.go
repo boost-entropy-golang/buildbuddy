@@ -78,6 +78,7 @@ const (
 	readyNumGoRoutines           = 100
 	checkReplicaCaughtUpInterval = 1 * time.Second
 	maxWaitTimeForReplicaRange   = 30 * time.Second
+	metricsRefreshPeriod         = 30 * time.Second
 )
 
 type Store struct {
@@ -116,6 +117,7 @@ type Store struct {
 	metaRangeData []byte
 
 	eg       *errgroup.Group
+	egCtx    context.Context
 	egCancel context.CancelFunc
 
 	updateTagsWorker *updateTagsWorker
@@ -127,6 +129,9 @@ type Store struct {
 	clock clockwork.Clock
 
 	replicaInitStatusWaiter *replicaStatusWaiter
+
+	oldMetrics       pebble.Metrics
+	metricsCollector *pebble.MetricsCollector
 }
 
 // registryHolder implements NodeRegistryFactory. When nodeHost is created, it
@@ -168,7 +173,14 @@ func New(env environment.Env, rootDir, raftAddress, grpcAddr string, partitions 
 	registry := regHolder.r
 	apiClient := client.NewAPIClient(env, nodeHost.ID(), registry)
 	sender := sender.New(rangeCache, apiClient)
-	db, err := pebble.Open(rootDir, "raft_store", &pebble.Options{})
+	mc := &pebble.MetricsCollector{}
+	db, err := pebble.Open(rootDir, "raft_store", &pebble.Options{
+		EventListener: &pebble.EventListener{
+			WriteStallBegin: mc.WriteStallBegin,
+			WriteStallEnd:   mc.WriteStallEnd,
+			DiskSlow:        mc.DiskSlow,
+		},
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -264,6 +276,17 @@ func NewWithArgs(env environment.Env, rootDir string, nodeHost *dragonboat.NodeH
 
 	s.updateTagsWorker.Start()
 
+	ctx, cancelFunc := context.WithCancel(context.Background())
+	s.egCancel = cancelFunc
+
+	eg, gctx := errgroup.WithContext(ctx)
+	s.eg = eg
+	s.egCtx = gctx
+	eg.Go(func() error {
+		s.queryForMetarange(gctx)
+		return nil
+	})
+
 	nodeHostInfo := nodeHost.GetNodeHostInfo(dragonboat.NodeHostInfoOption{})
 	previouslyStartedReplicas := make([]*rfpb.ReplicaDescriptor, 0, len(nodeHostInfo.LogInfo))
 	for _, logInfo := range nodeHostInfo.LogInfo {
@@ -285,7 +308,7 @@ func NewWithArgs(env environment.Env, rootDir string, nodeHost *dragonboat.NodeH
 		}
 	}
 
-	ctx := context.Background()
+	ctx = context.Background()
 
 	// Scan the metarange and start any clusters we own that have not been
 	// removed. If previouslyStartedReplicas is an empty list, then
@@ -454,52 +477,47 @@ func (s *Store) AddEventListener() <-chan events.Event {
 // Start starts a new grpc server which exposes an API that can be used to manage
 // ranges on this node.
 func (s *Store) Start() error {
-	ctx, cancelFunc := context.WithCancel(context.Background())
-	s.egCancel = cancelFunc
-
-	eg, gctx := errgroup.WithContext(ctx)
-	s.eg = eg
-	eg.Go(func() error {
-		return s.handleEvents(gctx)
+	s.eg.Go(func() error {
+		return s.handleEvents(s.egCtx)
 	})
-	eg.Go(func() error {
-		s.acquireNodeLiveness(gctx)
+	s.eg.Go(func() error {
+		s.acquireNodeLiveness(s.egCtx)
 		return nil
 	})
-	eg.Go(func() error {
-		s.queryForMetarange(gctx)
+	s.eg.Go(func() error {
+		s.cleanupZombieNodes(s.egCtx)
 		return nil
 	})
-	eg.Go(func() error {
-		s.cleanupZombieNodes(gctx)
+	s.eg.Go(func() error {
+		s.checkIfReplicasNeedSplitting(s.egCtx)
 		return nil
 	})
-	eg.Go(func() error {
-		s.checkIfReplicasNeedSplitting(gctx)
+	s.eg.Go(func() error {
+		s.updateStoreUsageTag(s.egCtx)
 		return nil
 	})
-	eg.Go(func() error {
-		s.updateStoreUsageTag(gctx)
+	s.eg.Go(func() error {
+		s.refreshMetrics(s.egCtx)
 		return nil
 	})
-	eg.Go(func() error {
+	s.eg.Go(func() error {
 		if *enableTxnCleanup {
-			s.txnCoordinator.Start(gctx)
+			s.txnCoordinator.Start(s.egCtx)
 		}
 		return nil
 	})
-	eg.Go(func() error {
-		s.scanReplicas(gctx)
+	s.eg.Go(func() error {
+		s.scanReplicas(s.egCtx)
 		return nil
 	})
-	eg.Go(func() error {
+	s.eg.Go(func() error {
 		if s.driverQueue != nil {
-			s.driverQueue.Start(gctx)
+			s.driverQueue.Start(s.egCtx)
 		}
 		return nil
 	})
-	eg.Go(func() error {
-		s.deleteSessionWorker.Start(gctx)
+	s.eg.Go(func() error {
+		s.deleteSessionWorker.Start(s.egCtx)
 		return nil
 	})
 
@@ -2447,4 +2465,34 @@ func (s *Store) TestingWaitForGC() {
 
 func (s *Store) TestingFlush() {
 	s.db.Flush()
+}
+
+func (s *Store) refreshMetrics(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(metricsRefreshPeriod):
+			if err := s.updatePebbleMetrics(); err != nil {
+				log.Warningf("[%s] could not update pebble metrics: %s", constants.CacheName, err)
+			}
+		}
+	}
+
+}
+
+func (s *Store) updatePebbleMetrics() error {
+	db, err := s.leaser.DB()
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	m := db.Metrics()
+	om := s.oldMetrics
+
+	s.metricsCollector.UpdateMetrics(m, om, constants.CacheName)
+	s.oldMetrics = *m
+
+	return nil
 }
