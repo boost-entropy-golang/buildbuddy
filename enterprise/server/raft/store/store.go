@@ -75,7 +75,7 @@ var (
 const (
 	deleteSessionsRateLimit = 1
 	// The number of go routines we use to wait for the replicas to be ready
-	readyNumGoRoutines           = 100
+	readyNumGoRoutines           = 500
 	checkReplicaCaughtUpInterval = 1 * time.Second
 	maxWaitTimeForReplicaRange   = 30 * time.Second
 	metricsRefreshPeriod         = 30 * time.Second
@@ -185,10 +185,10 @@ func New(env environment.Env, rootDir, raftAddress, grpcAddr string, partitions 
 		return nil, err
 	}
 	leaser := pebble.NewDBLeaser(db)
-	return NewWithArgs(env, rootDir, nodeHost, gossipManager, sender, registry, raftListener, apiClient, grpcAddr, partitions, db, leaser)
+	return NewWithArgs(env, rootDir, nodeHost, gossipManager, sender, registry, raftListener, apiClient, grpcAddr, partitions, db, leaser, mc)
 }
 
-func NewWithArgs(env environment.Env, rootDir string, nodeHost *dragonboat.NodeHost, gossipManager interfaces.GossipService, sender *sender.Sender, registry registry.NodeRegistry, listener *listener.RaftListener, apiClient *client.APIClient, grpcAddress string, partitions []disk.Partition, db pebble.IPebbleDB, leaser pebble.Leaser) (*Store, error) {
+func NewWithArgs(env environment.Env, rootDir string, nodeHost *dragonboat.NodeHost, gossipManager interfaces.GossipService, sender *sender.Sender, registry registry.NodeRegistry, listener *listener.RaftListener, apiClient *client.APIClient, grpcAddress string, partitions []disk.Partition, db pebble.IPebbleDB, leaser pebble.Leaser, mc *pebble.MetricsCollector) (*Store, error) {
 	nodeLiveness := nodeliveness.New(env.GetServerContext(), nodeHost.ID(), sender)
 
 	nhLog := log.NamedSubLogger(nodeHost.ID())
@@ -225,9 +225,10 @@ func NewWithArgs(env environment.Env, rootDir string, nodeHost *dragonboat.NodeH
 		metaRangeMu:   sync.Mutex{},
 		metaRangeData: make([]byte, 0),
 
-		db:     db,
-		leaser: leaser,
-		clock:  clock,
+		db:               db,
+		leaser:           leaser,
+		clock:            clock,
+		metricsCollector: mc,
 	}
 
 	s.replicaInitStatusWaiter = newReplicaStatusWaiter(env.GetServerContext(), s)
@@ -318,13 +319,16 @@ func NewWithArgs(env environment.Env, rootDir string, nodeHost *dragonboat.NodeH
 	if err != nil {
 		return nil, err
 	}
-	for _, r := range activeReplicas {
+	activeReplicasLen := len(activeReplicas)
+	for i, r := range activeReplicas {
+		s.log.Infof("Had info for c%dn%d. (%d/%d)", r.GetRangeId(), r.GetReplicaId(), i+1, activeReplicasLen)
 		s.replicaInitStatusWaiter.MarkStarted(r.GetRangeId())
 		rc := raftConfig.GetRaftConfig(r.GetRangeId(), r.GetReplicaId())
 		if err := nodeHost.StartOnDiskReplica(nil, false /*=join*/, s.ReplicaFactoryFn, rc); err != nil {
 			return nil, status.InternalErrorf("failed to start c%dn%d: %s", r.GetRangeId(), r.GetReplicaId(), err)
 		}
 		s.configuredClusters++
+		s.log.Infof("Recreated c%dn%d. (%d/%d)", r.GetRangeId(), r.GetReplicaId(), i+1, activeReplicasLen)
 	}
 
 	gossipManager.AddListener(s)
@@ -477,6 +481,7 @@ func (s *Store) AddEventListener() <-chan events.Event {
 // Start starts a new grpc server which exposes an API that can be used to manage
 // ranges on this node.
 func (s *Store) Start() error {
+	s.usages.Start()
 	s.eg.Go(func() error {
 		return s.handleEvents(s.egCtx)
 	})

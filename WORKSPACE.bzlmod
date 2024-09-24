@@ -1,32 +1,10 @@
 load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive", "http_file")
 
-# Bazel platforms
-
-http_archive(
-    name = "platforms",
-    sha256 = "5308fc1d8865406a49427ba24a9ab53087f17f5266a7aabbfc28823f3916e1ca",
-    urls = [
-        "https://mirror.bazel.build/github.com/bazelbuild/platforms/releases/download/0.0.6/platforms-0.0.6.tar.gz",
-        "https://github.com/bazelbuild/platforms/releases/download/0.0.6/platforms-0.0.6.tar.gz",
-    ],
-)
-
 # Go
 
 load(":deps.bzl", "install_static_dependencies")
 
 install_static_dependencies()
-
-# Golang staticcheck
-
-http_archive(
-    name = "com_github_sluongng_nogo_analyzer",
-    sha256 = "a74a5e44751d292d17bd879e5aa8b40baa94b5dc2f043df1e3acbb3e23ead073",
-    strip_prefix = "nogo-analyzer-0.0.2",
-    urls = [
-        "https://github.com/sluongng/nogo-analyzer/archive/refs/tags/v0.0.2.tar.gz",
-    ],
-)
 
 # In Bazel Central Registry, rules_nodejs before 6.0 is actually rules_nodejs-core,
 # which is a trimmed version of build_bazel_rules_nodejs.
@@ -63,28 +41,6 @@ yarn_install(
     yarn_lock = "//:yarn.lock",
 )
 
-# Proto -- must be before container_repositories so we don't inherit their rules_pkg.
-
-# NB: The name must be "com_google_protobuf".
-
-# Required by com_google_protobuf
-http_archive(
-    name = "com_google_googletest",
-    sha256 = "730215d76eace9dd49bf74ce044e8daa065d175f1ac891cc1d6bb184ef94e565",
-    strip_prefix = "googletest-f53219cdcb7b084ef57414efea92ee5b71989558",
-    urls = [
-        "https://github.com/google/googletest/archive/f53219cdcb7b084ef57414efea92ee5b71989558.tar.gz",
-    ],
-)
-
-load("@com_google_googletest//:googletest_deps.bzl", "googletest_deps")
-
-googletest_deps()
-
-load("@com_google_protobuf//:protobuf_deps.bzl", "protobuf_deps")
-
-protobuf_deps()
-
 # Docker
 
 http_archive(
@@ -109,32 +65,7 @@ load(
 
 container_repositories()
 
-# rules_foreign_cc
-
-http_archive(
-    name = "rules_foreign_cc",
-    sha256 = "e14a159c452a68a97a7c59fa458033cc91edb8224516295b047a95555140af5f",
-    strip_prefix = "rules_foreign_cc-0.4.0",
-    url = "https://github.com/bazelbuild/rules_foreign_cc/archive/0.4.0.tar.gz",
-)
-
-load("@rules_foreign_cc//foreign_cc:repositories.bzl", "rules_foreign_cc_dependencies")
-
-# This sets up some common toolchains for building targets. For more details, please see
-# https://bazelbuild.github.io/rules_foreign_cc/0.4.0/flatten.html#rules_foreign_cc_dependencies
-rules_foreign_cc_dependencies()
-
 all_content = """filegroup(name = "all", srcs = glob(["**"]), visibility = ["//visibility:public"])"""
-
-# CPIO
-
-http_archive(
-    name = "org_gnu_cpio",
-    build_file_content = all_content,
-    sha256 = "e87470d9c984317f658567c03bfefb6b0c829ff17dbf6b0de48d71a4c8f3db88",
-    strip_prefix = "cpio-2.13",
-    url = "https://ftp.gnu.org/gnu/cpio/cpio-2.13.tar.gz",
-)
 
 # Kubernetes
 
