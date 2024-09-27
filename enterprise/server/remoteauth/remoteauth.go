@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"net/http"
+	"sync"
 
 	"github.com/buildbuddy-io/buildbuddy/server/interfaces"
 	"github.com/buildbuddy-io/buildbuddy/server/tables"
@@ -13,6 +14,7 @@ import (
 	"github.com/buildbuddy-io/buildbuddy/server/util/log"
 	"github.com/buildbuddy-io/buildbuddy/server/util/lru"
 	"github.com/buildbuddy-io/buildbuddy/server/util/status"
+	"github.com/buildbuddy-io/buildbuddy/server/util/tracing"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
 
@@ -65,6 +67,7 @@ func newRemoteAuthenticator(conn grpc.ClientConnInterface) (*RemoteAuthenticator
 type RemoteAuthenticator struct {
 	authClient  authpb.AuthServiceClient
 	cache       interfaces.LRU[string]
+	mu          sync.RWMutex // protects cache
 	claimsCache *claims.ClaimsCache
 }
 
@@ -104,6 +107,9 @@ func (a *RemoteAuthenticator) SSOEnabled() bool {
 }
 
 func (a *RemoteAuthenticator) AuthenticatedGRPCContext(ctx context.Context) context.Context {
+	ctx, spn := tracing.StartSpan(ctx)
+	defer spn.End()
+
 	// If a JWT was provided, check if it's valid and use it if so.
 	jwt, err := validateJWT(ctx, a.claimsCache)
 	if err != nil {
@@ -117,7 +123,9 @@ func (a *RemoteAuthenticator) AuthenticatedGRPCContext(ctx context.Context) cont
 	if key == "" {
 		return authutil.AuthContextWithError(ctx, status.PermissionDeniedError("Missing API key"))
 	}
+	a.mu.RLock()
 	jwt, found := a.cache.Get(key)
+	a.mu.RUnlock()
 	if found {
 		return context.WithValue(ctx, authutil.ContextTokenStringKey, jwt)
 	}
@@ -126,7 +134,9 @@ func (a *RemoteAuthenticator) AuthenticatedGRPCContext(ctx context.Context) cont
 		log.Debugf("Error remotely authenticating: %s", err)
 		return authutil.AuthContextWithError(ctx, err)
 	}
+	a.mu.Lock()
 	a.cache.Add(key, jwt)
+	a.mu.Unlock()
 	return context.WithValue(ctx, authutil.ContextTokenStringKey, jwt)
 }
 
@@ -188,6 +198,9 @@ func getAPIKey(ctx context.Context) string {
 // Returns a valid JWT from the incoming RPC metadata, or an error an invalid
 // JWT is present, or an empty string and no error if no JWT is provided.
 func validateJWT(ctx context.Context, claimsCache *claims.ClaimsCache) (string, error) {
+	ctx, spn := tracing.StartSpan(ctx)
+	defer spn.End()
+
 	jwt := getLastMetadataValue(ctx, authutil.ContextTokenStringKey)
 	if jwt == "" {
 		return "", nil

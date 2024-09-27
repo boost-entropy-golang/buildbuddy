@@ -16,6 +16,7 @@ import (
 	"github.com/buildbuddy-io/buildbuddy/server/testutil/testgit"
 	"github.com/buildbuddy-io/buildbuddy/server/util/retry"
 	"github.com/google/uuid"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	capb "github.com/buildbuddy-io/buildbuddy/proto/cache"
@@ -228,9 +229,12 @@ func TestBazelBuildWithBuildBuddyServices(t *testing.T) {
 
 	cmd := testcli.Command(t, ws, args...)
 
-	err = cmd.Run()
-
+	b, err := testcli.CombinedOutput(cmd)
 	require.NoError(t, err)
+
+	// Sidecar should not log any errors.
+	require.NotContains(t, string(b), "sidecar errors")
+
 	bbs := app.BuildBuddyServiceClient(t)
 
 	ctx := context.Background()
@@ -343,6 +347,21 @@ func TestFix(t *testing.T) {
 	b, err := testcli.CombinedOutput(cmd)
 
 	require.NoError(t, err, "output:\n%s", string(b))
+}
+
+func TestCLIDoesNotRestartBazelServer(t *testing.T) {
+	ws := testcli.NewWorkspace(t)
+	testfs.WriteAllFileContents(t, ws, map[string]string{
+		"BUILD": "",
+		".bazelrc": `
+startup --host_jvm_args=-DBAZEL_TRACK_SOURCE_DIRECTORIES=1
+`,
+	})
+
+	cmd := testcli.Command(t, ws, "query", "//...")
+	b, err := testcli.CombinedOutput(cmd)
+	assert.NoError(t, err)
+	require.NotContains(t, string(b), "Running Bazel server needs to be killed")
 }
 
 func retryUntilSuccess(t *testing.T, f func() error) {

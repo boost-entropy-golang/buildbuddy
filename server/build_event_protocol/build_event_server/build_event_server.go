@@ -87,11 +87,18 @@ func (s *BuildEventProtocolServer) PublishBuildToolEventStream(stream pepb.Publi
 
 	eg, ctx := errgroup.WithContext(ctx)
 	forwardingStreams := make([]pepb.PublishBuildEvent_PublishBuildToolEventStreamClient, 0)
+	var closeStreamsOnce sync.Once
+	defer closeStreamsOnce.Do(func() { closeForwardingStreams(forwardingStreams) })
+
 	for _, client := range s.env.GetBuildEventProxyClients() {
 		fwdStream, err := client.PublishBuildToolEventStream(ctx, grpc.WaitForReady(false))
 		if err != nil {
-			log.CtxWarningf(ctx, "Unable to proxy stream: %s", err)
-			continue
+			log.CtxWarningf(ctx, "Failed to proxy build event stream: %s", err)
+			if s.synchronous {
+				return err
+			} else {
+				continue
+			}
 		}
 		eg.Go(func() error {
 			for {
@@ -100,7 +107,7 @@ func (s *BuildEventProtocolServer) PublishBuildToolEventStream(stream pepb.Publi
 					break
 				}
 				if err != nil {
-					log.Warningf("Got error while getting response from proxy: %s", err)
+					log.CtxWarningf(ctx, "Got error while getting response from proxy: %s", err)
 					return err
 				}
 			}
@@ -108,8 +115,10 @@ func (s *BuildEventProtocolServer) PublishBuildToolEventStream(stream pepb.Publi
 		})
 		forwardingStreams = append(forwardingStreams, fwdStream)
 	}
-	var closeStreamsOnce sync.Once
-	defer closeStreamsOnce.Do(func() { closeForwardingStreams(forwardingStreams) })
+
+	if len(forwardingStreams) > 0 {
+		log.CtxInfof(ctx, "Started build event forwarding streams")
+	}
 
 	disconnectWithErr := func(e error) error {
 		if channel != nil && streamID != nil {
@@ -145,6 +154,7 @@ func (s *BuildEventProtocolServer) PublishBuildToolEventStream(stream pepb.Publi
 			if err == io.EOF {
 				if s.synchronous {
 					// Close the streams early so that we can Wait() for any forwarding errors.
+					log.CtxInfof(ctx, "Closing build event forwarding stream")
 					closeStreamsOnce.Do(func() { closeForwardingStreams(forwardingStreams) })
 					if err := eg.Wait(); err != nil {
 						return disconnectWithErr(err)

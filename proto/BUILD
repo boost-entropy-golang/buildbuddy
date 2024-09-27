@@ -298,6 +298,9 @@ proto_library(
 proto_library(
     name = "stat_filter_proto",
     srcs = ["stat_filter.proto"],
+    deps = [
+        "@com_google_protobuf//:descriptor_proto",
+    ],
 )
 
 proto_library(
@@ -726,6 +729,7 @@ proto_library(
     deps = [
         ":context_proto",
         ":git_proto",
+        ":resource_proto",
     ],
 )
 
@@ -744,6 +748,42 @@ proto_library(
         ":index_proto",
         ":search_proto",
     ],
+)
+
+ts_proto_library(
+    name = "kythe_common_ts_proto",
+    proto = "@io_kythe//kythe/proto:common_proto",
+    deps = [
+        ":timestamp_ts_proto",
+    ],
+)
+
+ts_proto_library(
+    name = "kythe_graph_ts_proto",
+    proto = "@io_kythe//kythe/proto:graph_proto",
+    deps = [
+        ":kythe_common_ts_proto",
+    ],
+)
+
+ts_proto_library(
+    name = "kythe_xref_ts_proto",
+    proto = "@io_kythe//kythe/proto:xref_proto",
+    deps = [
+        ":kythe_common_ts_proto",
+    ],
+)
+
+ts_proto_library(
+    name = "kythe_identifier_ts_proto",
+    proto = "@io_kythe//kythe/proto:identifier_proto",
+    deps = [],
+)
+
+ts_proto_library(
+    name = "kythe_filetree_ts_proto",
+    proto = "@io_kythe//kythe/proto:identifier_proto",
+    deps = [],
 )
 
 proto_library(
@@ -1778,6 +1818,7 @@ go_proto_library(
     deps = [
         ":context_go_proto",
         ":git_go_proto",
+        ":resource_go_proto",
     ],
 )
 
@@ -1971,6 +2012,9 @@ ts_proto_library(
 ts_proto_library(
     name = "stat_filter_ts_proto",
     proto = ":stat_filter_proto",
+    deps = [
+        ":descriptor_ts_proto",
+    ],
 )
 
 ts_proto_library(

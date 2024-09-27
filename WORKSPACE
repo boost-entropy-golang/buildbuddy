@@ -49,14 +49,14 @@ http_archive(
 
 http_archive(
     name = "bazel_gazelle",
+    integrity = "sha256-LHVFzJFKQR5cFcPVWgpe00+/9i3vDh8Ktu0UvaIiw8w=",
     patch_args = ["-p1"],
     patches = [
         "//buildpatches:gazelle.patch",
     ],
-    sha256 = "8ad77552825b078a10ad960bec6ef77d2ff8ec70faef2fd038db713f410f5d87",
     urls = [
-        "https://mirror.bazel.build/github.com/bazelbuild/bazel-gazelle/releases/download/v0.38.0/bazel-gazelle-v0.38.0.tar.gz",
-        "https://github.com/bazelbuild/bazel-gazelle/releases/download/v0.38.0/bazel-gazelle-v0.38.0.tar.gz",
+        "https://mirror.bazel.build/github.com/bazelbuild/bazel-gazelle/releases/download/v0.39.0/bazel-gazelle-v0.39.0.tar.gz",
+        "https://github.com/bazelbuild/bazel-gazelle/releases/download/v0.39.0/bazel-gazelle-v0.39.0.tar.gz",
     ],
 )
 
@@ -450,12 +450,11 @@ load("@build_bazel_rules_nodejs//toolchains/esbuild:esbuild_repositories.bzl", "
 esbuild_repositories(npm_repository = "npm")
 
 # SWC (for transpiling TS -> JS)
-
 http_archive(
     name = "aspect_rules_swc",
-    sha256 = "206a89aae3a04831123b43962a3864e8ab1652b703c4af58d84b04174360137d",
-    strip_prefix = "rules_swc-0.4.0",
-    url = "https://github.com/aspect-build/rules_swc/archive/refs/tags/v0.4.0.tar.gz",
+    sha256 = "d63d7b283249fa942f78d2716ecff3edbdc10104ee1b9a6b9464ece471ef95ea",
+    strip_prefix = "rules_swc-2.0.0",
+    url = "https://github.com/aspect-build/rules_swc/releases/download/v2.0.0/rules_swc-v2.0.0.tar.gz",
 )
 
 load("@aspect_rules_swc//swc:dependencies.bzl", "rules_swc_dependencies")
@@ -466,7 +465,7 @@ load("@aspect_rules_swc//swc:repositories.bzl", "swc_register_toolchains")
 
 swc_register_toolchains(
     name = "swc",
-    swc_version = "v1.2.141",
+    swc_version = "v1.3.78",
 )
 
 # Web testing
