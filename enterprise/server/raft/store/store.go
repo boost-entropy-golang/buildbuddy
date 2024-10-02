@@ -467,7 +467,7 @@ func (s *Store) Statusz(ctx context.Context) string {
 	return buf
 }
 
-func (s *Store) handleEvents(ctx context.Context) error {
+func (s *Store) handleEvents(ctx context.Context) {
 	for {
 		select {
 		case e := <-s.events:
@@ -482,7 +482,7 @@ func (s *Store) handleEvents(ctx context.Context) error {
 			}
 			s.eventsMu.Unlock()
 		case <-ctx.Done():
-			return nil
+			return
 		}
 	}
 }
@@ -501,7 +501,8 @@ func (s *Store) AddEventListener() <-chan events.Event {
 func (s *Store) Start() error {
 	s.usages.Start()
 	s.eg.Go(func() error {
-		return s.handleEvents(s.egCtx)
+		s.handleEvents(s.egCtx)
+		return nil
 	})
 	s.eg.Go(func() error {
 		s.acquireNodeLiveness(s.egCtx)
@@ -561,12 +562,12 @@ func (s *Store) Stop(ctx context.Context) error {
 		s.leaseKeeper.Stop()
 		s.liveness.Stop()
 		s.eg.Wait()
+		s.log.Info("Store: waitgroups finished")
 	}
 	s.updateTagsWorker.Stop()
 
-	s.log.Info("Store: waitgroups finished")
 	s.nodeHost.Close()
-	s.log.Info("Store: nodeHost closed")
+	s.log.Info("Store: nodehost closed")
 
 	if err := s.db.Flush(); err != nil {
 		return err
@@ -1577,6 +1578,11 @@ func (w *updateTagsWorker) processUpdateTags() error {
 func (w *updateTagsWorker) Stop() {
 	close(w.quitChan)
 
+	log.Info("updateTagsWorker shutdown started")
+	now := time.Now()
+	defer func() {
+		log.Infof("updateTagsWorker shutdown finished in %s", time.Since(now))
+	}()
 	if err := w.eg.Wait(); err != nil {
 		log.Error(err.Error())
 	}
