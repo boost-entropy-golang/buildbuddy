@@ -3,16 +3,19 @@ package accumulator
 import (
 	"context"
 	"net/url"
+	"regexp"
 	"time"
 
 	"github.com/buildbuddy-io/buildbuddy/proto/build_event_stream"
 	"github.com/buildbuddy-io/buildbuddy/server/build_event_protocol/event_parser"
 	"github.com/buildbuddy-io/buildbuddy/server/build_event_protocol/invocation_format"
+	"github.com/buildbuddy-io/buildbuddy/server/remote_cache/digest"
 	"github.com/buildbuddy-io/buildbuddy/server/util/log"
 	"github.com/buildbuddy-io/buildbuddy/server/util/timeutil"
 
 	inpb "github.com/buildbuddy-io/buildbuddy/proto/invocation"
 	inspb "github.com/buildbuddy-io/buildbuddy/proto/invocation_status"
+	rspb "github.com/buildbuddy-io/buildbuddy/proto/resource"
 )
 
 const (
@@ -25,6 +28,10 @@ const (
 	// from cache -> blobstore. If more than this number are present, they
 	// will be dropped.
 	maxPersistableArtifacts = 1000
+
+	// If codesearch is enabled, and an invocation contains a single file with the
+	// following name, attempt to ingest this kythe sstable file in codesearch.
+	KytheOutputName = "kythe_serving.sst"
 )
 
 var (
@@ -32,6 +39,7 @@ var (
 		"DISABLE_COMMIT_STATUS_REPORTING": disableCommitStatusReportingFieldName,
 		"DISABLE_TARGET_TRACKING":         disableTargetTrackingFieldName,
 	}
+	bytestreamURIPattern = regexp.MustCompile(`^bytestream://.*/blobs/([a-z0-9]{64})/\d+$`)
 )
 
 type Accumulator interface {
@@ -74,6 +82,8 @@ type BEValues struct {
 	sawFinishedEvent               bool
 	buildStartTime                 time.Time
 	buildToolLogURIs               []*url.URL
+	outputFilesMap                 map[string]*build_event_stream.File
+	kytheSSTableResourceName       *rspb.ResourceName
 	profileName                    string
 	hasBytestreamTestActionOutputs bool
 
@@ -87,12 +97,37 @@ func NewBEValues(invocation *inpb.Invocation) *BEValues {
 	return &BEValues{
 		valuesMap:                 make(map[string]string, 0),
 		unprocessedMetadataEvents: make(map[string]struct{}, 0),
+		outputFilesMap:            make(map[string]*build_event_stream.File),
 		parser:                    event_parser.NewStreamingEventParser(invocation),
 	}
 }
 
 func (v *BEValues) Invocation() *inpb.Invocation {
 	return v.parser.GetInvocation()
+}
+
+func (v *BEValues) maybeExtractOutputFile(files ...*build_event_stream.File) {
+	for _, file := range files {
+		if file.GetName() == "" {
+			continue
+		}
+		if m := bytestreamURIPattern.FindStringSubmatch(file.GetUri()); len(m) >= 1 {
+			digestHash := m[1]
+			v.outputFilesMap[digestHash] = file
+		}
+		// Special case: check for kythe output files.
+		if file.GetName() == KytheOutputName {
+			uri, err := url.Parse(file.GetUri())
+			if err != nil {
+				continue
+			}
+			rn, err := digest.ParseDownloadResourceName(uri.Path)
+			if err != nil {
+				continue
+			}
+			v.kytheSSTableResourceName = rn.ToProto()
+		}
+	}
 }
 
 func (v *BEValues) AddEvent(event *build_event_stream.BuildEvent) error {
@@ -106,6 +141,21 @@ func (v *BEValues) AddEvent(event *build_event_stream.BuildEvent) error {
 	}
 
 	switch p := event.Payload.(type) {
+	case *build_event_stream.BuildEvent_NamedSetOfFiles:
+		v.maybeExtractOutputFile(p.NamedSetOfFiles.GetFiles()...)
+	case *build_event_stream.BuildEvent_TestSummary:
+		v.maybeExtractOutputFile(p.TestSummary.GetPassed()...)
+		v.maybeExtractOutputFile(p.TestSummary.GetFailed()...)
+	case *build_event_stream.BuildEvent_RunTargetAnalyzed:
+		v.maybeExtractOutputFile(p.RunTargetAnalyzed.GetRunfiles()...)
+	case *build_event_stream.BuildEvent_Action:
+		v.maybeExtractOutputFile(p.Action.GetStdout())
+		v.maybeExtractOutputFile(p.Action.GetStderr())
+		v.maybeExtractOutputFile(p.Action.GetPrimaryOutput())
+		v.maybeExtractOutputFile(p.Action.GetActionMetadataLogs()...)
+	case *build_event_stream.BuildEvent_Completed:
+		v.maybeExtractOutputFile(p.Completed.GetImportantOutput()...)
+		v.maybeExtractOutputFile(p.Completed.GetDirectoryOutput()...)
 	case *build_event_stream.BuildEvent_Started:
 		v.handleStartedEvent(event)
 	case *build_event_stream.BuildEvent_BuildMetadata:
@@ -115,6 +165,7 @@ func (v *BEValues) AddEvent(event *build_event_stream.BuildEvent) error {
 	case *build_event_stream.BuildEvent_Finished:
 		v.sawFinishedEvent = true
 	case *build_event_stream.BuildEvent_BuildToolLogs:
+		v.maybeExtractOutputFile(p.BuildToolLogs.GetLog()...)
 		for _, toolLog := range p.BuildToolLogs.Log {
 			if uri := toolLog.GetUri(); uri != "" {
 				if url, err := url.Parse(uri); err != nil {
@@ -125,6 +176,7 @@ func (v *BEValues) AddEvent(event *build_event_stream.BuildEvent) error {
 			}
 		}
 	case *build_event_stream.BuildEvent_TestResult:
+		v.maybeExtractOutputFile(p.TestResult.GetTestActionOutput()...)
 		for _, f := range p.TestResult.TestActionOutput {
 			u, err := url.Parse(f.GetUri())
 			if err != nil {
@@ -170,6 +222,14 @@ func (v *BEValues) Finalize(ctx context.Context) {
 }
 func (v *BEValues) StartTime() time.Time {
 	return v.buildStartTime
+}
+
+func (v *BEValues) OutputFiles() map[string]*build_event_stream.File {
+	return v.outputFilesMap
+}
+
+func (v *BEValues) KytheSSTableResourceName() *rspb.ResourceName {
+	return v.kytheSSTableResourceName
 }
 
 func (v *BEValues) DisableCommitStatusReporting() bool {

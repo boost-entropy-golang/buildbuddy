@@ -52,3 +52,11 @@ func (css *CodesearchService) Search(ctx context.Context, req *srpb.SearchReques
 func (css *CodesearchService) Index(ctx context.Context, req *inpb.IndexRequest) (*inpb.IndexResponse, error) {
 	return css.client.Index(ctx, req)
 }
+
+func (css *CodesearchService) IngestAnnotations(ctx context.Context, req *inpb.IngestAnnotationsRequest) (*inpb.IngestAnnotationsResponse, error) {
+	return css.client.IngestAnnotations(ctx, req)
+}
+
+func (css *CodesearchService) KytheProxy(ctx context.Context, req *srpb.KytheRequest) (*srpb.KytheResponse, error) {
+	return css.client.KytheProxy(ctx, req)
+}

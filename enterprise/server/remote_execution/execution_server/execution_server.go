@@ -263,7 +263,7 @@ func trimStatus(statusMessage string) string {
 	return statusMessage
 }
 
-func (s *ExecutionServer) updateExecution(ctx context.Context, executionID string, stage repb.ExecutionStage_Value, op *longrunning.Operation) error {
+func (s *ExecutionServer) updateExecution(ctx context.Context, executionID string, stage repb.ExecutionStage_Value, executeResponse *repb.ExecuteResponse) error {
 	if s.env.GetDBHandle() == nil {
 		return status.FailedPreconditionError("database not configured")
 	}
@@ -274,7 +274,7 @@ func (s *ExecutionServer) updateExecution(ctx context.Context, executionID strin
 		Stage:       int64(stage),
 	}
 
-	if executeResponse := operation.ExtractExecuteResponse(op); executeResponse != nil {
+	if executeResponse != nil {
 		execution.StatusCode = executeResponse.GetStatus().GetCode()
 		execution.StatusMessage = trimStatus(executeResponse.GetStatus().GetMessage())
 		execution.ExitCode = executeResponse.GetResult().GetExitCode()
@@ -513,23 +513,19 @@ func (s *ExecutionServer) dispatch(ctx context.Context, req *repb.ExecuteRequest
 	if sizer == nil {
 		return "", nil, status.FailedPreconditionError("No task sizer configured")
 	}
-	adInstanceDigest := digest.NewResourceName(req.GetActionDigest(), req.GetInstanceName(), rspb.CacheType_CAS, req.GetDigestFunction())
-	action := &repb.Action{}
-	if err := cachetools.ReadProtoFromCAS(ctx, s.cache, adInstanceDigest, action); err != nil {
-		log.CtxWarningf(ctx, "Error fetching action: %s", err.Error())
-		return "", nil, err
-	}
-	cmdInstanceDigest := digest.NewResourceName(action.GetCommandDigest(), req.GetInstanceName(), rspb.CacheType_CAS, req.GetDigestFunction())
-	command := &repb.Command{}
-	if err := cachetools.ReadProtoFromCAS(ctx, s.cache, cmdInstanceDigest, command); err != nil {
-		log.CtxWarningf(ctx, "Error fetching command: %s", err.Error())
-		return "", nil, err
-	}
-
 	invocationID := bazel_request.GetInvocationID(ctx)
 	rmd := bazel_request.GetRequestMetadata(ctx)
 	if invocationID == "" {
 		log.CtxInfof(ctx, "Execution %q is missing invocation ID metadata. Request metadata: %+v", executionID, rmd)
+	}
+
+	adInstanceDigest := digest.NewResourceName(req.GetActionDigest(), req.GetInstanceName(), rspb.CacheType_CAS, req.GetDigestFunction())
+	action, command, err := s.fetchActionAndCommand(ctx, adInstanceDigest)
+	if err != nil {
+		return "", nil, err
+	}
+	if action.GetPlatform() == nil && command.GetPlatform() != nil {
+		log.CtxInfof(ctx, "Execution %q has a platform in the command, but not the action. Request metadata: %v", executionID, rmd)
 	}
 	// Drop ToolDetails from the request metadata. Executors will include this
 	// metadata in all app requests, but the ToolDetails identify the request as
@@ -588,7 +584,7 @@ func (s *ExecutionServer) dispatch(ctx context.Context, req *repb.ExecuteRequest
 		if err != nil {
 			return "", nil, err
 		}
-		envVars, err = gcplink.ExchangeRefreshTokenForAuthToken(ctx, envVars, platform.IsCICommand(command))
+		envVars, err = gcplink.ExchangeRefreshTokenForAuthToken(ctx, envVars, platform.IsCICommand(command, platform.GetProto(action, command)))
 		if err != nil {
 			return "", nil, err
 		}
@@ -609,7 +605,7 @@ func (s *ExecutionServer) dispatch(ctx context.Context, req *repb.ExecuteRequest
 		predictedSize = sizer.Predict(ctx, executionTask)
 	}
 
-	pool, err := s.env.GetSchedulerService().GetPoolInfo(ctx, props.OS, props.Pool, props.WorkflowID, props.UseSelfHostedExecutors)
+	pool, err := s.env.GetSchedulerService().GetPoolInfo(ctx, props.OS, props.Pool, props.WorkflowID, props.PoolType)
 	if err != nil {
 		return "", nil, err
 	}
@@ -946,7 +942,7 @@ func (s *ExecutionServer) MarkExecutionFailed(ctx context.Context, taskID string
 		log.CtxWarningf(ctx, "MarkExecutionFailed: error publishing task %q on stream pubsub: %s", taskID, err)
 		return status.InternalErrorf("Error publishing task %q on stream pubsub: %s", taskID, err)
 	}
-	if err := s.updateExecution(ctx, taskID, operation.ExtractStage(op), op); err != nil {
+	if err := s.updateExecution(ctx, taskID, repb.ExecutionStage_COMPLETED, rsp); err != nil {
 		log.CtxWarningf(ctx, "MarkExecutionFailed: error updating execution: %q: %s", taskID, err)
 		return err
 	}
@@ -977,7 +973,7 @@ func (s *ExecutionServer) PublishOperation(stream repb.Execution_PublishOperatio
 		mu.Lock()
 		defer mu.Unlock()
 		if time.Since(lastWrite) > 5*time.Second && taskID != "" {
-			if err := s.updateExecution(ctx, taskID, stage, lastOp); err != nil {
+			if err := s.updateExecution(ctx, taskID, stage, operation.ExtractExecuteResponse(lastOp)); err != nil {
 				log.CtxWarningf(ctx, "PublishOperation: FlushWrite: error updating execution: %s", err)
 				return false
 			}
@@ -1008,8 +1004,9 @@ func (s *ExecutionServer) PublishOperation(stream repb.Execution_PublishOperatio
 
 		log.CtxDebugf(ctx, "PublishOperation: stage: %s", stage)
 
+		var response *repb.ExecuteResponse
 		if stage == repb.ExecutionStage_COMPLETED {
-			response := operation.ExtractExecuteResponse(op)
+			response = operation.ExtractExecuteResponse(op)
 			if response != nil {
 				if err := s.markTaskComplete(ctx, taskID, response); err != nil {
 					// Errors updating the router or recording usage are non-fatal.
@@ -1032,7 +1029,7 @@ func (s *ExecutionServer) PublishOperation(stream repb.Execution_PublishOperatio
 				mu.Lock()
 				defer mu.Unlock()
 
-				if err := s.updateExecution(ctx, taskID, stage, op); err != nil {
+				if err := s.updateExecution(ctx, taskID, stage, response); err != nil {
 					log.CtxErrorf(ctx, "PublishOperation: error updating execution: %s", err)
 					return status.WrapErrorf(err, "failed to update execution %q", taskID)
 				}
@@ -1043,7 +1040,6 @@ func (s *ExecutionServer) PublishOperation(stream repb.Execution_PublishOperatio
 				return err
 			}
 
-			response := operation.ExtractExecuteResponse(op)
 			if response != nil {
 				if err := s.cacheExecuteResponse(ctx, taskID, response); err != nil {
 					log.CtxErrorf(ctx, "Failed to cache execute response: %s", err)
@@ -1087,7 +1083,7 @@ func (s *ExecutionServer) markTaskComplete(ctx context.Context, taskID string, e
 	if err != nil {
 		return err
 	}
-	cmd, err := s.fetchCommandForTask(ctx, actionResourceName)
+	action, cmd, err := s.fetchActionAndCommand(ctx, actionResourceName)
 	if err != nil {
 		return err
 	}
@@ -1096,7 +1092,7 @@ func (s *ExecutionServer) markTaskComplete(ctx context.Context, taskID string, e
 	// Only update the router if a task was actually executed
 	if execErr == nil && router != nil && !executeResponse.GetCachedResult() {
 		executorHostID := executeResponse.GetResult().GetExecutionMetadata().GetWorker()
-		router.MarkComplete(ctx, cmd, actionResourceName.GetInstanceName(), executorHostID)
+		router.MarkComplete(ctx, action, cmd, actionResourceName.GetInstanceName(), executorHostID)
 	}
 
 	// Skip sizer and usage updates for teed work.
@@ -1142,7 +1138,7 @@ func (s *ExecutionServer) updateUsage(ctx context.Context, cmd *repb.Command, ex
 		return err
 	}
 
-	pool, err := s.env.GetSchedulerService().GetPoolInfo(ctx, plat.OS, plat.Pool, plat.WorkflowID, plat.UseSelfHostedExecutors)
+	pool, err := s.env.GetSchedulerService().GetPoolInfo(ctx, plat.OS, plat.Pool, plat.WorkflowID, plat.PoolType)
 	if err != nil {
 		return status.InternalErrorf("failed to determine executor pool: %s", err)
 	}
@@ -1160,18 +1156,20 @@ func (s *ExecutionServer) updateUsage(ctx context.Context, cmd *repb.Command, ex
 	return ut.Increment(ctx, labels, counts)
 }
 
-func (s *ExecutionServer) fetchCommandForTask(ctx context.Context, actionResourceName *digest.ResourceName) (*repb.Command, error) {
+func (s *ExecutionServer) fetchActionAndCommand(ctx context.Context, actionResourceName *digest.ResourceName) (*repb.Action, *repb.Command, error) {
 	action := &repb.Action{}
 	if err := cachetools.ReadProtoFromCAS(ctx, s.cache, actionResourceName, action); err != nil {
-		return nil, err
+		log.CtxWarningf(ctx, "Error fetching action: %s", err.Error())
+		return nil, nil, err
 	}
 	cmdDigest := action.GetCommandDigest()
 	cmdInstanceNameDigest := digest.NewResourceName(cmdDigest, actionResourceName.GetInstanceName(), rspb.CacheType_CAS, actionResourceName.GetDigestFunction())
 	cmd := &repb.Command{}
 	if err := cachetools.ReadProtoFromCAS(ctx, s.cache, cmdInstanceNameDigest, cmd); err != nil {
-		return nil, err
+		log.CtxWarningf(ctx, "Error fetching command: %s", err.Error())
+		return nil, nil, err
 	}
-	return cmd, nil
+	return action, cmd, nil
 }
 
 func executionDuration(md *repb.ExecutedActionMetadata) (time.Duration, error) {

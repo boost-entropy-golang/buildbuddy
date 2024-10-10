@@ -4,6 +4,10 @@
   height: 100%;
 }
 
+.tap .popup-wrapper {
+  position: relative;
+}
+
 .tap button {
   flex-shrink: 0;
 }
@@ -557,4 +561,18 @@ SKIPPED = 13;
   display: flex;
   align-items: center;
   min-width: 300px;
+}
+
+/* Some weird padding and margin to make the click target bigger. */
+.tap .target-copy-button .copy-icon-wrapper {
+  display: inline-block;
+  padding: 16px 16px 16px 8px;
+  margin: -16px -16px -16px -4px;
+}
+
+.tap .target-copy-button .copy-button-text {
+  margin-left: 4px;
+  font-weight: normal;
+  font-size: 14px;
+  color: #888;
 }

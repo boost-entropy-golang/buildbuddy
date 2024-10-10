@@ -413,6 +413,17 @@ func (i *InvocationStatService) addWhereClauses(q *query_builder.Query, tq *stpb
 		}
 		q.AddWhereClause(str, args...)
 	}
+	queryObjects := sfpb.ObjectTypes_INVOCATION_OBJECTS
+	if includeExecutionDimensionFilters {
+		queryObjects = sfpb.ObjectTypes_EXECUTION_OBJECTS
+	}
+	for _, f := range tq.GetGenericFilters() {
+		s, a, err := filter.ValidateAndGenerateGenericFilterQueryStringAndArgs(f, "", queryObjects)
+		if err != nil {
+			return err
+		}
+		q.AddWhereClause(s, a...)
+	}
 
 	q.AddWhereClause(`group_id = ?`, reqCtx.GetGroupId())
 	return nil
@@ -496,7 +507,7 @@ func (i *InvocationStatService) getExecutionTrendQuery(timeSettings *trendTimeSe
 	if !i.finerTimeBucketsEnabled() {
 		return fmt.Sprintf("SELECT %s as name,", i.olapdbh.DateFromUsecTimestamp("updated_at_usec", timezoneOffsetMinutes)) + `
 		quantilesExactExclusive(0.5, 0.75, 0.9, 0.95, 0.99)(IF(worker_start_timestamp_usec > queued_timestamp_usec, worker_start_timestamp_usec - queued_timestamp_usec, 0)) AS queue_duration_usec_quantiles,
-		SUM(COALESCE(worker_completed_timestamp_usec - worker_start_timestamp_usec, 0)) as total_build_time_usec
+		SUM(GREATEST(COALESCE(worker_completed_timestamp_usec - worker_start_timestamp_usec, 0), 0)) as total_build_time_usec
 		FROM "Executions"`, make([]interface{}, 0)
 	}
 
@@ -504,7 +515,7 @@ func (i *InvocationStatService) getExecutionTrendQuery(timeSettings *trendTimeSe
 
 	return fmt.Sprintf("SELECT %s as bucket_start_time_micros,", bucketStr) + `
 	quantilesExactExclusive(0.5, 0.75, 0.9, 0.95, 0.99)(IF(worker_start_timestamp_usec > queued_timestamp_usec, worker_start_timestamp_usec - queued_timestamp_usec, 0)) AS queue_duration_usec_quantiles,
-	SUM(COALESCE(worker_completed_timestamp_usec - worker_start_timestamp_usec, 0)) as total_build_time_usec
+	SUM(GREATEST(COALESCE(worker_completed_timestamp_usec - worker_start_timestamp_usec, 0), 0)) as total_build_time_usec
 	FROM "Executions"
 	`, bucketArgs
 }
@@ -1069,6 +1080,14 @@ func (i *InvocationStatService) GetInvocationStat(ctx context.Context, req *inpb
 			return nil, err
 		}
 		q.AddWhereClause(str, args...)
+	}
+
+	for _, f := range req.GetQuery().GetGenericFilters() {
+		s, a, err := filter.ValidateAndGenerateGenericFilterQueryStringAndArgs(f, "", sfpb.ObjectTypes_INVOCATION_OBJECTS)
+		if err != nil {
+			return nil, err
+		}
+		q.AddWhereClause(s, a...)
 	}
 
 	statusClauses := toStatusClauses(req.GetQuery().GetStatus())

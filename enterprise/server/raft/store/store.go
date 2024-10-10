@@ -97,8 +97,19 @@ type Store struct {
 	grpcServer    *grpc.Server
 	apiClient     *client.APIClient
 	liveness      *nodeliveness.Liveness
-	session       *client.Session
-	log           log.Logger
+	// This session is used by most of the SyncPropose traffic
+	session *client.Session
+	// The following sessions are created so that we can seperate background
+	// traffic such as eviction, startShard, splitRange from the main write
+	// traffic.
+	// session for transactions; used by split, add and remove replica.
+	txnSession *client.Session
+	// session for eviction
+	evictionSession *client.Session
+	// session for StartShard
+	shardStarterSession *client.Session
+
+	log log.Logger
 
 	db     pebble.IPebbleDB
 	leaser pebble.Leaser
@@ -199,21 +210,27 @@ func NewWithArgs(env environment.Env, rootDir string, nodeHost *dragonboat.NodeH
 
 	clock := env.GetClock()
 	session := client.NewSessionWithClock(clock)
+	txnSession := client.NewSessionWithClock(clock)
+	evictionSession := client.NewSessionWithClock(clock)
+	shardStarterSession := client.NewSessionWithClock(clock)
 	lkSession := client.NewSessionWithClock(clock)
 
 	s := &Store{
-		env:           env,
-		rootDir:       rootDir,
-		grpcAddr:      grpcAddress,
-		nodeHost:      nodeHost,
-		partitions:    partitions,
-		gossipManager: gossipManager,
-		sender:        sender,
-		registry:      registry,
-		apiClient:     apiClient,
-		liveness:      nodeLiveness,
-		session:       session,
-		log:           nhLog,
+		env:                 env,
+		rootDir:             rootDir,
+		grpcAddr:            grpcAddress,
+		nodeHost:            nodeHost,
+		partitions:          partitions,
+		gossipManager:       gossipManager,
+		sender:              sender,
+		registry:            registry,
+		apiClient:           apiClient,
+		liveness:            nodeLiveness,
+		session:             session,
+		txnSession:          txnSession,
+		evictionSession:     evictionSession,
+		shardStarterSession: shardStarterSession,
+		log:                 nhLog,
 
 		rangeMu:    sync.RWMutex{},
 		openRanges: make(map[uint64]*rfpb.RangeDescriptor),
@@ -958,7 +975,7 @@ func (s *Store) StartShard(ctx context.Context, req *rfpb.StartShardRequest) (*r
 	}
 	sort.Slice(replicaIDs, func(i, j int) bool { return replicaIDs[i] < replicaIDs[j] })
 	if req.GetReplicaId() == replicaIDs[len(replicaIDs)-1] {
-		batchResponse, err := s.session.SyncProposeLocal(ctx, s.nodeHost, req.GetRangeId(), req.GetBatch())
+		batchResponse, err := s.shardStarterSession.SyncProposeLocal(ctx, s.nodeHost, req.GetRangeId(), req.GetBatch())
 		if err != nil {
 			return nil, err
 		}
@@ -1056,7 +1073,17 @@ func (s *Store) SyncPropose(ctx context.Context, req *rfpb.SyncProposeRequest) (
 		rangeID = r.RangeID()
 	}
 
-	batchResponse, err := s.session.SyncProposeLocal(ctx, s.nodeHost, rangeID, req.GetBatch())
+	session := s.session
+	if len(req.GetBatch().GetTransactionId()) > 0 {
+		session = s.txnSession
+	} else {
+		// use eviction session for delete requests
+		unions := req.GetBatch().GetUnion()
+		if len(unions) > 0 && unions[0].GetDelete() != nil {
+			session = s.evictionSession
+		}
+	}
+	batchResponse, err := session.SyncProposeLocal(ctx, s.nodeHost, rangeID, req.GetBatch())
 	if err != nil {
 		if err == dragonboat.ErrShardNotFound {
 			return nil, status.OutOfRangeErrorf("%s: range %d not found", constants.RangeLeaseInvalidMsg, rangeID)
@@ -2042,10 +2069,6 @@ func (s *Store) AddReplica(ctx context.Context, req *rfpb.AddReplicaRequest) (*r
 	if err != nil {
 		return nil, status.InternalErrorf("AddReplica failed to add replica to range descriptor: %s", err)
 	}
-	metrics.RaftMoves.With(prometheus.Labels{
-		metrics.RaftNodeHostIDLabel: s.nodeHost.ID(),
-		metrics.RaftMoveLabel:       "add",
-	}).Inc()
 
 	return &rfpb.AddReplicaResponse{
 		Range: rd,
@@ -2091,11 +2114,6 @@ func (s *Store) RemoveReplica(ctx context.Context, req *rfpb.RemoveReplicaReques
 	if err = s.syncRequestDeleteReplica(ctx, replicaDesc.GetRangeId(), replicaDesc.GetReplicaId()); err != nil {
 		return nil, err
 	}
-
-	metrics.RaftMoves.With(prometheus.Labels{
-		metrics.RaftNodeHostIDLabel: s.nodeHost.ID(),
-		metrics.RaftMoveLabel:       "remove",
-	}).Inc()
 
 	rsp := &rfpb.RemoveReplicaResponse{
 		Range: rd,

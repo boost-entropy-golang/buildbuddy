@@ -9,8 +9,6 @@ import (
 	"net/http"
 	"net/url"
 	"path"
-	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -622,7 +620,7 @@ func (s *BuildBuddyServer) GetApiKey(ctx context.Context, req *akpb.GetApiKeyReq
 		}
 		al.Log(ctx, rid, alpb.Action_ACCESS, req)
 	}
-	return &akpb.GetApiKeyResponse{
+	rsp := &akpb.GetApiKeyResponse{
 		ApiKey: &akpb.ApiKey{
 			Id:                  key.APIKeyID,
 			Value:               key.Value,
@@ -630,7 +628,22 @@ func (s *BuildBuddyServer) GetApiKey(ctx context.Context, req *akpb.GetApiKeyReq
 			Capability:          capabilities.FromInt(key.Capabilities),
 			VisibleToDevelopers: key.VisibleToDevelopers,
 		},
-	}, nil
+	}
+	if req.GetIncludeCertificate() {
+		if !s.sslService.IsCertGenerationEnabled() {
+			return nil, status.FailedPreconditionError("SSL certificate generation is not enabled by this server")
+		}
+		cert, key, err := s.sslService.GenerateCerts(rsp.GetApiKey().GetId())
+		if err != nil {
+			log.CtxErrorf(ctx, "Failed to generate cert: %s", err)
+			return nil, status.InternalError("failed to generate certificate")
+		}
+		rsp.ApiKey.Certificate = &akpb.Certificate{
+			Cert: cert,
+			Key:  key,
+		}
+	}
+	return rsp, nil
 }
 
 func (s *BuildBuddyServer) CreateApiKey(ctx context.Context, req *akpb.CreateApiKeyRequest) (*akpb.CreateApiKeyResponse, error) {
@@ -807,7 +820,7 @@ func (s *BuildBuddyServer) GetUserApiKey(ctx context.Context, req *akpb.GetApiKe
 		}
 		al.Log(ctx, rid, alpb.Action_ACCESS, req)
 	}
-	return &akpb.GetApiKeyResponse{
+	rsp := &akpb.GetApiKeyResponse{
 		ApiKey: &akpb.ApiKey{
 			Id:                  key.APIKeyID,
 			Value:               key.Value,
@@ -815,7 +828,22 @@ func (s *BuildBuddyServer) GetUserApiKey(ctx context.Context, req *akpb.GetApiKe
 			Capability:          capabilities.FromInt(key.Capabilities),
 			VisibleToDevelopers: key.VisibleToDevelopers,
 		},
-	}, nil
+	}
+	if req.GetIncludeCertificate() {
+		if !s.sslService.IsCertGenerationEnabled() {
+			return nil, status.FailedPreconditionError("SSL certificate generation is not enabled by this server")
+		}
+		cert, key, err := s.sslService.GenerateCerts(rsp.GetApiKey().GetId())
+		if err != nil {
+			log.CtxErrorf(ctx, "Failed to generate cert: %s", err)
+			return nil, status.InternalError("failed to generate certificate")
+		}
+		rsp.ApiKey.Certificate = &akpb.Certificate{
+			Cert: cert,
+			Key:  key,
+		}
+	}
+	return rsp, nil
 }
 
 func (s *BuildBuddyServer) CreateUserApiKey(ctx context.Context, req *akpb.CreateApiKeyRequest) (*akpb.CreateApiKeyResponse, error) {
@@ -1098,7 +1126,8 @@ func (s *BuildBuddyServer) GetBazelConfig(ctx context.Context, req *bzpb.GetBaze
 		for _, c := range credentials {
 			cert, key, err := s.sslService.GenerateCerts(c.ApiKey.Id)
 			if err != nil {
-				return nil, status.InternalError(fmt.Sprintf("Error generating cert: %+v", err))
+				log.CtxErrorf(ctx, "Failed to generate cert: %s", err)
+				return nil, status.InternalError("failed to generate certificate")
 			}
 			c.Certificate = &bzpb.Certificate{
 				Cert: cert,
@@ -1549,22 +1578,16 @@ func (s *BuildBuddyServer) GetSuggestion(ctx context.Context, req *supb.GetSugge
 	return nil, status.UnimplementedError("Not implemented")
 }
 
-var isAlphaNumPath = regexp.MustCompile(`^[A-Za-z/0-9]*$`).MatchString
-
 func (s *BuildBuddyServer) Search(ctx context.Context, req *srpb.SearchRequest) (*srpb.SearchResponse, error) {
 	if css := s.env.GetCodesearchService(); css != nil {
-		namespace, err := prefix.UserPrefix(ctx, s.env)
-		if err != nil {
-			return nil, err
-		}
-		if !isAlphaNumPath(req.GetNamespace()) {
-			return nil, status.InvalidArgumentError("namespace must match a/b/c")
-		}
-		// Force the namespace to match the authenticated user, but
-		// allow for clients to use a custom namespace within that
-		// subspace.
-		req.Namespace = filepath.Join(namespace, req.GetNamespace())
 		return css.Search(ctx, req)
+	}
+	return nil, status.UnimplementedError("Not implemented")
+}
+
+func (s *BuildBuddyServer) KytheProxy(ctx context.Context, req *srpb.KytheRequest) (*srpb.KytheResponse, error) {
+	if css := s.env.GetCodesearchService(); css != nil {
+		return css.KytheProxy(ctx, req)
 	}
 	return nil, status.UnimplementedError("Not implemented")
 }

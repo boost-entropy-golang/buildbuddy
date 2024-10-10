@@ -559,7 +559,7 @@ func copyFile(src *FilePointer, dest *FilePointer, opts *DownloadTreeOpts) error
 
 // linkFileFromFileCache attempts to link the given file path from the local
 // file cache, and returns whether the linking was successful.
-func linkFileFromFileCache(ctx context.Context, d *repb.Digest, fp *FilePointer, fc interfaces.FileCache, opts *DownloadTreeOpts) (bool, error) {
+func linkFileFromFileCache(ctx context.Context, fp *FilePointer, fc interfaces.FileCache, opts *DownloadTreeOpts) (bool, error) {
 	if err := removeExisting(fp, opts); err != nil {
 		return false, err
 	}
@@ -643,6 +643,7 @@ func (ff *BatchFileFetcher) batchDownloadFiles(ctx context.Context, req *repb.Ba
 	fileCache := ff.env.GetFileCache()
 	for _, res := range responses {
 		if res.Err != nil {
+			log.CtxInfof(ctx, "Failed to download %s: %s", digest.String(res.Digest), res.Err)
 			return digest.MissingDigestError(res.Digest)
 		}
 		d := res.Digest
@@ -677,9 +678,8 @@ func (ff *BatchFileFetcher) linkFromFileCache(filePointers []*FilePointer, opts 
 	fileCache := ff.env.GetFileCache()
 	numFilesLinked := 0
 	for _, fp := range filePointers {
-		d := fp.FileNode.GetDigest()
 		if fileCache != nil {
-			linked, err := linkFileFromFileCache(ff.ctx, d, fp, fileCache, opts)
+			linked, err := linkFileFromFileCache(ff.ctx, fp, fileCache, opts)
 			if err != nil {
 				return err
 			}
@@ -1010,6 +1010,9 @@ func DownloadTree(ctx context.Context, env environment.Env, instanceName string,
 			}
 			childDir, ok := dirMap[digest.NewKey(child.GetDigest())]
 			if !ok {
+				if child.GetDigest() == nil {
+					log.CtxInfof(ctx, "Directory child digest is nil (parentDir=%q, childName=%q)", parentDir, child.GetName())
+				}
 				return digest.MissingDigestError(child.GetDigest())
 			}
 			if err := fetchDirFn(childDir, newRoot); err != nil {

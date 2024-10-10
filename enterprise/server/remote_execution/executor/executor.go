@@ -147,7 +147,7 @@ func isTaskMisconfigured(err error) bool {
 
 func isClientBazel(task *repb.ExecutionTask) bool {
 	// TODO(bduffany): Find a more reliable way to determine this.
-	return !platform.IsCICommand(task.GetCommand())
+	return !platform.IsCICommand(task.GetCommand(), platform.GetProto(task.GetAction(), task.GetCommand()))
 }
 
 func shouldRetry(task *repb.ExecutionTask, taskError error) bool {
@@ -199,19 +199,21 @@ func (s *Executor) ExecuteTaskAndStreamResults(ctx context.Context, st *repb.Sch
 
 	stateChangeFn := operation.GetStateChangeFunc(stream, taskID, adInstanceDigest)
 	md := &repb.ExecutedActionMetadata{
-		Worker:               s.hostID,
-		QueuedTimestamp:      task.QueuedTimestamp,
-		WorkerStartTimestamp: timestamppb.Now(),
-		ExecutorId:           s.id,
-		IoStats:              &repb.IOStats{},
-		EstimatedTaskSize:    st.GetSchedulingMetadata().GetTaskSize(),
-		DoNotCache:           task.GetAction().GetDoNotCache(),
+		Worker:                   s.hostID,
+		QueuedTimestamp:          task.QueuedTimestamp,
+		WorkerStartTimestamp:     timestamppb.Now(),
+		WorkerCompletedTimestamp: timestamppb.Now(),
+		ExecutorId:               s.id,
+		IoStats:                  &repb.IOStats{},
+		EstimatedTaskSize:        st.GetSchedulingMetadata().GetTaskSize(),
+		DoNotCache:               task.GetAction().GetDoNotCache(),
 	}
 	finishWithErrFn := func(finalErr error) (retry bool, err error) {
 		if shouldRetry(task, finalErr) {
 			return true, finalErr
 		}
 		resp := operation.ErrorResponse(finalErr)
+		md.WorkerCompletedTimestamp = timestamppb.Now()
 		resp.Result = &repb.ActionResult{
 			ExecutionMetadata: md,
 		}

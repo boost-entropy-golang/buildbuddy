@@ -83,11 +83,11 @@ install_static_dependencies()
 install_go_mod_dependencies()
 
 load("@bazel_gazelle//:deps.bzl", "gazelle_dependencies")
-load("@io_bazel_rules_go//go:deps.bzl", "go_download_sdk", "go_register_toolchains", "go_rules_dependencies")
+load("@io_bazel_rules_go//go:deps.bzl", "go_download_sdk", "go_register_nogo", "go_register_toolchains", "go_rules_dependencies")
 
 go_rules_dependencies()
 
-GO_SDK_VERSION = "1.23.1"
+GO_SDK_VERSION = "1.23.2"
 
 # Register multiple Go SDKs so that we can perform cross-compilation remotely.
 # i.e. We might want to trigger a Linux AMD64 Go build remotely from a MacOS ARM64 laptop.
@@ -135,9 +135,11 @@ go_download_sdk(
     version = GO_SDK_VERSION,
 )
 
-go_register_toolchains(
+go_register_nogo(
     nogo = "@//:vet",
 )
+
+go_register_toolchains()
 
 gazelle_dependencies(
     go_env = {
@@ -228,6 +230,15 @@ yarn_install(
     name = "npm",
     exports_directories_only = False,
     package_json = "//:package.json",
+    patch_args = [
+        "-p1",
+        "--binary",
+    ],
+    post_install_patches = [
+        # Patch out use of eval to satisfy a strict CSP.
+        # https://github.com/protobufjs/protobuf.js/issues/593
+        "//buildpatches:protobuf.js_inquire.patch",
+    ],
     symlink_node_modules = False,
     yarn_lock = "//:yarn.lock",
 )
@@ -325,8 +336,6 @@ load(
 )
 
 _go_image_repos()
-
-all_content = """filegroup(name = "all", srcs = glob(["**"]), visibility = ["//visibility:public"])"""
 
 # Kubernetes
 
@@ -538,7 +547,6 @@ http_file(
 )
 
 register_toolchains(
-    "//toolchains:sh_toolchain",
     "//toolchains:ubuntu_cc_toolchain",
 )
 

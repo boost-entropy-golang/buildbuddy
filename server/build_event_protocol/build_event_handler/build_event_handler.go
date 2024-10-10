@@ -56,6 +56,7 @@ import (
 	apipb "github.com/buildbuddy-io/buildbuddy/proto/api/v1"
 	bepb "github.com/buildbuddy-io/buildbuddy/proto/build_events"
 	capb "github.com/buildbuddy-io/buildbuddy/proto/cache"
+	csinpb "github.com/buildbuddy-io/buildbuddy/proto/index"
 	inpb "github.com/buildbuddy-io/buildbuddy/proto/invocation"
 	inspb "github.com/buildbuddy-io/buildbuddy/proto/invocation_status"
 	pgpb "github.com/buildbuddy-io/buildbuddy/proto/pagination"
@@ -127,7 +128,7 @@ type BuildEventHandler struct {
 
 func NewBuildEventHandler(env environment.Env) *BuildEventHandler {
 	openChannels := &sync.WaitGroup{}
-	onStatsRecorded := make(chan *invocationJWT, 4096)
+	onStatsRecorded := make(chan *invocationInfo, 4096)
 	statsRecorder := newStatsRecorder(env, openChannels, onStatsRecorded)
 	webhookNotifier := newWebhookNotifier(env, onStatsRecorded)
 
@@ -198,10 +199,10 @@ func (b *BuildEventHandler) Stop() {
 	})
 }
 
-// invocationJWT represents an invocation ID as well as the JWT granting access
+// invocationInfo represents an invocation ID as well as the JWT granting access
 // to it. It should only be used for background tasks that need access to the
 // JWT after the build event stream is already closed.
-type invocationJWT struct {
+type invocationInfo struct {
 	id      string
 	jwt     string
 	attempt uint64
@@ -211,14 +212,15 @@ type invocationJWT struct {
 // invocation. These tasks are enqueued to statsRecorder and executed in the
 // background.
 type recordStatsTask struct {
-	*invocationJWT
+	*invocationInfo
 	// createdAt is the time at which this task was created.
 	createdAt time.Time
 	// files contains a mapping of file digests to file name metadata for files
 	// referenced in the BEP.
-	files            map[string]*build_event_stream.File
-	persist          *PersistArtifacts
-	invocationStatus inspb.InvocationStatus
+	files                    map[string]*build_event_stream.File
+	persist                  *PersistArtifacts
+	kytheSSTableResourceName *rspb.ResourceName
+	invocationStatus         inspb.InvocationStatus
 }
 
 // statsRecorder listens for finalized invocations and copies cache stats from
@@ -229,7 +231,7 @@ type statsRecorder struct {
 	// onStatsRecorded is a channel for this statsRecorder to notify after
 	// recording stats for each invocation. Invocations sent on this channel are
 	// considered "finalized".
-	onStatsRecorded chan<- *invocationJWT
+	onStatsRecorded chan<- *invocationInfo
 	eg              errgroup.Group
 
 	mu      sync.Mutex // protects(tasks, stopped)
@@ -237,7 +239,7 @@ type statsRecorder struct {
 	stopped bool
 }
 
-func newStatsRecorder(env environment.Env, openChannels *sync.WaitGroup, onStatsRecorded chan<- *invocationJWT) *statsRecorder {
+func newStatsRecorder(env environment.Env, openChannels *sync.WaitGroup, onStatsRecorded chan<- *invocationInfo) *statsRecorder {
 	return &statsRecorder{
 		env:             env,
 		openChannels:    openChannels,
@@ -248,7 +250,17 @@ func newStatsRecorder(env environment.Env, openChannels *sync.WaitGroup, onStats
 
 // Enqueue enqueues a task for the given invocation's stats to be recorded
 // once they are available.
-func (r *statsRecorder) Enqueue(ctx context.Context, invocation *inpb.Invocation, persist *PersistArtifacts) {
+func (r *statsRecorder) Enqueue(ctx context.Context, beValues *accumulator.BEValues) {
+	persist := &PersistArtifacts{}
+	if !*disablePersistArtifacts {
+		testOutputURIs := beValues.TestOutputURIs()
+		persist.URIs = make([]*url.URL, 0, len(testOutputURIs))
+		persist.URIs = append(persist.URIs, beValues.BuildToolLogURIs()...)
+		persist.URIs = append(persist.URIs, testOutputURIs...)
+	}
+
+	invocation := beValues.Invocation()
+
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -261,15 +273,16 @@ func (r *statsRecorder) Enqueue(ctx context.Context, invocation *inpb.Invocation
 	}
 	jwt := r.env.GetAuthenticator().TrustedJWTFromAuthContext(ctx)
 	req := &recordStatsTask{
-		invocationJWT: &invocationJWT{
+		invocationInfo: &invocationInfo{
 			id:      invocation.GetInvocationId(),
 			attempt: invocation.Attempt,
 			jwt:     jwt,
 		},
-		createdAt:        time.Now(),
-		files:            scorecard.ExtractFiles(invocation),
-		invocationStatus: invocation.GetInvocationStatus(),
-		persist:          persist,
+		createdAt:                time.Now(),
+		files:                    beValues.OutputFiles(),
+		invocationStatus:         invocation.GetInvocationStatus(),
+		persist:                  persist,
+		kytheSSTableResourceName: beValues.KytheSSTableResourceName(),
 	}
 	select {
 	case r.tasks <- req:
@@ -295,12 +308,12 @@ func (r *statsRecorder) Start() {
 	}
 }
 
-func (r *statsRecorder) lookupInvocation(ctx context.Context, ij *invocationJWT) (*tables.Invocation, error) {
+func (r *statsRecorder) lookupInvocation(ctx context.Context, ij *invocationInfo) (*tables.Invocation, error) {
 	ctx = r.env.GetAuthenticator().AuthContextFromTrustedJWT(ctx, ij.jwt)
 	return r.env.GetInvocationDB().LookupInvocation(ctx, ij.id)
 }
 
-func (r *statsRecorder) flushInvocationStatsToOLAPDB(ctx context.Context, ij *invocationJWT) error {
+func (r *statsRecorder) flushInvocationStatsToOLAPDB(ctx context.Context, ij *invocationInfo) error {
 	if r.env.GetOLAPDBHandle() == nil || !*writeToOLAPDBEnabled {
 		return nil
 	}
@@ -370,6 +383,25 @@ func (r *statsRecorder) flushInvocationStatsToOLAPDB(ctx context.Context, ij *in
 	return nil
 }
 
+func (r *statsRecorder) maybeIngestKytheSST(ctx context.Context, ij *invocationInfo, sstableResource *rspb.ResourceName) error {
+	// first check that css is enabled
+	codesearchService := r.env.GetCodesearchService()
+	if codesearchService == nil {
+		return nil
+	}
+
+	if sstableResource == nil {
+		return nil
+	}
+
+	ctx = r.env.GetAuthenticator().AuthContextFromTrustedJWT(ctx, ij.jwt)
+	_, err := codesearchService.IngestAnnotations(ctx, &csinpb.IngestAnnotationsRequest{
+		SstableName: sstableResource,
+		Async:       true, // don't wait for an answer.
+	})
+	return err
+}
+
 func (r *statsRecorder) handleTask(ctx context.Context, task *recordStatsTask) {
 	start := time.Now()
 	defer func() {
@@ -380,18 +412,22 @@ func (r *statsRecorder) handleTask(ctx context.Context, task *recordStatsTask) {
 	// finalized, rather than relative to now. Otherwise each worker would be
 	// unnecessarily throttled.
 	time.Sleep(time.Until(task.createdAt.Add(*cacheStatsFinalizationDelay)))
-	ti := &tables.Invocation{InvocationID: task.invocationJWT.id, Attempt: task.invocationJWT.attempt}
-	ctx = log.EnrichContext(ctx, log.InvocationIDKey, task.invocationJWT.id)
-	if stats := hit_tracker.CollectCacheStats(ctx, r.env, task.invocationJWT.id); stats != nil {
+	ti := &tables.Invocation{InvocationID: task.invocationInfo.id, Attempt: task.invocationInfo.attempt}
+	ctx = log.EnrichContext(ctx, log.InvocationIDKey, task.invocationInfo.id)
+	if stats := hit_tracker.CollectCacheStats(ctx, r.env, task.invocationInfo.id); stats != nil {
 		fillInvocationFromCacheStats(stats, ti)
 	} else {
 		log.CtxInfo(ctx, "cache stats is not available.")
 	}
-	if sc := hit_tracker.ScoreCard(ctx, r.env, task.invocationJWT.id); sc != nil {
+	if sc := hit_tracker.ScoreCard(ctx, r.env, task.invocationInfo.id); sc != nil {
 		scorecard.FillBESMetadata(sc, task.files)
-		if err := scorecard.Write(ctx, r.env, task.invocationJWT.id, task.invocationJWT.attempt, sc); err != nil {
+		if err := scorecard.Write(ctx, r.env, task.invocationInfo.id, task.invocationInfo.attempt, sc); err != nil {
 			log.CtxErrorf(ctx, "Error writing scorecard blob: %s", err)
 		}
+	}
+
+	if err := r.maybeIngestKytheSST(ctx, task.invocationInfo, task.kytheSSTableResourceName); err != nil {
+		log.CtxWarningf(ctx, "Failed to ingest kythe sst: %s", err)
 	}
 
 	updated, err := r.env.GetInvocationDB().UpdateInvocation(ctx, ti)
@@ -401,7 +437,7 @@ func (r *statsRecorder) handleTask(ctx context.Context, task *recordStatsTask) {
 
 	if task.invocationStatus == inspb.InvocationStatus_COMPLETE_INVOCATION_STATUS {
 		// only flush complete invocation to clickhouse.
-		err = r.flushInvocationStatsToOLAPDB(ctx, task.invocationJWT)
+		err = r.flushInvocationStatsToOLAPDB(ctx, task.invocationInfo)
 		if err != nil {
 			log.CtxErrorf(ctx, "Failed to flush stats to clickhouse: %s", err)
 		}
@@ -411,9 +447,9 @@ func (r *statsRecorder) handleTask(ctx context.Context, task *recordStatsTask) {
 	// Cleanup regardless of whether the stats are flushed successfully to
 	// the DB (since we won't retry the flush and we don't need these stats
 	// for any other purpose).
-	hit_tracker.CleanupCacheStats(ctx, r.env, task.invocationJWT.id)
+	hit_tracker.CleanupCacheStats(ctx, r.env, task.invocationInfo.id)
 	if !updated {
-		log.CtxWarningf(ctx, "Attempt %d of invocation pre-empted by more recent attempt, no cache stats flushed.", task.invocationJWT.attempt)
+		log.CtxWarningf(ctx, "Attempt %d of invocation pre-empted by more recent attempt, no cache stats flushed.", task.invocationInfo.attempt)
 		// Don't notify the webhook; the more recent attempt should trigger
 		// the notification when it is finalized.
 		return
@@ -422,7 +458,7 @@ func (r *statsRecorder) handleTask(ctx context.Context, task *recordStatsTask) {
 	// Once cache stats are populated, notify the onStatsRecorded channel in
 	// a non-blocking fashion.
 	select {
-	case r.onStatsRecorded <- task.invocationJWT:
+	case r.onStatsRecorded <- task.invocationInfo:
 		break
 	default:
 		alert.UnexpectedEvent(
@@ -431,7 +467,7 @@ func (r *statsRecorder) handleTask(ctx context.Context, task *recordStatsTask) {
 		)
 	}
 
-	ctx = r.env.GetAuthenticator().AuthContextFromTrustedJWT(ctx, task.invocationJWT.jwt)
+	ctx = r.env.GetAuthenticator().AuthContextFromTrustedJWT(ctx, task.invocationInfo.jwt)
 	eg, ctx := errgroup.WithContext(ctx)
 	eg.SetLimit(50) // Max concurrency when copying files from cache->blobstore.
 	for _, uri := range task.persist.URIs {
@@ -449,7 +485,7 @@ func (r *statsRecorder) handleTask(ctx context.Context, task *recordStatsTask) {
 			// requests with the app, not bazel.
 			ctx := usageutil.WithLocalServerLabels(ctx)
 
-			fullPath := path.Join(task.invocationJWT.id, cacheArtifactsBlobstorePath, uri.Path)
+			fullPath := path.Join(task.invocationInfo.id, cacheArtifactsBlobstorePath, uri.Path)
 			// Only persist artifacts from caches that are hosted on the BuildBuddy
 			// domain (but only if we know it).
 			if cache_api_url.String() == "" || urlutil.GetDomain(uri.Hostname()) == urlutil.GetDomain(cache_api_url.WithPath("").Hostname()) {
@@ -530,9 +566,9 @@ func persistArtifact(ctx context.Context, env environment.Env, uri *url.URL, pat
 type notifyWebhookTask struct {
 	// hook is the webhook to notify of a completed invocation.
 	hook interfaces.Webhook
-	// invocationJWT contains the invocation ID and JWT for the invocation.
-	*invocationJWT
-	// invocation is the complete invocation looked up from the invocationJWT.
+	// invocationInfo contains the invocation ID and JWT for the invocation.
+	*invocationInfo
+	// invocation is the complete invocation looked up from the invocationInfo.
 	invocation *inpb.Invocation
 }
 
@@ -545,7 +581,7 @@ func notifyWithTimeout(ctx context.Context, env environment.Env, t *notifyWebhoo
 	ctx, cancel := context.WithTimeout(ctx, webhookNotifyTimeout)
 	defer cancel()
 	// Run the webhook using the authenticated user from the build event stream.
-	ij := t.invocationJWT
+	ij := t.invocationInfo
 	ctx = env.GetAuthenticator().AuthContextFromTrustedJWT(ctx, ij.jwt)
 	return t.hook.NotifyComplete(ctx, t.invocation)
 }
@@ -556,14 +592,14 @@ type webhookNotifier struct {
 	env environment.Env
 	// invocations is a channel of finalized invocations. On each invocation
 	// sent to this channel, we notify all configured webhooks.
-	invocations <-chan *invocationJWT
+	invocations <-chan *invocationInfo
 
 	tasks       chan *notifyWebhookTask
 	lookupGroup errgroup.Group
 	notifyGroup errgroup.Group
 }
 
-func newWebhookNotifier(env environment.Env, invocations <-chan *invocationJWT) *webhookNotifier {
+func newWebhookNotifier(env environment.Env, invocations <-chan *invocationInfo) *webhookNotifier {
 	return &webhookNotifier{
 		env:         env,
 		invocations: invocations,
@@ -606,7 +642,7 @@ func (w *webhookNotifier) Start() {
 	}
 }
 
-func (w *webhookNotifier) lookupAndCreateTask(ctx context.Context, ij *invocationJWT) error {
+func (w *webhookNotifier) lookupAndCreateTask(ctx context.Context, ij *invocationInfo) error {
 	start := time.Now()
 	defer func() {
 		metrics.WebhookInvocationLookupDuration.Observe(float64(time.Since(start).Microseconds()))
@@ -624,9 +660,9 @@ func (w *webhookNotifier) lookupAndCreateTask(ctx context.Context, ij *invocatio
 
 	for _, hook := range w.env.GetWebhooks() {
 		w.tasks <- &notifyWebhookTask{
-			hook:          hook,
-			invocationJWT: ij,
-			invocation:    invocation,
+			hook:           hook,
+			invocationInfo: ij,
+			invocation:     invocation,
 		}
 	}
 
@@ -645,7 +681,7 @@ func (w *webhookNotifier) Stop() {
 	}
 }
 
-func (w *webhookNotifier) lookupInvocation(ctx context.Context, ij *invocationJWT) (*inpb.Invocation, error) {
+func (w *webhookNotifier) lookupInvocation(ctx context.Context, ij *invocationInfo) (*inpb.Invocation, error) {
 	ctx = w.env.GetAuthenticator().AuthContextFromTrustedJWT(ctx, ij.jwt)
 	inv, err := LookupInvocation(w.env, ctx, ij.id)
 	if err != nil {
@@ -824,15 +860,7 @@ func (e *EventChannel) FinalizeInvocation(iid string) error {
 		e.statusReporter.ReportDisconnect(ctx)
 	}
 
-	persist := &PersistArtifacts{}
-	if !*disablePersistArtifacts {
-		testOutputURIs := e.beValues.TestOutputURIs()
-		persist.URIs = make([]*url.URL, 0, len(testOutputURIs))
-		persist.URIs = append(persist.URIs, e.beValues.BuildToolLogURIs()...)
-		persist.URIs = append(persist.URIs, testOutputURIs...)
-	}
-
-	e.statsRecorder.Enqueue(ctx, invocation, persist)
+	e.statsRecorder.Enqueue(ctx, e.beValues)
 	log.CtxInfof(ctx, "Finalized invocation in primary DB and enqueued for stats recording (status: %s)", invocation.GetInvocationStatus())
 	return nil
 }

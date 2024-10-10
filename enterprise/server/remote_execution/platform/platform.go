@@ -150,6 +150,7 @@ type Properties struct {
 	OS                        string
 	Arch                      string
 	Pool                      string
+	PoolType                  interfaces.PoolType
 	EstimatedComputeUnits     float64
 	EstimatedMilliCPU         int64
 	EstimatedMemoryBytes      int64
@@ -214,7 +215,6 @@ type Properties struct {
 	PersistentWorkerProtocol string
 	WorkflowID               string
 	HostedBazelAffinityKey   string
-	UseSelfHostedExecutors   bool
 
 	// DisableMeasuredTaskSize disables measurement-based task sizing, even if
 	// it is enabled via flag, and instead uses the default / platform based
@@ -261,7 +261,7 @@ func (p *ExecutorProperties) SupportsIsolation(c ContainerType) bool {
 // executor-specific overrides applied via the ApplyOverrides function.
 func ParseProperties(task *repb.ExecutionTask) (*Properties, error) {
 	m := map[string]string{}
-	for _, prop := range task.GetCommand().GetPlatform().GetProperties() {
+	for _, prop := range GetProto(task.GetAction(), task.GetCommand()).GetProperties() {
 		m[strings.ToLower(prop.GetName())] = strings.TrimSpace(prop.GetValue())
 	}
 	for _, prop := range task.GetPlatformOverrides().GetProperties() {
@@ -315,10 +315,20 @@ func ParseProperties(task *repb.ExecutionTask) (*Properties, error) {
 		}
 	}
 
+	poolType := interfaces.PoolTypeDefault
+	if val, ok := m[strings.ToLower(useSelfHostedExecutorsPropertyName)]; ok {
+		if strings.EqualFold(val, "true") {
+			poolType = interfaces.PoolTypeSelfHosted
+		} else {
+			poolType = interfaces.PoolTypeShared
+		}
+	}
+
 	return &Properties{
 		OS:                        strings.ToLower(stringProp(m, OperatingSystemPropertyName, defaultOperatingSystemName)),
 		Arch:                      strings.ToLower(stringProp(m, CPUArchitecturePropertyName, defaultCPUArchitecture)),
 		Pool:                      strings.ToLower(pool),
+		PoolType:                  poolType,
 		EstimatedComputeUnits:     float64Prop(m, EstimatedComputeUnitsPropertyName, 0),
 		EstimatedMemoryBytes:      iecBytesProp(m, EstimatedMemoryPropertyName, 0),
 		EstimatedMilliCPU:         milliCPUProp(m, EstimatedCPUPropertyName, 0),
@@ -350,7 +360,6 @@ func ParseProperties(task *repb.ExecutionTask) (*Properties, error) {
 		PersistentWorkerProtocol:  stringProp(m, persistentWorkerProtocolPropertyName, ""),
 		WorkflowID:                stringProp(m, WorkflowIDPropertyName, ""),
 		HostedBazelAffinityKey:    stringProp(m, HostedBazelAffinityKeyPropertyName, ""),
-		UseSelfHostedExecutors:    boolProp(m, useSelfHostedExecutorsPropertyName, false),
 		DisableMeasuredTaskSize:   boolProp(m, disableMeasuredTaskSizePropertyName, false),
 		DisablePredictedTaskSize:  boolProp(m, disablePredictedTaskSizePropertyName, false),
 		ExtraArgs:                 stringListProp(m, extraArgsPropertyName),
@@ -699,6 +708,16 @@ func findValue(platform *repb.Platform, name string) (value string, ok bool) {
 	return "", false
 }
 
+// GetProto returns the platform proto from the action if it's present.
+// Otherwise it returns the platform from the command. This is the desired
+// behaviour as of REAPI 2.2.
+func GetProto(action *repb.Action, cmd *repb.Command) *repb.Platform {
+	if plat := action.GetPlatform(); plat != nil {
+		return plat
+	}
+	return cmd.GetPlatform()
+}
+
 // FindValue scans the platform properties for the given property name (ignoring
 // case) and returns the value of that property if it exists, otherwise "".
 func FindValue(platform *repb.Platform, name string) string {
@@ -715,7 +734,7 @@ func FindEffectiveValue(task *repb.ExecutionTask, name string) string {
 	if ok {
 		return override
 	}
-	return FindValue(task.GetCommand().GetPlatform(), name)
+	return FindValue(GetProto(task.GetAction(), task.GetCommand()), name)
 }
 
 // IsTrue returns whether the given platform property value is truthy.
@@ -734,11 +753,11 @@ func DefaultImage() string {
 // IsCICommand returns whether the given command is either a BuildBuddy workflow
 // or a GitHub Actions runner task. These commands are longer-running and may
 // themselves invoke bazel.
-func IsCICommand(cmd *repb.Command) bool {
+func IsCICommand(cmd *repb.Command, platform *repb.Platform) bool {
 	if len(cmd.GetArguments()) > 0 && cmd.GetArguments()[0] == "./buildbuddy_ci_runner" {
 		return true
 	}
-	if FindValue(cmd.GetPlatform(), "github-actions-runner-labels") != "" {
+	if FindValue(platform, "github-actions-runner-labels") != "" {
 		return true
 	}
 	return false

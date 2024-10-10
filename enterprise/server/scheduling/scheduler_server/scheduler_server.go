@@ -50,6 +50,7 @@ var (
 	leaseInterval                = flag.Duration("remote_execution.lease_duration", 10*time.Second, "How long before a task lease must be renewed by the executor client.")
 	leaseGracePeriod             = flag.Duration("remote_execution.lease_grace_period", 10*time.Second, "How long to wait for the executor to renew the lease after the TTL duration has elapsed.")
 	leaseReconnectGracePeriod    = flag.Duration("remote_execution.lease_reconnect_grace_period", 1*time.Second, "How long to delay re-enqueued tasks in order to allow the previous lease holder to renew its lease (following a server shutdown).")
+	maxSchedulingDelay           = flag.Duration("remote_execution.max_scheduling_delay", 5*time.Second, "Max duration that actions can sit in a non-preferred executor's queue before they are executed.")
 )
 
 const (
@@ -114,10 +115,7 @@ const (
 	// Platform property value corresponding with the darwin (Mac) operating system.
 	darwinOperatingSystemName = "darwin"
 
-	// Upper bound on the scheduling delay applied for tasks scheduled on
-	// non-preferred execution nodes, to prevent indefinite scheduling delays.
-	maxPermittedSchedulingDelay = 15 * time.Minute
-	defaultSchedulingDelay      = 0 * time.Second
+	defaultSchedulingDelay = 0 * time.Second
 )
 
 var (
@@ -986,7 +984,7 @@ func NewSchedulerServerWithOptions(env environment.Env, options *Options) (*Sche
 	return s, nil
 }
 
-func (s *SchedulerServer) GetPoolInfo(ctx context.Context, os, requestedPool, workflowID string, useSelfHosted bool) (*interfaces.PoolInfo, error) {
+func (s *SchedulerServer) GetPoolInfo(ctx context.Context, os, requestedPool, workflowID string, poolType interfaces.PoolType) (*interfaces.PoolInfo, error) {
 	// Note: The defaultPoolName flag only applies to the shared executor pool.
 	// The pool name for self-hosted pools is always determined directly from
 	// platform props.
@@ -1006,7 +1004,7 @@ func (s *SchedulerServer) GetPoolInfo(ctx context.Context, os, requestedPool, wo
 	}
 
 	// Linux workflows use shared executors unless self_hosted is set.
-	if os == platform.LinuxOperatingSystemName && workflowID != "" && !useSelfHosted {
+	if os == platform.LinuxOperatingSystemName && workflowID != "" && poolType != interfaces.PoolTypeSelfHosted {
 		return sharedPool, nil
 	}
 
@@ -1016,7 +1014,7 @@ func (s *SchedulerServer) GetPoolInfo(ctx context.Context, os, requestedPool, wo
 			if s.forceUserOwnedDarwinExecutors && os == darwinOperatingSystemName {
 				return nil, status.FailedPreconditionErrorf("Darwin remote build execution is not enabled for anonymous requests.")
 			}
-			if useSelfHosted {
+			if poolType == interfaces.PoolTypeSelfHosted {
 				return nil, status.FailedPreconditionErrorf("Self-hosted executors not enabled for anonymous requests.")
 			}
 			return sharedPool, nil
@@ -1028,13 +1026,13 @@ func (s *SchedulerServer) GetPoolInfo(ctx context.Context, os, requestedPool, wo
 		IsSelfHosted: true,
 		Name:         requestedPool,
 	}
-	if user.GetUseGroupOwnedExecutors() {
+	if user.GetUseGroupOwnedExecutors() && poolType != interfaces.PoolTypeShared {
 		return selfHostedPool, nil
 	}
 	if s.forceUserOwnedDarwinExecutors && os == darwinOperatingSystemName {
 		return selfHostedPool, nil
 	}
-	if useSelfHosted {
+	if poolType == interfaces.PoolTypeSelfHosted {
 		return selfHostedPool, nil
 	}
 	return sharedPool, nil
@@ -1730,7 +1728,7 @@ func (s *SchedulerServer) enqueueTaskReservations(ctx context.Context, enqueueRe
 
 	attempts := 0
 	var rankedNodes []interfaces.RankedExecutionNode
-	nonPreferredDelay := getNonPreferredSchedulingDelay(cmd)
+	nonPreferredDelay := getNonPreferredSchedulingDelay(platform.GetProto(task.GetAction(), cmd))
 	delayable := enqueueRequest.GetDelay() == nil
 	for len(successfulReservations) < probeCount {
 		// If the queue of ranked, candidate nodes is empty, refresh them.
@@ -1749,7 +1747,7 @@ func (s *SchedulerServer) enqueueTaskReservations(ctx context.Context, enqueueRe
 			if len(candidateNodes) == 0 {
 				return status.UnavailableErrorf("requested executor ID not found")
 			}
-			rankedNodes = s.taskRouter.RankNodes(ctx, cmd, remoteInstanceName, toNodeInterfaces(candidateNodes))
+			rankedNodes = s.taskRouter.RankNodes(ctx, task.GetAction(), cmd, remoteInstanceName, toNodeInterfaces(candidateNodes))
 		}
 
 		select {
@@ -1794,8 +1792,8 @@ func (s *SchedulerServer) enqueueTaskReservations(ctx context.Context, enqueueRe
 
 // Returns the delay that should be applied to executions scheduled on
 // non-preferred execution nodes.
-func getNonPreferredSchedulingDelay(cmd *repb.Command) time.Duration {
-	delayProperty := platform.FindValue(cmd.GetPlatform(), platform.RunnerRecyclingMaxWaitPropertyName)
+func getNonPreferredSchedulingDelay(plat *repb.Platform) time.Duration {
+	delayProperty := platform.FindValue(plat, platform.RunnerRecyclingMaxWaitPropertyName)
 	if delayProperty == "" {
 		return defaultSchedulingDelay
 	}
@@ -1809,8 +1807,8 @@ func getNonPreferredSchedulingDelay(cmd *repb.Command) time.Duration {
 		// haven't figured out how to implement it yet :-(
 		return defaultSchedulingDelay
 	}
-	if d > maxPermittedSchedulingDelay {
-		return maxPermittedSchedulingDelay
+	if d > *maxSchedulingDelay {
+		return *maxSchedulingDelay
 	}
 	return d
 }

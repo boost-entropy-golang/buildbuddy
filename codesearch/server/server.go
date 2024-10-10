@@ -3,15 +3,17 @@ package server
 import (
 	"archive/zip"
 	"context"
-	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
+	"time"
 
 	"github.com/buildbuddy-io/buildbuddy/codesearch/index"
+	"github.com/buildbuddy-io/buildbuddy/codesearch/kythestorage"
 	"github.com/buildbuddy-io/buildbuddy/codesearch/performance"
 	"github.com/buildbuddy-io/buildbuddy/codesearch/query"
 	"github.com/buildbuddy-io/buildbuddy/codesearch/schema"
@@ -20,10 +22,14 @@ import (
 	"github.com/buildbuddy-io/buildbuddy/server/environment"
 	"github.com/buildbuddy-io/buildbuddy/server/remote_cache/cachetools"
 	"github.com/buildbuddy-io/buildbuddy/server/remote_cache/digest"
+	"github.com/buildbuddy-io/buildbuddy/server/util/background"
 	"github.com/buildbuddy-io/buildbuddy/server/util/disk"
 	"github.com/buildbuddy-io/buildbuddy/server/util/git"
 	"github.com/buildbuddy-io/buildbuddy/server/util/log"
+	"github.com/buildbuddy-io/buildbuddy/server/util/prefix"
+	"github.com/buildbuddy-io/buildbuddy/server/util/status"
 	"github.com/cockroachdb/pebble"
+	"github.com/cockroachdb/pebble/sstable"
 	"golang.org/x/sync/errgroup"
 
 	"kythe.io/kythe/go/services/filetree"
@@ -39,7 +45,6 @@ import (
 	ftsrv "kythe.io/kythe/go/serving/filetree"
 	gsrv "kythe.io/kythe/go/serving/graph"
 	xsrv "kythe.io/kythe/go/serving/xrefs"
-	kythe_pebble "kythe.io/kythe/go/storage/pebble"
 )
 
 const (
@@ -49,18 +54,12 @@ const (
 	// mimetype detection.
 	detectionBufferSize = 1000
 
-	// The following field names are used in the indexed docs.
-	filenameField = "filename"
-	contentField  = "content"
-	languageField = "language"
-	ownerField    = "owner"
-	repoField     = "repo"
-	shaField      = "sha"
-
 	// Used to control how many results may be returned at a time.
 	defaultNumResults = 10
 	maxNumResults     = 1000
 )
+
+var isAlphaNumPath = regexp.MustCompile(`^[A-Za-z/0-9]*$`).MatchString
 
 func init() {
 	flagyaml.IgnoreFlagForYAML("experimental_cross_reference_indirection_kinds")
@@ -77,7 +76,7 @@ func New(env environment.Env, rootDirectory, scratchDirectory string) (*codesear
 		return nil, err
 	}
 
-	kdb := kythe_pebble.OpenRaw(db)
+	kdb := kythestorage.OpenRaw(env, db)
 	tbl := &table.KVProto{DB: kdb}
 	gs := gsrv.NewCombinedTable(tbl)
 	ft := &ftsrv.Table{Proto: tbl, PrefixedKeys: true}
@@ -133,7 +132,21 @@ func apiArchiveURL(repoURL, commitSHA, username, accessToken string) (string, er
 	return u.String(), nil
 }
 
-func (css *codesearchServer) syncIndex(ctx context.Context, req *inpb.IndexRequest) (*inpb.IndexResponse, error) {
+// getUserNamespace forces the namespace to match the authenticated user, but
+// allows for clients to use a custom namespace within that subspace.
+func (css *codesearchServer) getUserNamespace(ctx context.Context, requestedNamespace string) (string, error) {
+	if !isAlphaNumPath(requestedNamespace) {
+		return "", status.InvalidArgumentError("namespace must match a/b/c")
+	}
+	gid, err := prefix.UserPrefix(ctx, css.env)
+	if err != nil {
+		return "", err
+	}
+	namespace := filepath.Join(gid, requestedNamespace)
+	return namespace, nil
+}
+
+func (css *codesearchServer) syncIndex(_ context.Context, req *inpb.IndexRequest) (*inpb.IndexResponse, error) {
 	repoURLString := req.GetGitRepo().GetRepoUrl()
 	commitSHA := req.GetRepoState().GetCommitSha()
 	username := req.GetGitRepo().GetUsername()
@@ -211,9 +224,13 @@ func (css *codesearchServer) syncIndex(ctx context.Context, req *inpb.IndexReque
 }
 
 func (css *codesearchServer) Index(ctx context.Context, req *inpb.IndexRequest) (*inpb.IndexResponse, error) {
-	if req.GetNamespace() == "" {
-		return nil, fmt.Errorf("a non-empty namespace must be specified")
+	namespace, err := css.getUserNamespace(ctx, req.GetNamespace())
+	if err != nil {
+		return nil, err
 	}
+
+	// Rewrite the request namespace before passing it to syncIndex.
+	req.Namespace = namespace
 
 	var rsp *inpb.IndexResponse
 	eg := &errgroup.Group{}
@@ -224,7 +241,7 @@ func (css *codesearchServer) Index(ctx context.Context, req *inpb.IndexRequest) 
 			return err
 		}
 		rsp = r
-		log.Printf("Finished indexing %s", req.GetGitRepo().GetRepoUrl())
+		log.Infof("Finished indexing %s", req.GetGitRepo().GetRepoUrl())
 		return nil
 	})
 	if req.GetAsync() {
@@ -237,16 +254,19 @@ func (css *codesearchServer) Index(ctx context.Context, req *inpb.IndexRequest) 
 }
 
 func (css *codesearchServer) Search(ctx context.Context, req *srpb.SearchRequest) (*srpb.SearchResponse, error) {
-	if req.GetNamespace() == "" {
-		return nil, fmt.Errorf("a non-empty namespace must be specified")
+	log.Debugf("search req: %+v", req)
+
+	namespace, err := css.getUserNamespace(ctx, req.GetNamespace())
+	if err != nil {
+		return nil, err
 	}
-	log.Printf("search req: %+v", req)
+
 	ctx = performance.WrapContext(ctx)
 	numResults := defaultNumResults
 	if req.GetNumResults() > 0 && req.GetNumResults() < maxNumResults {
 		numResults = int(req.GetNumResults())
 	}
-	codesearcher := searcher.New(ctx, index.NewReader(ctx, css.db, req.GetNamespace()))
+	codesearcher := searcher.New(ctx, index.NewReader(ctx, css.db, namespace))
 	q, err := query.NewReQuery(ctx, req.GetQuery().GetTerm())
 	if err != nil {
 		return nil, err
@@ -284,11 +304,11 @@ func (css *codesearchServer) Search(ctx context.Context, req *srpb.SearchRequest
 		}
 
 		result := &srpb.Result{
-			Owner:      string(doc.Field(ownerField).Contents()),
-			Repo:       string(doc.Field(repoField).Contents()),
-			Filename:   string(doc.Field(filenameField).Contents()),
+			Owner:      string(doc.Field(schema.OwnerField).Contents()),
+			Repo:       string(doc.Field(schema.RepoField).Contents()),
+			Filename:   string(doc.Field(schema.FilenameField).Contents()),
 			MatchCount: int32(len(dedupedRegions)),
-			Sha:        string(doc.Field(shaField).Contents()),
+			Sha:        string(doc.Field(schema.SHAField).Contents()),
 		}
 		for _, region := range dedupedRegions {
 			result.Snippets = append(result.Snippets, &srpb.Snippet{
@@ -313,45 +333,142 @@ func (css *codesearchServer) Search(ctx context.Context, req *srpb.SearchRequest
 	return rsp, nil
 }
 
-func (css *codesearchServer) XrefsService() xrefs.Service {
-	return css.xs
-}
-func (css *codesearchServer) GraphService() graph.Service {
-	return css.gs
-}
-func (css *codesearchServer) IdentifierService() identifiers.Service {
-	return css.it
-}
-func (css *codesearchServer) FiletreeService() filetree.Service {
-	return css.ft
+func (css *codesearchServer) KytheProxy(ctx context.Context, req *srpb.KytheRequest) (*srpb.KytheResponse, error) {
+	var rsp = new(srpb.KytheResponse)
+	var err error
+
+	switch req.Value.(type) {
+	case *srpb.KytheRequest_NodesRequest:
+		nodesReply, nodesErr := css.gs.Nodes(ctx, req.GetNodesRequest())
+		rsp.Value = &srpb.KytheResponse_NodesReply{
+			NodesReply: nodesReply,
+		}
+		err = nodesErr
+	case *srpb.KytheRequest_DecorationsRequest:
+		decorationsReply, decorationsErr := css.xs.Decorations(ctx, req.GetDecorationsRequest())
+		rsp.Value = &srpb.KytheResponse_DecorationsReply{
+			DecorationsReply: decorationsReply,
+		}
+		err = decorationsErr
+	case *srpb.KytheRequest_CrossReferencesRequest:
+		crossReferencesReply, crossReferencesErr := css.xs.CrossReferences(ctx, req.GetCrossReferencesRequest())
+		rsp.Value = &srpb.KytheResponse_CrossReferencesReply{
+			CrossReferencesReply: crossReferencesReply,
+		}
+		err = crossReferencesErr
+	default:
+		rsp = nil
+		err = status.UnimplementedError("method not implemented in codesearch backend")
+	}
+
+	return rsp, err
 }
 
-func (css *codesearchServer) IngestKytheTable(ctx context.Context, req *inpb.KytheIndexRequest) (*inpb.KytheIndexResponse, error) {
+func retrieveValue(lazyValue pebble.LazyValue) ([]byte, error) {
+	val, owned, err := lazyValue.Value(nil)
+	if err != nil {
+		return nil, err
+	}
+	if owned || val == nil {
+		return val, nil
+	}
+	copiedVal := make([]byte, len(val))
+	copy(copiedVal, val)
+	return copiedVal, nil
+}
+
+func (css *codesearchServer) syncIngestAnnotations(ctx context.Context, req *inpb.IngestAnnotationsRequest) (*inpb.IngestAnnotationsResponse, error) {
+	if req.GetAsync() {
+		xCtx, cancel := background.ExtendContextForFinalization(ctx, time.Minute)
+		defer cancel()
+		ctx = xCtx
+	}
+
 	tmpFile, err := os.CreateTemp(css.scratchDirectory, "kythe-*.sstable")
 	if err != nil {
 		return nil, err
 	}
 	fileName := tmpFile.Name()
 	defer func() {
-		// Only clean up the file if it still exists. If Ingest()
-		// succeeds (below) then it should not.
-		if _, err := os.Stat(fileName); err == nil {
-			log.Warningf("ingestion failed (req: %+v); cleaning up tmpfile %q", req, fileName)
-			os.Remove(fileName)
-		}
+		tmpFile.Close()
+		os.Remove(fileName)
 	}()
 
 	sstableName := digest.ResourceNameFromProto(req.GetSstableName())
 	if err := cachetools.GetBlob(ctx, css.env.GetByteStreamClient(), sstableName, tmpFile); err != nil {
 		return nil, err
 	}
-	if err := tmpFile.Close(); err != nil {
+
+	tmpFile.Seek(0, 0)
+	readHandler, err := sstable.NewSimpleReadable(tmpFile)
+	if err != nil {
 		return nil, err
 	}
-	if err := css.db.Ingest([]string{fileName}); err != nil {
+	reader, err := sstable.NewReader(readHandler, sstable.ReaderOptions{})
+	if err != nil {
 		return nil, err
 	}
-	return &inpb.KytheIndexResponse{}, nil
+	defer reader.Close()
+	iter, err := reader.NewIter(nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer iter.Close()
+
+	writer, err := css.kdb.Writer(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	bufSize := 0
+	for iKey, iVal := iter.First(); iKey != nil; iKey, iVal = iter.Next() {
+		key := iKey.UserKey
+		val, err := retrieveValue(iVal)
+		if err != nil {
+			return nil, err
+		}
+		writer.Write(key, val)
+		bufSize += len(key) + len(val)
+		if bufSize >= 100*1e6 {
+			if err := writer.Close(); err != nil {
+				return nil, err
+			}
+			writer, err = css.kdb.Writer(ctx)
+			if err != nil {
+				return nil, err
+			}
+			bufSize = 0
+		}
+	}
+
+	if bufSize > 0 {
+		if err := writer.Close(); err != nil {
+			return nil, err
+		}
+	}
+	return &inpb.IngestAnnotationsResponse{}, nil
+}
+
+func (css *codesearchServer) IngestAnnotations(ctx context.Context, req *inpb.IngestAnnotationsRequest) (*inpb.IngestAnnotationsResponse, error) {
+	var rsp *inpb.IngestAnnotationsResponse
+	eg := &errgroup.Group{}
+	eg.Go(func() error {
+		r, err := css.syncIngestAnnotations(ctx, req)
+		if err != nil {
+			log.Errorf("Failed ingesting kythe table %+v: %s", req.GetSstableName(), err)
+			return err
+		}
+		rsp = r
+		log.Infof("Finished ingesting kythe table %+v", req.GetSstableName())
+		return nil
+	})
+	if req.GetAsync() {
+		return &inpb.IngestAnnotationsResponse{}, nil
+	}
+	if err := eg.Wait(); err != nil {
+		return nil, err
+	}
+	return rsp, nil
 }
 
 func (css *codesearchServer) Close(ctx context.Context) {

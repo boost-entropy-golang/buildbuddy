@@ -51,7 +51,7 @@ func (n fakeRankedNode) IsPreferred() bool {
 	return n.preferred
 }
 
-func (f *fakeTaskRouter) RankNodes(ctx context.Context, cmd *repb.Command, remoteInstanceName string, nodes []interfaces.ExecutionNode) []interfaces.RankedExecutionNode {
+func (f *fakeTaskRouter) RankNodes(ctx context.Context, action *repb.Action, cmd *repb.Command, remoteInstanceName string, nodes []interfaces.ExecutionNode) []interfaces.RankedExecutionNode {
 	rankedNodes := make([]interfaces.RankedExecutionNode, len(nodes))
 	for i, node := range nodes {
 		preferred := false
@@ -77,7 +77,7 @@ func (f *fakeTaskRouter) RankNodes(ctx context.Context, cmd *repb.Command, remot
 	return rankedNodes
 }
 
-func (f *fakeTaskRouter) MarkComplete(ctx context.Context, cmd *repb.Command, remoteInstanceName, executorInstanceID string) {
+func (f *fakeTaskRouter) MarkComplete(ctx context.Context, action *repb.Action, cmd *repb.Command, remoteInstanceName, executorInstanceID string) {
 }
 
 type schedulerOpts struct {
@@ -136,7 +136,7 @@ func getScheduleServer(t *testing.T, userOwnedEnabled, groupOwnedEnabled bool, u
 
 func TestSchedulerServerGetPoolInfoUserOwnedDisabled(t *testing.T) {
 	s, ctx := getScheduleServer(t, false, false, "")
-	p, err := s.GetPoolInfo(ctx, "linux", "", "" /*=workflowID*/, false)
+	p, err := s.GetPoolInfo(ctx, "linux", "", "" /*=workflowID*/, interfaces.PoolTypeDefault)
 	require.NoError(t, err)
 	require.Equal(t, "", p.GroupID)
 	require.Equal(t, "defaultPoolName", p.Name)
@@ -144,7 +144,7 @@ func TestSchedulerServerGetPoolInfoUserOwnedDisabled(t *testing.T) {
 
 func TestSchedulerServerGetPoolInfoNoAuth(t *testing.T) {
 	s, ctx := getScheduleServer(t, true, false, "")
-	p, err := s.GetPoolInfo(ctx, "linux", "", "" /*=workflowID*/, false)
+	p, err := s.GetPoolInfo(ctx, "linux", "", "" /*=workflowID*/, interfaces.PoolTypeDefault)
 	require.NoError(t, err)
 	require.Equal(t, "sharedGroupID", p.GroupID)
 	require.Equal(t, "defaultPoolName", p.Name)
@@ -153,23 +153,23 @@ func TestSchedulerServerGetPoolInfoNoAuth(t *testing.T) {
 func TestSchedulerServerGetPoolInfoWithOS(t *testing.T) {
 	s, ctx := getScheduleServer(t, true, false, "user1")
 	s.forceUserOwnedDarwinExecutors = false
-	p, err := s.GetPoolInfo(ctx, "linux", "", "" /*=workflowID*/, false)
+	p, err := s.GetPoolInfo(ctx, "linux", "", "" /*=workflowID*/, interfaces.PoolTypeDefault)
 	require.NoError(t, err)
 	require.Equal(t, "sharedGroupID", p.GroupID)
 	require.Equal(t, "defaultPoolName", p.Name)
 
-	p, err = s.GetPoolInfo(ctx, "darwin", "", "" /*=workflowID*/, false)
+	p, err = s.GetPoolInfo(ctx, "darwin", "", "" /*=workflowID*/, interfaces.PoolTypeDefault)
 	require.NoError(t, err)
 	require.Equal(t, "sharedGroupID", p.GroupID)
 	require.Equal(t, "defaultPoolName", p.Name)
 
 	s.forceUserOwnedDarwinExecutors = true
-	p, err = s.GetPoolInfo(ctx, "linux", "", "" /*=workflowID*/, false)
+	p, err = s.GetPoolInfo(ctx, "linux", "", "" /*=workflowID*/, interfaces.PoolTypeDefault)
 	require.NoError(t, err)
 	require.Equal(t, "sharedGroupID", p.GroupID)
 	require.Equal(t, "defaultPoolName", p.Name)
 
-	p, err = s.GetPoolInfo(ctx, "darwin", "", "" /*=workflowID*/, false)
+	p, err = s.GetPoolInfo(ctx, "darwin", "", "" /*=workflowID*/, interfaces.PoolTypeDefault)
 	require.NoError(t, err)
 	require.Equal(t, "group1", p.GroupID)
 	require.Equal(t, "", p.Name)
@@ -178,7 +178,7 @@ func TestSchedulerServerGetPoolInfoWithOS(t *testing.T) {
 func TestSchedulerServerGetPoolInfoWithRequestedPoolWithAuth(t *testing.T) {
 	s, ctx := getScheduleServer(t, true, true, "user1")
 	s.forceUserOwnedDarwinExecutors = false
-	p, err := s.GetPoolInfo(ctx, "linux", "my-pool", "" /*=workflowID*/, false)
+	p, err := s.GetPoolInfo(ctx, "linux", "my-pool", "" /*=workflowID*/, interfaces.PoolTypeDefault)
 	require.NoError(t, err)
 	require.Equal(t, "group1", p.GroupID)
 	require.Equal(t, "my-pool", p.Name)
@@ -187,7 +187,7 @@ func TestSchedulerServerGetPoolInfoWithRequestedPoolWithAuth(t *testing.T) {
 func TestSchedulerServerGetPoolInfoWithRequestedPoolWithNoAuth(t *testing.T) {
 	s, ctx := getScheduleServer(t, true, false, "")
 	s.forceUserOwnedDarwinExecutors = false
-	p, err := s.GetPoolInfo(ctx, "linux", "my-pool", "" /*=workflowID*/, false)
+	p, err := s.GetPoolInfo(ctx, "linux", "my-pool", "" /*=workflowID*/, interfaces.PoolTypeDefault)
 	require.NoError(t, err)
 	require.Equal(t, "sharedGroupID", p.GroupID)
 	require.Equal(t, "my-pool", p.Name)
@@ -195,7 +195,7 @@ func TestSchedulerServerGetPoolInfoWithRequestedPoolWithNoAuth(t *testing.T) {
 
 func TestSchedulerServerGetPoolInfoDarwin(t *testing.T) {
 	s, ctx := getScheduleServer(t, true, false, "")
-	p, err := s.GetPoolInfo(ctx, "linux", "", "" /*=workflowID*/, false)
+	p, err := s.GetPoolInfo(ctx, "linux", "", "" /*=workflowID*/, interfaces.PoolTypeDefault)
 	require.NoError(t, err)
 	require.Equal(t, "sharedGroupID", p.GroupID)
 	require.Equal(t, "defaultPoolName", p.Name)
@@ -204,30 +204,30 @@ func TestSchedulerServerGetPoolInfoDarwin(t *testing.T) {
 func TestSchedulerServerGetPoolInfoDarwinNoAuth(t *testing.T) {
 	s, ctx := getScheduleServer(t, true, false, "")
 	s.forceUserOwnedDarwinExecutors = true
-	_, err := s.GetPoolInfo(ctx, "darwin", "", "" /*=workflowID*/, false)
+	_, err := s.GetPoolInfo(ctx, "darwin", "", "" /*=workflowID*/, interfaces.PoolTypeDefault)
 	require.Error(t, err)
 }
 
 func TestSchedulerServerGetPoolInfoSelfHostedNoAuth(t *testing.T) {
 	s, ctx := getScheduleServer(t, true, false, "")
-	_, err := s.GetPoolInfo(ctx, "linux", "", "" /*=workflowID*/, true)
+	_, err := s.GetPoolInfo(ctx, "linux", "", "" /*=workflowID*/, interfaces.PoolTypeSelfHosted)
 	require.Error(t, err)
 }
 
 func TestSchedulerServerGetPoolInfoSelfHosted(t *testing.T) {
 	s, ctx := getScheduleServer(t, true, false, "user1")
-	p, err := s.GetPoolInfo(ctx, "linux", "", "" /*=workflowID*/, true)
+	p, err := s.GetPoolInfo(ctx, "linux", "", "" /*=workflowID*/, interfaces.PoolTypeSelfHosted)
 	require.NoError(t, err)
 	require.Equal(t, "group1", p.GroupID)
 	require.Equal(t, "", p.Name)
 
 	// Linux workflows should respect useSelfHosted bool.
-	p, err = s.GetPoolInfo(ctx, "linux", "workflows", "WF1234" /*=workflowID*/, false)
+	p, err = s.GetPoolInfo(ctx, "linux", "workflows", "WF1234" /*=workflowID*/, interfaces.PoolTypeDefault)
 	require.NoError(t, err)
 	require.Equal(t, "sharedGroupID", p.GroupID)
 	require.Equal(t, "workflows", p.Name)
 
-	p, err = s.GetPoolInfo(ctx, "linux", "workflows", "WF1234" /*=workflowID*/, true)
+	p, err = s.GetPoolInfo(ctx, "linux", "workflows", "WF1234" /*=workflowID*/, interfaces.PoolTypeSelfHosted)
 	require.NoError(t, err)
 	require.Equal(t, "group1", p.GroupID)
 	require.Equal(t, "workflows", p.Name)
@@ -235,23 +235,29 @@ func TestSchedulerServerGetPoolInfoSelfHosted(t *testing.T) {
 
 func TestSchedulerServerGetPoolInfoSelfHostedByDefault(t *testing.T) {
 	s, ctx := getScheduleServer(t, true, true, "user1")
-	p, err := s.GetPoolInfo(ctx, "linux", "", "" /*=workflowID*/, false)
+	p, err := s.GetPoolInfo(ctx, "linux", "", "" /*=workflowID*/, interfaces.PoolTypeDefault)
 	require.NoError(t, err)
 	require.Equal(t, "group1", p.GroupID)
 	require.Equal(t, "", p.Name)
 
-	p, err = s.GetPoolInfo(ctx, "linux", "", "" /*=workflowID*/, true)
+	p, err = s.GetPoolInfo(ctx, "linux", "", "" /*=workflowID*/, interfaces.PoolTypeSelfHosted)
 	require.NoError(t, err)
 	require.Equal(t, "group1", p.GroupID)
 	require.Equal(t, "", p.Name)
+
+	// Explicitly set use-self-hosted-executors=false
+	p, err = s.GetPoolInfo(ctx, "linux", "", "" /*=workflowID*/, interfaces.PoolTypeShared)
+	require.NoError(t, err)
+	require.Equal(t, "sharedGroupID", p.GroupID)
+	require.Equal(t, "defaultPoolName", p.Name)
 
 	// Linux workflows should respect useSelfHosted bool.
-	p, err = s.GetPoolInfo(ctx, "linux", "workflows", "WF1234" /*=workflowID*/, false)
+	p, err = s.GetPoolInfo(ctx, "linux", "workflows", "WF1234" /*=workflowID*/, interfaces.PoolTypeDefault)
 	require.NoError(t, err)
 	require.Equal(t, "sharedGroupID", p.GroupID)
 	require.Equal(t, "workflows", p.Name)
 
-	p, err = s.GetPoolInfo(ctx, "linux", "workflows", "WF1234" /*=workflowID*/, true)
+	p, err = s.GetPoolInfo(ctx, "linux", "workflows", "WF1234" /*=workflowID*/, interfaces.PoolTypeSelfHosted)
 	require.NoError(t, err)
 	require.Equal(t, "group1", p.GroupID)
 	require.Equal(t, "workflows", p.Name)
@@ -631,7 +637,7 @@ func TestSchedulingDelay_DelayTooLarge(t *testing.T) {
 
 	taskID := scheduleTask(ctx, t, env, map[string]string{"runner-recycling-max-wait": "1h"})
 
-	fe1.WaitForTaskWithDelay(taskID, 15*time.Minute)
+	fe1.WaitForTaskWithDelay(taskID, 5*time.Second)
 	fe2.WaitForTaskWithDelay(taskID, 0*time.Second)
 }
 

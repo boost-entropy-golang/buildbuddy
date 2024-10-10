@@ -145,10 +145,6 @@ message Invocation {
   // Number of TargetConfigured events seen in the invocation.
   int64 target_configured_count = 34;
 
-  // If set, the parent invocation that invoked this invocation (i.e.
-  // a workflow or remote bazel invocation).
-  string parent_invocation_id = 35;
-
   // Child invocations invoked by the current invocation (i.e. if a workflow /
   // remote bazel invocation runs bazel commands, each of those is a child
   // invocation).
@@ -161,6 +157,9 @@ message Invocation {
   // If set, the run ID of the parent invocation that invoked this invocation
   // (i.e. a workflow or remote bazel invocation).
   string parent_run_id = 38;
+
+  // DEPRECATED: Use parent_run_id instead.
+  string parent_invocation_id = 35 [deprecated = true];
 }
 
 message InvocationEvent {
@@ -316,6 +315,7 @@ message InvocationQuery {
   // Plaintext tags for the targets built (exact match). Ex: "my-cool-tag"
   repeated string tags = 16;
 
+  // New, robust filters that will eventually replace all other fields.
   repeated stat_filter.GenericFilter generic_filters = 18;
 }
 
@@ -454,6 +454,9 @@ message InvocationStatQuery {
 
   // String-based dimensional filters (execution worker, branch, etc.)
   repeated stat_filter.DimensionFilter dimension_filter = 15;
+
+  // New, robust filters that will eventually replace all other fields.
+  repeated stat_filter.GenericFilter generic_filters = 16;
 
   // The pattern for the targets built (exact match). Ex: "//..."
   string pattern = 13;
