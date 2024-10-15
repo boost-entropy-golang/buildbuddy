@@ -689,8 +689,6 @@ func (s *Store) AddRange(rd *rfpb.RangeDescriptor, r *replica.Replica) {
 		return
 	}
 
-	s.sendRangeEvent(events.EventRangeAdded, rd)
-
 	if rangelease.ContainsMetaRange(rd) {
 		// If we own the metarange, use gossip to notify other nodes
 		// of that fact.
@@ -724,7 +722,6 @@ func (s *Store) RemoveRange(rd *rfpb.RangeDescriptor, r *replica.Replica) {
 		return
 	}
 
-	s.sendRangeEvent(events.EventRangeRemoved, rd)
 	s.leaseKeeper.RemoveRange(rd, r)
 	s.updateTagsWorker.Enqueue()
 }
@@ -848,28 +845,21 @@ func (s *Store) GetReplica(rangeID uint64) (*replica.Replica, error) {
 	return r, nil
 }
 
-func (s *Store) GetLeaderID(rangeID uint64) (uint64, bool) {
-	leaderID, _, valid, err := s.nodeHost.GetLeaderID(rangeID)
-	if err != nil {
-		s.log.Debugf("failed to get leader id for range %d: %s", rangeID, err)
-		valid = false
-	}
-	return leaderID, valid
-}
-
 func (s *Store) IsLeader(rangeID uint64) bool {
-	nodeHostInfo := s.nodeHost.GetNodeHostInfo(dragonboat.NodeHostInfoOption{
-		SkipLogInfo: true,
-	})
-	if nodeHostInfo == nil {
+	repl, err := s.GetReplica(rangeID)
+	if err != nil {
+		s.log.Debugf("failed to get replica for range %d: %s", rangeID, err)
 		return false
 	}
-	for _, clusterInfo := range nodeHostInfo.ShardInfoList {
-		if clusterInfo.ShardID == rangeID {
-			return clusterInfo.LeaderID == clusterInfo.ReplicaID && clusterInfo.Term > 0
-		}
+	leaderID, term, valid, err := s.nodeHost.GetLeaderID(rangeID)
+	if err != nil {
+		s.log.Debugf("failed to get leader id for range %d: %s", rangeID, err)
+		return false
 	}
-	return false
+	if !valid {
+		return false
+	}
+	return leaderID == repl.ReplicaID() && term > 0
 }
 
 func (s *Store) TransferLeadership(ctx context.Context, req *rfpb.TransferLeadershipRequest) (*rfpb.TransferLeadershipResponse, error) {
