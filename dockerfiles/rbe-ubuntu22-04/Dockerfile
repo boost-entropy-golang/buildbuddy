@@ -49,18 +49,6 @@ RUN apt-get update && \
       && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# Clang, LLVM, libcxx
-#
-# Note: we are using releases maintained by Google since they are much slimmer
-# than the apt debs, and because we want to extract to /usr/local to match the
-# Ubuntu 16.04 RBE toolchain.
-RUN BUCKET="https://storage.googleapis.com/clang-builds-stable" && \
-    REVISION="f2b94bd7eaa83d853dc7568fac87b1f8bf4ddec6" && \
-    curl -fsSL "$BUCKET/clang-ubuntu20_04/clang_r$REVISION.tar.gz" | \
-      tar --directory /usr/local -xzf - && \
-    curl -fsSL "$BUCKET/clang-ubuntu20_04/libcxx-msan_r$REVISION.tar.gz" | \
-      tar --directory /usr/local -xzf -
-
 # Docker
 #
 # Note: gnupg is only needed to install Docker, so we uninstall it at the end of
@@ -86,6 +74,15 @@ RUN apt-get update && \
     apt-get autoremove -y && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 
+# en_US.UTF-8 locale
+#
+# Bazel forces the locale to be en_US.UTF-8 (not C.UTF-8) for Java actions.
+RUN apt-get update && \
+apt-get install -y --no-install-recommends \
+  locales \
+  && \
+locale-gen en_US.UTF-8 && \
+apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # Provision a non-root user named "buildbuddy" and set up passwordless sudo.
 # Non-root users are needed for some bazel toolchains, such as hermetic python.
