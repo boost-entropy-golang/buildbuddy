@@ -42,6 +42,7 @@ import (
 	"github.com/buildbuddy-io/buildbuddy/server/util/tracing"
 	"github.com/buildbuddy-io/buildbuddy/server/util/usageutil"
 	"github.com/buildbuddy-io/buildbuddy/server/util/vtprotocodec"
+	"github.com/buildbuddy-io/buildbuddy/server/version"
 	"github.com/buildbuddy-io/buildbuddy/server/xcode"
 	"github.com/google/uuid"
 
@@ -116,7 +117,7 @@ func getExecutorHostID() string {
 	return hostID
 }
 
-func GetConfiguredEnvironmentOrDie(healthChecker *healthcheck.HealthChecker) *real_environment.RealEnv {
+func GetConfiguredEnvironmentOrDie(cacheRoot string, healthChecker *healthcheck.HealthChecker) *real_environment.RealEnv {
 	realEnv := real_environment.NewRealEnv(healthChecker)
 
 	mmapLRUEnabled := *platform.EnableFirecracker && (*snaputil.EnableLocalSnapshotSharing || *snaputil.EnableRemoteSnapshotSharing)
@@ -165,9 +166,8 @@ func GetConfiguredEnvironmentOrDie(healthChecker *healthcheck.HealthChecker) *re
 	InitializeCacheClientsOrDie(cache, realEnv)
 
 	if !*disableLocalCache {
-		fcDir := filepath.Join(*localCacheDirectory, getExecutorHostID())
-		log.Infof("Enabling filecache in %q (size %d bytes)", fcDir, *localCacheSizeBytes)
-		if fc, err := filecache.NewFileCache(fcDir, *localCacheSizeBytes, *deleteFileCacheOnStartup); err == nil {
+		log.Infof("Enabling filecache in %q (size %d bytes)", cacheRoot, *localCacheSizeBytes)
+		if fc, err := filecache.NewFileCache(cacheRoot, *localCacheSizeBytes, *deleteFileCacheOnStartup); err == nil {
 			realEnv.SetFileCache(fc)
 		}
 	}
@@ -187,6 +187,8 @@ func GetConfiguredEnvironmentOrDie(healthChecker *healthcheck.HealthChecker) *re
 }
 
 func main() {
+	version.Print("BuildBuddy executor")
+
 	setUmask()
 
 	rootContext := context.Background()
@@ -223,8 +225,9 @@ func main() {
 
 	setupNetworking(rootContext)
 
+	cacheRoot := filepath.Join(*localCacheDirectory, getExecutorHostID())
 	healthChecker := healthcheck.NewHealthChecker(*serverType)
-	env := GetConfiguredEnvironmentOrDie(healthChecker)
+	env := GetConfiguredEnvironmentOrDie(cacheRoot, healthChecker)
 
 	if err := tracing.Configure(env); err != nil {
 		log.Fatalf("Could not configure tracing: %s", err)
@@ -239,7 +242,7 @@ func main() {
 	imageCacheAuth := container.NewImageCacheAuthenticator(container.ImageCacheAuthenticatorOpts{})
 	env.SetImageCacheAuthenticator(imageCacheAuth)
 
-	runnerPool, err := runner.NewPool(env, &runner.PoolOptions{})
+	runnerPool, err := runner.NewPool(env, cacheRoot, &runner.PoolOptions{})
 	if err != nil {
 		log.Fatalf("Failed to initialize runner pool: %s", err)
 	}
