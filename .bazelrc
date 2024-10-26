@@ -3,6 +3,10 @@ common --lockfile_mode=update
 
 common --enable_platform_specific_config=true
 
+# Avoid genquery failing on unconfigured cycles
+# https://github.com/bazelbuild/bazel/issues/14169
+common --experimental_skip_ttvs_for_genquery
+
 # Build with --config=local to send build logs to your local server
 common:local --bes_results_url=http://localhost:8080/invocation/
 common:local --bes_backend=grpc://localhost:1985
@@ -292,7 +296,7 @@ common --experimental_profile_include_primary_output
 common --noslim_profile
 # Include compact execution log
 # TODO(sluongng): make Bazel writes this to output_base automatically
-common --experimental_execution_log_compact_file=bazel_compact_exec_log.binpb.zst
+common --execution_log_compact_file=bazel_compact_exec_log.binpb.zst
 
 # Try importing a user specific .bazelrc
 # You can create your own by copying and editing the template-user.bazelrc template:
