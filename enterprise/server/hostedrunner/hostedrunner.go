@@ -28,6 +28,7 @@ import (
 	"github.com/buildbuddy-io/buildbuddy/server/util/status"
 	"github.com/google/uuid"
 	"google.golang.org/genproto/googleapis/longrunning"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/protobuf/types/known/durationpb"
 	"gopkg.in/yaml.v2"
 
@@ -64,6 +65,9 @@ func (r *runnerService) checkPreconditions(req *rnpb.RunRequest) error {
 	}
 	if req.GetBazelCommand() == "" && len(req.GetSteps()) == 0 {
 		return status.InvalidArgumentError("A command to run is required.")
+	}
+	if req.GetBazelCommand() != "" && len(req.GetSteps()) > 0 {
+		return status.InvalidArgumentError("Only one of `BazelCommand` or `Steps` should be specified.")
 	}
 	if req.GetRepoState().GetCommitSha() == "" && req.GetRepoState().GetBranch() == "" {
 		return status.InvalidArgumentError("Either commit_sha or branch must be specified.")
@@ -110,20 +114,24 @@ func (r *runnerService) createAction(ctx context.Context, req *rnpb.RunRequest, 
 		repoURL = u.String()
 	}
 
-	// TODO(Maggie) - Remove bazel_sub_command and do this unconditionally
-	// after `steps` interface has full functionality
-	serializedAction := ""
-	if len(req.GetSteps()) > 0 {
-		action := &config.Action{
-			Name:  "remote run",
-			Steps: req.GetSteps(),
-		}
-		actionBytes, err := yaml.Marshal(action)
-		if err != nil {
-			return nil, err
-		}
-		serializedAction = base64.StdEncoding.EncodeToString(actionBytes)
+	// Migrate deprecated `BazelCommand` to `Steps`
+	if req.GetBazelCommand() != "" {
+		req.Steps = []*rnpb.Step{{Run: "bazel " + req.GetBazelCommand()}}
 	}
+
+	name := "remote run"
+	if req.GetName() != "" {
+		name = req.GetName()
+	}
+	runAction := &config.Action{
+		Name:  name,
+		Steps: req.GetSteps(),
+	}
+	actionBytes, err := yaml.Marshal(runAction)
+	if err != nil {
+		return nil, err
+	}
+	serializedAction := base64.StdEncoding.EncodeToString(actionBytes)
 
 	args := []string{
 		"./" + ci_runner_util.ExecutableName,
@@ -135,7 +143,6 @@ func (r *runnerService) createAction(ctx context.Context, req *rnpb.RunRequest, 
 		"--target_repo_url=" + repoURL,
 		"--pushed_repo_url=" + repoURL,
 		"--pushed_branch=" + req.GetRepoState().GetBranch(),
-		"--bazel_sub_command=" + req.GetBazelCommand(),
 		"--invocation_id=" + invocationID,
 		"--commit_sha=" + req.GetRepoState().GetCommitSha(),
 		"--target_branch=" + req.GetRepoState().GetBranch(),
@@ -273,7 +280,7 @@ func getExecProperty(execProps []*repb.Platform_Property, key string) string {
 	return ""
 }
 
-func (r *runnerService) withCredentials(ctx context.Context, req *rnpb.RunRequest) (context.Context, error) {
+func (r *runnerService) credentialEnvOverrides(ctx context.Context, req *rnpb.RunRequest) ([]string, error) {
 	u, err := r.env.GetAuthenticator().AuthenticatedUser(ctx)
 	if err != nil {
 		return nil, err
@@ -310,13 +317,12 @@ func (r *runnerService) withCredentials(ctx context.Context, req *rnpb.RunReques
 	}
 
 	// Use env override headers for credentials.
-	envOverrides := []*repb.Command_EnvironmentVariable{
-		{Name: "BUILDBUDDY_API_KEY", Value: apiKey.Value},
-		{Name: "REPO_USER", Value: req.GetGitRepo().GetUsername()},
-		{Name: "REPO_TOKEN", Value: accessToken},
+	envOverrides := []string{
+		"BUILDBUDDY_API_KEY=" + apiKey.Value,
+		"REPO_USER=" + req.GetGitRepo().GetUsername(),
+		"REPO_TOKEN=" + accessToken,
 	}
-	ctx = withEnvOverrides(ctx, envOverrides)
-	return ctx, nil
+	return envOverrides, nil
 }
 
 func (r *runnerService) getGitToken(ctx context.Context, repoURL string) (string, error) {
@@ -375,10 +381,32 @@ func (r *runnerService) Run(ctx context.Context, req *rnpb.RunRequest) (*rnpb.Ru
 	if err != nil {
 		return nil, status.WrapError(err, "add request metadata to ctx")
 	}
-	execCtx, err = r.withCredentials(execCtx, req)
+	// Apply remote headers
+	envOverrides, err := r.credentialEnvOverrides(execCtx, req)
 	if err != nil {
-		return nil, status.WrapError(err, "authenticate ctx")
+		return nil, status.WrapError(err, "get credentials")
 	}
+
+	for _, h := range req.GetRemoteHeaders() {
+		parts := strings.SplitN(h, "=", 2)
+		if len(parts) != 2 {
+			return nil, status.InvalidArgumentErrorf("malformed remote header %s: key-value pairs should be separated by '='", h)
+		}
+		headerKey := parts[0]
+		headerVal := parts[1]
+
+		// We must set all env overrides in a single platform property, so add them
+		// to credential-related env overrides that were set above.
+		if headerKey == platform.OverrideHeaderPrefix+platform.EnvOverridesPropertyName {
+			envOverrides = append(envOverrides, headerVal)
+			continue
+		}
+
+		execCtx = metadata.AppendToOutgoingContext(execCtx, headerKey, headerVal)
+	}
+
+	execCtx = platform.WithRemoteHeaderOverride(
+		execCtx, platform.EnvOverridesPropertyName, strings.Join(envOverrides, ","))
 
 	executionClient := r.env.GetRemoteExecutionClient()
 	if executionClient == nil {
@@ -486,15 +514,6 @@ func waitUntilInvocationExists(ctx context.Context, env environment.Env, executi
 			}
 		}
 	}
-}
-
-func withEnvOverrides(ctx context.Context, env []*repb.Command_EnvironmentVariable) context.Context {
-	assignments := make([]string, 0, len(env))
-	for _, e := range env {
-		assignments = append(assignments, e.Name+"="+e.Value)
-	}
-	return platform.WithRemoteHeaderOverride(
-		ctx, platform.EnvOverridesPropertyName, strings.Join(assignments, ","))
 }
 
 // normalizePlatform sorts platform properties alphabetically by name.

@@ -56,7 +56,7 @@ func NewInvocationStatService(env environment.Env, dbh interfaces.DBHandle, olap
 func (i *InvocationStatService) getAggColumn(reqCtx *ctxpb.RequestContext, aggType inpb.AggType) (string, error) {
 	switch aggType {
 	case inpb.AggType_USER_AGGREGATION_TYPE:
-		return "user", nil
+		return "\"user\"", nil
 	case inpb.AggType_HOSTNAME_AGGREGATION_TYPE:
 		return "host", nil
 	case inpb.AggType_GROUP_ID_AGGREGATION_TYPE:
@@ -264,7 +264,7 @@ func (i *InvocationStatService) getTrendBasicQuery(tq *stpb.TrendQuery, timeSett
 	    SUM(CASE WHEN invocation_status <> 1 THEN 1 ELSE 0 END) as other_builds,
 	    SUM(CASE WHEN duration_usec > 0 THEN duration_usec END) as total_build_time_usec,
 	    SUM(CASE WHEN duration_usec > 0 THEN 1 ELSE 0 END) as completed_invocation_count,
-	    COUNT(DISTINCT user) as user_count,
+	    COUNT(DISTINCT "user") as user_count,
 	    COUNT(DISTINCT commit_sha) as commit_count,
 	    COUNT(DISTINCT host) as host_count,
 	    COUNT(DISTINCT repo_url) as repo_count,
@@ -327,7 +327,7 @@ func (i *InvocationStatService) flattenTrendsQuery(innerQuery string) string {
 func (i *InvocationStatService) addWhereClauses(q *query_builder.Query, tq *stpb.TrendQuery, includeExecutionDimensionFilters bool, reqCtx *ctxpb.RequestContext) error {
 
 	if user := tq.GetUser(); user != "" {
-		q.AddWhereClause("user = ?", user)
+		q.AddWhereClause("\"user\" = ?", user)
 	}
 
 	if host := tq.GetHost(); host != "" {
@@ -417,8 +417,14 @@ func (i *InvocationStatService) addWhereClauses(q *query_builder.Query, tq *stpb
 	if includeExecutionDimensionFilters {
 		queryObjects = sfpb.ObjectTypes_EXECUTION_OBJECTS
 	}
+
+	dialectName := i.dbh.DialectName()
+	if i.isOLAPDBEnabled() {
+		dialectName = i.olapdbh.DialectName()
+	}
+
 	for _, f := range tq.GetGenericFilters() {
-		s, a, err := filter.ValidateAndGenerateGenericFilterQueryStringAndArgs(f, queryObjects)
+		s, a, err := filter.ValidateAndGenerateGenericFilterQueryStringAndArgs(f, queryObjects, dialectName)
 		if err != nil {
 			return err
 		}
@@ -1012,7 +1018,7 @@ func (i *InvocationStatService) GetInvocationStat(ctx context.Context, req *inpb
 	}
 
 	if user := req.GetQuery().GetUser(); user != "" {
-		q.AddWhereClause("user = ?", user)
+		q.AddWhereClause("\"user\" = ?", user)
 	}
 
 	if host := req.GetQuery().GetHost(); host != "" {
@@ -1081,9 +1087,15 @@ func (i *InvocationStatService) GetInvocationStat(ctx context.Context, req *inpb
 		}
 		q.AddWhereClause(str, args...)
 	}
+	var dbh interfaces.DB
+	if i.isOLAPDBEnabled() {
+		dbh = i.olapdbh
+	} else {
+		dbh = i.dbh
+	}
 
 	for _, f := range req.GetQuery().GetGenericFilters() {
-		s, a, err := filter.ValidateAndGenerateGenericFilterQueryStringAndArgs(f, sfpb.ObjectTypes_INVOCATION_OBJECTS)
+		s, a, err := filter.ValidateAndGenerateGenericFilterQueryStringAndArgs(f, sfpb.ObjectTypes_INVOCATION_OBJECTS, dbh.DialectName())
 		if err != nil {
 			return nil, err
 		}
@@ -1102,12 +1114,7 @@ func (i *InvocationStatService) GetInvocationStat(ctx context.Context, req *inpb
 	q.SetLimit(int64(limit))
 
 	qStr, qArgs := q.Build()
-	var dbh interfaces.DB
-	if i.isOLAPDBEnabled() {
-		dbh = i.olapdbh
-	} else {
-		dbh = i.dbh
-	}
+
 	rq := dbh.NewQuery(ctx, "invocation_stat_service_get_stats").Raw(qStr, qArgs...)
 
 	rsp := &inpb.GetInvocationStatResponse{}
@@ -1131,7 +1138,11 @@ func (i *InvocationStatService) getDrilldownSubquery(ctx context.Context, drilld
 		} else if col == "tag" {
 			queryFields[i] = "arrayJoin(tags) as gorm_tag"
 		} else {
-			queryFields[i] = f + " as gorm_" + f
+			columnName := f
+			if columnName == "user" {
+				columnName = "\"user\""
+			}
+			queryFields[i] = columnName + " as gorm_" + f
 		}
 	}
 	nulledOutFieldList := strings.Join(queryFields, ", ")

@@ -87,7 +87,7 @@ load("@io_bazel_rules_go//go:deps.bzl", "go_download_sdk", "go_register_nogo", "
 
 go_rules_dependencies()
 
-GO_SDK_VERSION = "1.23.1"
+GO_SDK_VERSION = "1.23.3"
 
 # Register multiple Go SDKs so that we can perform cross-compilation remotely.
 # i.e. We might want to trigger a Linux AMD64 Go build remotely from a MacOS ARM64 laptop.
@@ -477,9 +477,9 @@ oci_pull(
 # Keep up-to-date with docs/rbe-setup.md and docs/rbe-github-actions.md
 http_archive(
     name = "io_buildbuddy_buildbuddy_toolchain",
-    sha256 = "baa9af1b9fcc96d18ac90a4dd68ebd2046c8beb76ed89aea9aabca30959ad30c",
-    strip_prefix = "buildbuddy-toolchain-287d6042ad151be92de03c83ef48747ba832c4e2",
-    urls = ["https://github.com/buildbuddy-io/buildbuddy-toolchain/archive/287d6042ad151be92de03c83ef48747ba832c4e2.tar.gz"],
+    sha256 = "7b9ce903bd0cbf21879c83e264ae9453e143377616935dc1825f7c8c1c2a9688",
+    strip_prefix = "buildbuddy-toolchain-285db08fc6785f0d051ecdcdf7f2910eb0459641",
+    urls = ["https://github.com/buildbuddy-io/buildbuddy-toolchain/archive/285db08fc6785f0d051ecdcdf7f2910eb0459641.tar.gz"],
 )
 
 load("@io_buildbuddy_buildbuddy_toolchain//:deps.bzl", "buildbuddy_deps")
@@ -554,12 +554,12 @@ web_test_go_repositories()
 http_file(
     name = "aws_rds_certs",
     downloaded_file_path = "rds-combined-ca-bundle.pem",
-    sha256 = "ed2b625ceeca0ebacf413972c33acbeb65a6c6b94d0c6434f1bb006cd4904ede",
+    sha256 = "390fdc813e2e58ec5a0def8ce6422b83d75032899167052ab981d8e1b3b14ff2",
     url = "https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem",
 )
 
 register_toolchains(
-    "//toolchains:ubuntu_cc_toolchain",
+    "@buildbuddy_toolchain//:ubuntu_cc_toolchain",
 )
 
 http_archive(

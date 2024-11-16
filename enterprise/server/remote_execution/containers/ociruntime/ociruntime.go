@@ -22,6 +22,7 @@ import (
 	_ "embed"
 	mrand "math/rand/v2"
 
+	"github.com/buildbuddy-io/buildbuddy/enterprise/server/remote_execution/block_io"
 	"github.com/buildbuddy-io/buildbuddy/enterprise/server/remote_execution/cgroup"
 	"github.com/buildbuddy-io/buildbuddy/enterprise/server/remote_execution/commandutil"
 	"github.com/buildbuddy-io/buildbuddy/enterprise/server/remote_execution/container"
@@ -44,12 +45,13 @@ import (
 )
 
 var (
-	Runtime     = flag.String("executor.oci.runtime", "", "OCI runtime")
-	runtimeRoot = flag.String("executor.oci.runtime_root", "", "Root directory for storage of container state (see <runtime> --help for default)")
-	pidsLimit   = flag.Int64("executor.oci.pids_limit", 2048, "PID limit for OCI runtime. Set to -1 for unlimited PIDs.")
-	cpuLimit    = flag.Int("executor.oci.cpu_limit", 0, "Hard limit for CPU resources, expressed as CPU count. Default (0) is no limit.")
-	dns         = flag.String("executor.oci.dns", "8.8.8.8", "Specifies a custom DNS server for use inside OCI containers. If set to the empty string, mount /etc/resolv.conf from the host.")
-	netPoolSize = flag.Int("executor.oci.network_pool_size", 0, "Limit on the number of networks to be reused between containers. Setting to 0 disables pooling. Setting to -1 uses the recommended default.")
+	Runtime          = flag.String("executor.oci.runtime", "", "OCI runtime")
+	runtimeRoot      = flag.String("executor.oci.runtime_root", "", "Root directory for storage of container state (see <runtime> --help for default)")
+	pidsLimit        = flag.Int64("executor.oci.pids_limit", 2048, "PID limit for OCI runtime. Set to -1 for unlimited PIDs.")
+	cpuLimit         = flag.Int("executor.oci.cpu_limit", 0, "Hard limit for CPU resources, expressed as CPU count. Default (0) is no limit.")
+	cpuSharesEnabled = flag.Bool("executor.oci.cpu_shares_enabled", false, "Enable CPU weighting based on task size.")
+	dns              = flag.String("executor.oci.dns", "8.8.8.8", "Specifies a custom DNS server for use inside OCI containers. If set to the empty string, mount /etc/resolv.conf from the host.")
+	netPoolSize      = flag.Int("executor.oci.network_pool_size", -1, "Limit on the number of networks to be reused between containers. Setting to 0 disables pooling. Setting to -1 uses the recommended default.")
 )
 
 const (
@@ -190,10 +192,13 @@ func (p *provider) New(ctx context.Context, args *container.Init) (container.Com
 		imageStore:     p.imageStore,
 		networkPool:    p.networkPool,
 
+		blockDevice:    args.BlockDevice,
 		imageRef:       args.Props.ContainerImage,
 		networkEnabled: args.Props.DockerNetwork != "off",
 		user:           args.Props.DockerUser,
 		forceRoot:      args.Props.DockerForceRoot,
+
+		milliCPU: args.Task.GetSchedulingMetadata().GetTaskSize().GetEstimatedMilliCpu(),
 	}, nil
 }
 
@@ -202,6 +207,7 @@ type ociContainer struct {
 
 	runtime        string
 	cgroupPaths    *cgroup.Paths
+	blockDevice    *block_io.Device
 	containersRoot string
 	imageCacheRoot string
 	imageStore     *ImageStore
@@ -218,6 +224,8 @@ type ociContainer struct {
 	networkEnabled bool
 	user           string
 	forceRoot      bool
+
+	milliCPU int64 // milliCPU allocation from task size
 }
 
 // Returns the OCI bundle directory for the container.
@@ -384,8 +392,6 @@ func (c *ociContainer) Create(ctx context.Context, workDir string) error {
 }
 
 func (c *ociContainer) Exec(ctx context.Context, cmd *repb.Command, stdio *interfaces.Stdio) *interfaces.CommandResult {
-	// Reset CPU usage and peak memory since we're starting a new task.
-	c.stats.Reset()
 	args := []string{"exec", "--cwd=" + execrootPath}
 	// Respect command env. Note, when setting any --env vars at all, it
 	// completely overrides the env from the bundle, rather than just adding
@@ -503,7 +509,7 @@ func (c *ociContainer) cleanupNetwork(ctx context.Context) error {
 }
 
 func (c *ociContainer) Stats(ctx context.Context) (*repb.UsageStats, error) {
-	lifetimeStats, err := c.cgroupPaths.Stats(ctx, c.cid)
+	lifetimeStats, err := c.cgroupPaths.Stats(ctx, c.cid, c.blockDevice)
 	if err != nil {
 		return nil, err
 	}
@@ -515,6 +521,7 @@ func (c *ociContainer) Stats(ctx context.Context) (*repb.UsageStats, error) {
 // metrics are updated while the function is being executed, and that the
 // resource usage results are populated in the returned CommandResult.
 func (c *ociContainer) doWithStatsTracking(ctx context.Context, invokeRuntimeFn func(ctx context.Context) *interfaces.CommandResult) *interfaces.CommandResult {
+	c.stats.Reset()
 	stop, statsCh := container.TrackStats(ctx, c)
 	res := invokeRuntimeFn(ctx)
 	stop()
@@ -695,10 +702,12 @@ func (c *ociContainer) createSpec(ctx context.Context, cmd *repb.Command) (*spec
 	cpuSpecs := &specs.LinuxCPU{}
 	if *cpuLimit != 0 {
 		period := 100 * time.Millisecond
-		cpuSpecs = &specs.LinuxCPU{
-			Quota:  pointer(int64(*cpuLimit) * period.Microseconds()),
-			Period: pointer(uint64(period.Microseconds())),
-		}
+		cpuSpecs.Quota = pointer(int64(*cpuLimit) * period.Microseconds())
+		cpuSpecs.Period = pointer(uint64(period.Microseconds()))
+	}
+
+	if *cpuSharesEnabled {
+		cpuSpecs.Shares = pointer(uint64(oci.CPUMillisToShares(c.milliCPU)))
 	}
 
 	spec := specs.Spec{

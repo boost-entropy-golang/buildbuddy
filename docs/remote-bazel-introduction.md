@@ -183,12 +183,21 @@ The following configuration options are supported:
 - `--runner_exec_properties`: Platform properties to configure the remote runner.
   - Ex. To run on a self-hosted executor pool, you could use
     `--runner_exec_properties=use-self-hosted-executors=true --runner_exec_properties=Pool=custom-pool`
+- `--remote_run_header`: Remote headers to be applied to the execution request for the remote runner.
+  - These are useful for passing platform properties containing secrets. Platform
+    properties set via remote header will not be displayed on the UI and will not
+    be included in the snapshot key (which contains regular platform properties).
+    This is helpful when passing short-lived credentials that you don't want invalidating
+    your snapshots.
+  - See `Private Docker images` below for an example.
 - `--timeout` (Ex. '30m', '1h'): If set, remote runs that have been running for longer
   than this duration will be canceled automatically. This only applies to a single attempt,
   and does not include multiple retry attempts.
 - `--run_from_branch` `--run_from_commit`: If either of these is set, the remote runner
   will run off the specified GitHub ref. By default if neither is set, the remote GitHub workspace
   will mirror the local state (including any non-committed local diffs).
+- `--script`: If set, the bash code to run on the remote runner instead of a Bazel command.
+  - See `Running bash scripts below` for more details.
 
 In order to run the CLI with debug logs enabled, you can add `--verbose=1` between
 `bb` and `remote`. Note that this is a different syntax from the rest of the
@@ -197,6 +206,33 @@ Remote Bazel flags, which go after `remote`.
 ```bash
 bb --verbose=1 remote build //...
 ```
+
+#### Running bash scripts
+
+To run arbitrary bash code on the remote runner, use the `--script` flag.
+
+```bash
+bb remote --script="ls -la"
+
+# Example of a multi-line bash script
+bb remote --script='
+export PWD=$(./generate_pwd)
+bazel run :setup -- --password=$PWD
+bazel test :target
+'
+
+# Example of running from a path to a shell script
+# Sample output in test.sh
+# #!/bin/bash
+# ls -la
+# echo "Hello world!"
+bb remote --script="$(<test.sh)"
+```
+
+Note that not all features - such as fetching outputs built remotely, or running
+remotely built outputs locally - are supported when running with a bash script.
+If you only need to run a single bazel command on the remote runner, we recommend
+not using `--script` and using the syntax `bb remote <bazel command>` (like `bb remote build //...`) to access the richer feature-set.
 
 ### CURL request
 
@@ -219,6 +255,65 @@ https://app.buildbuddy.io/api/v1/Run
 
 If your GitHub repo is private, you must first link it at https://app.buildbuddy.io/workflows/
 to authorize the remote runner to access it.
+
+### Private Docker images
+
+If you would like the remote runner to start from a private container image, you
+can pass credentials via remote headers.
+
+See https://www.buildbuddy.io/docs/rbe-platforms/#passing-credentials-for-docker-images
+for more details on passing credentials for private images.
+
+See `Configuring the remote runner` above for more information about remote headers.
+
+```bash
+bb remote \
+  --container_image=docker://<private-image-url> \
+  --remote_run_header=x-buildbuddy-platform.container-registry-username=USERNAME \
+  --remote_run_header=x-buildbuddy-platform.container-registry-password=PASSWORD \
+  build //...
+```
+
+### Accessing secrets
+
+To access long-lived secrets on the remote runner, we recommend saving them as
+[BuildBuddy Secrets](https://www.buildbuddy.io/docs/secrets/). To populate secrets
+as environment variables on the remote runner, pass `--runner_exec_properties=include-secrets=true`
+to the Remote Bazel command. You can then access them as you would any environment
+variable.
+
+```bash
+bb remote \
+  --runner_exec_properties=include-secrets=true \
+  # Use quotes so your local terminal doesn't try to expand the env var
+  run :my_script -- '--password=$PWD'
+```
+
+To access short-lived secrets, you can use remote headers to set environment variables:
+
+```bash
+bb remote \
+  --remote_run_header=x-buildbuddy-platform.env-overrides=PWD=supersecret \
+  # Use quotes so your local terminal doesn't try to expand the env var
+  run :my_script -- '--password=$PWD'
+```
+
+To set multiple variables, pass a comma separated list:
+`--remote_run_header=x-buildbuddy-platform.env-overrides=K1=V1,K2=V2`.
+
+**Note**: You should not use `--env` or `--runner_exec_properties=x-buildbuddy-platform.env-overrides`
+to set secrets because:
+
+(1) Environment variables and platform properties are stored in plain-text in the
+Action Cache, and may be displayed in the UI.
+
+(2) Platform properties are incorporated into the snapshot key.
+If they change, you will not be able to reuse a snapshot. Especially for short-lived
+secrets that frequently change, this will hurt performance as you will not be able
+to take advantage of recycled, warm workspaces.
+
+Remote headers (`--remote_run_header`) use a different mechanism to set platform
+properties and do not have these drawbacks.
 
 ### GitHub Enterprise
 

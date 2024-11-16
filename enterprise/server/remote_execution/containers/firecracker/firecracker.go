@@ -9,6 +9,7 @@ import (
 	"io"
 	"io/fs"
 	"math"
+	"math/rand/v2"
 	"net"
 	"os"
 	"os/exec"
@@ -16,6 +17,7 @@ import (
 	"reflect"
 	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -27,7 +29,6 @@ import (
 	"github.com/bazelbuild/rules_go/go/runfiles"
 	"github.com/buildbuddy-io/buildbuddy/enterprise/server/remote_execution/commandutil"
 	"github.com/buildbuddy-io/buildbuddy/enterprise/server/remote_execution/container"
-	"github.com/buildbuddy-io/buildbuddy/enterprise/server/remote_execution/containers/docker"
 	"github.com/buildbuddy-io/buildbuddy/enterprise/server/remote_execution/copy_on_write"
 	"github.com/buildbuddy-io/buildbuddy/enterprise/server/remote_execution/platform"
 	"github.com/buildbuddy-io/buildbuddy/enterprise/server/remote_execution/snaploader"
@@ -65,7 +66,6 @@ import (
 	repb "github.com/buildbuddy-io/buildbuddy/proto/remote_execution"
 	vmxpb "github.com/buildbuddy-io/buildbuddy/proto/vmexec"
 	vmfspb "github.com/buildbuddy-io/buildbuddy/proto/vmvfs"
-	dockerclient "github.com/docker/docker/client"
 	fcclient "github.com/firecracker-microvm/firecracker-go-sdk"
 	fcmodels "github.com/firecracker-microvm/firecracker-go-sdk/client/models"
 	hlpb "google.golang.org/grpc/health/grpc_health_v1"
@@ -84,6 +84,7 @@ var healthCheckInterval = flag.Duration("executor.firecracker_health_check_inter
 var healthCheckTimeout = flag.Duration("executor.firecracker_health_check_timeout", 30*time.Second, "Timeout for VM health check requests.")
 var overprovisionCPUs = flag.Int("executor.firecracker_overprovision_cpus", 3, "Number of CPUs to overprovision for VMs. This allows VMs to more effectively utilize CPU resources on the host machine. Set to -1 to allow all VMs to use max CPU.")
 var initOnAllocAndFree = flag.Bool("executor.firecracker_init_on_alloc_and_free", false, "Set init_on_alloc=1 and init_on_free=1 in firecracker vms")
+var enableCPUWeight = flag.Bool("executor.firecracker_enable_cpu_weight", false, "Set cgroup CPU weight to match VM size")
 
 var forceRemoteSnapshotting = flag.Bool("debug_force_remote_snapshots", false, "When remote snapshotting is enabled, force remote snapshotting even for tasks which otherwise wouldn't support it.")
 var disableWorkspaceSync = flag.Bool("debug_disable_firecracker_workspace_sync", false, "Do not sync the action workspace to the guest, instead using the existing workspace from the VM snapshot.")
@@ -420,18 +421,10 @@ func GetExecutorConfig(ctx context.Context, buildRootDir, cacheRootDir string) (
 
 type Provider struct {
 	env            environment.Env
-	dockerClient   *dockerclient.Client
 	executorConfig *ExecutorConfig
 }
 
 func NewProvider(env environment.Env, buildRoot, cacheRoot string) (*Provider, error) {
-	// Best effort trying to initialize the docker client. If it fails, we'll
-	// simply fall back to use skopeo to download and cache container images.
-	client, err := docker.NewClient()
-	if err != nil {
-		client = nil
-	}
-
 	executorConfig, err := GetExecutorConfig(env.GetServerContext(), buildRoot, cacheRoot)
 	if err != nil {
 		return nil, err
@@ -444,7 +437,6 @@ func NewProvider(env environment.Env, buildRoot, cacheRoot string) (*Provider, e
 
 	return &Provider{
 		env:            env,
-		dockerClient:   client,
 		executorConfig: executorConfig,
 	}, nil
 }
@@ -478,9 +470,9 @@ func (p *Provider) New(ctx context.Context, args *container.Init) (container.Com
 		VMConfiguration:        vmConfig,
 		ContainerImage:         args.Props.ContainerImage,
 		User:                   args.Props.DockerUser,
-		DockerClient:           p.dockerClient,
 		ActionWorkingDirectory: args.WorkDir,
 		ExecutorConfig:         p.executorConfig,
+		CPUWeightMillis:        sizeEstimate.GetEstimatedMilliCpu(),
 	}
 	c, err := NewContainer(ctx, p.env, args.Task.GetExecutionTask(), opts)
 	if err != nil {
@@ -531,9 +523,6 @@ type FirecrackerContainer struct {
 	currentTaskInitTimeUsec int64
 
 	executorConfig *ExecutorConfig
-	// dockerClient is used to optimize image pulls by reusing image layers from
-	// the Docker cache as well as deduping multiple requests for the same image.
-	dockerClient *dockerclient.Client
 
 	// when VFS is enabled, this contains the layout for the next execution
 	fsLayout  *container.FileSystemLayout
@@ -550,6 +539,8 @@ type FirecrackerContainer struct {
 	memoryStore *copy_on_write.COWStore
 
 	jailerRoot         string            // the root dir the jailer will work in
+	numaNode           int               // NUMA node for CPU scheduling
+	cpuWeightMillis    int64             // milliCPU for cgroup CPU weight
 	machine            *fcclient.Machine // the firecracker machine object.
 	vmLog              *VMLog
 	env                environment.Env
@@ -594,14 +585,23 @@ func NewContainer(ctx context.Context, env environment.Env, task *repb.Execution
 		return nil, err
 	}
 
+	// Set the NUMA node randomly for now.
+	// TODO: this can result in too many VMs occasionally being assigned to
+	// the same node. See whether other strategies can improve performance.
+	numaNode, err := getRandomNUMANode()
+	if err != nil {
+		return nil, status.UnavailableErrorf("get NUMA node: %s", err)
+	}
+
 	c := &FirecrackerContainer{
 		vmConfig:           opts.VMConfiguration.CloneVT(),
 		executorConfig:     opts.ExecutorConfig,
 		jailerRoot:         opts.ExecutorConfig.JailerRoot,
-		dockerClient:       opts.DockerClient,
 		containerImage:     opts.ContainerImage,
 		user:               opts.User,
 		actionWorkingDir:   opts.ActionWorkingDirectory,
+		cpuWeightMillis:    opts.CPUWeightMillis,
+		numaNode:           numaNode,
 		env:                env,
 		task:               task,
 		loader:             loader,
@@ -974,31 +974,18 @@ func (c *FirecrackerContainer) LoadSnapshot(ctx context.Context) error {
 		netnsPath = c.network.NamespacePath()
 	}
 
-	cgroupVersion, err := getCgroupVersion()
-	if err != nil {
-		return err
-	}
-
 	// We start firecracker with this reduced config because we will load a
 	// snapshot that is already configured.
+	jailerCfg, err := c.getJailerConfig("" /*=kernelImagePath*/)
+	if err != nil {
+		return status.WrapError(err, "get jailer config")
+	}
 	cfg := fcclient.Config{
 		SocketPath:        firecrackerSocketPath,
 		NetNS:             netnsPath,
 		Seccomp:           fcclient.SeccompConfig{Enabled: true},
 		DisableValidation: true,
-		JailerCfg: &fcclient.JailerConfig{
-			JailerBinary:   c.executorConfig.JailerBinaryPath,
-			ChrootBaseDir:  c.jailerRoot,
-			ID:             c.id,
-			UID:            fcclient.Int(unix.Geteuid()),
-			GID:            fcclient.Int(unix.Getegid()),
-			NumaNode:       fcclient.Int(0), // TODO(tylerw): randomize this?
-			ExecFile:       c.executorConfig.FirecrackerBinaryPath,
-			ChrootStrategy: fcclient.NewNaiveChrootStrategy(""),
-			Stdout:         c.vmLogWriter(),
-			Stderr:         c.vmLogWriter(),
-			CgroupVersion:  cgroupVersion,
-		},
+		JailerCfg:         jailerCfg,
 		Snapshot: fcclient.SnapshotConfig{
 			EnableDiffSnapshots: true,
 			ResumeVM:            true,
@@ -1012,8 +999,8 @@ func (c *FirecrackerContainer) LoadSnapshot(ctx context.Context) error {
 
 	var snapOpt fcclient.Opt
 	if *enableUFFD {
-		uffdType := fcclient.MemoryBackendType(fcmodels.MemoryBackendBackendTypeUffd)
-		snapOpt = fcclient.WithSnapshot(uffdSockName, vmStateSnapshotName, uffdType)
+		uffdType := fcclient.WithMemoryBackend(fcmodels.MemoryBackendBackendTypeUffd, uffdSockName)
+		snapOpt = fcclient.WithSnapshot("" /*=memFilePath*/, vmStateSnapshotName, uffdType)
 	} else {
 		snapOpt = fcclient.WithSnapshot(fullMemSnapshotName, vmStateSnapshotName)
 	}
@@ -1430,11 +1417,11 @@ func (c *FirecrackerContainer) getConfig(ctx context.Context, rootFS, containerF
 	if c.network != nil {
 		netnsPath = c.network.NamespacePath()
 	}
-	cgroupVersion, err := getCgroupVersion()
-	if err != nil {
-		return nil, err
-	}
 	bootArgs := getBootArgs(c.vmConfig)
+	jailerCfg, err := c.getJailerConfig(c.executorConfig.KernelImagePath)
+	if err != nil {
+		return nil, status.WrapError(err, "get jailer config")
+	}
 	cfg := &fcclient.Config{
 		VMID:            c.id,
 		SocketPath:      firecrackerSocketPath,
@@ -1450,24 +1437,12 @@ func (c *FirecrackerContainer) getConfig(ctx context.Context, rootFS, containerF
 		VsockDevices: []fcclient.VsockDevice{
 			{Path: firecrackerVSockPath},
 		},
-		JailerCfg: &fcclient.JailerConfig{
-			JailerBinary:   c.executorConfig.JailerBinaryPath,
-			ChrootBaseDir:  c.jailerRoot,
-			ID:             c.id,
-			UID:            fcclient.Int(unix.Geteuid()),
-			GID:            fcclient.Int(unix.Getegid()),
-			NumaNode:       fcclient.Int(0), // TODO(tylerw): randomize this?
-			ExecFile:       c.executorConfig.FirecrackerBinaryPath,
-			ChrootStrategy: fcclient.NewNaiveChrootStrategy(c.executorConfig.KernelImagePath),
-			Stdout:         c.vmLogWriter(),
-			Stderr:         c.vmLogWriter(),
-			CgroupVersion:  cgroupVersion,
-		},
+		JailerCfg: jailerCfg,
 		MachineCfg: fcmodels.MachineConfiguration{
 			VcpuCount:       fcclient.Int64(c.vmConfig.NumCpus),
 			MemSizeMib:      fcclient.Int64(c.vmConfig.MemSizeMb),
 			Smt:             fcclient.Bool(false),
-			TrackDirtyPages: true,
+			TrackDirtyPages: fcclient.Bool(true),
 		},
 	}
 	if *EnableRootfs {
@@ -1511,12 +1486,44 @@ func (c *FirecrackerContainer) getConfig(ctx context.Context, rootFS, containerF
 			},
 		}
 	}
-	cfg.JailerCfg.Stdout = c.vmLogWriter()
-	cfg.JailerCfg.Stderr = c.vmLogWriter()
 	if *debugTerminal {
 		cfg.JailerCfg.Stdin = os.Stdin
 	}
 	return cfg, nil
+}
+
+func (c *FirecrackerContainer) getJailerConfig(kernelImagePath string) (*fcclient.JailerConfig, error) {
+	cgroupVersion, err := getCgroupVersion()
+	if err != nil {
+		return nil, status.WrapError(err, "get cgroup version")
+	}
+
+	var cgroupArgs []string
+	if *enableCPUWeight {
+		// Use the same weight calculation used in ociruntime.
+		cpuWeight := oci.CPUSharesToWeight(oci.CPUMillisToShares(c.cpuWeightMillis))
+		cgroupArgs = append(cgroupArgs, fmt.Sprintf("cpu.weight=%d", cpuWeight))
+	}
+
+	return &fcclient.JailerConfig{
+		JailerBinary:   c.executorConfig.JailerBinaryPath,
+		ChrootBaseDir:  c.jailerRoot,
+		ID:             c.id,
+		UID:            fcclient.Int(unix.Geteuid()),
+		GID:            fcclient.Int(unix.Getegid()),
+		NumaNode:       fcclient.Int(c.numaNode),
+		ExecFile:       c.executorConfig.FirecrackerBinaryPath,
+		ChrootStrategy: fcclient.NewNaiveChrootStrategy(kernelImagePath),
+		Stdout:         c.vmLogWriter(),
+		Stderr:         c.vmLogWriter(),
+		CgroupVersion:  cgroupVersion,
+		CgroupArgs:     cgroupArgs,
+		// Use the root cgroup as the cgroup parent rather than the default
+		// "firecracker" subdir, so that VM cgroups are siblings of OCI
+		// container cgroups. This is needed because CPU weight is applied to
+		// sibling cgroups in a hierarchy.
+		ParentCgroup: fcclient.String(""),
+	}, nil
 }
 
 func (c *FirecrackerContainer) vmLogWriter() io.Writer {
@@ -2317,7 +2324,7 @@ func (c *FirecrackerContainer) PullImage(ctx context.Context, creds oci.Credenti
 		log.CtxDebugf(ctx, "PullImage took %s", time.Since(start))
 	}()
 
-	_, err := ociconv.CreateDiskImage(ctx, c.dockerClient, c.executorConfig.CacheRoot, c.containerImage, creds)
+	_, err := ociconv.CreateDiskImage(ctx, c.executorConfig.CacheRoot, c.containerImage, creds)
 	if err != nil {
 		return err
 	}
@@ -2464,6 +2471,14 @@ func (c *FirecrackerContainer) stopMachine(ctx context.Context) error {
 		return status.WrapError(err, "wait for firecracker to exit")
 	}
 	c.machine = nil
+
+	// Once the VM exits, delete the cgroup.
+	// Jailer docs say that this cleanup must be handled by us:
+	// https://github.com/firecracker-microvm/firecracker/blob/main/docs/jailer.md#observations
+	if err := os.Remove(filepath.Join("/sys/fs/cgroup", c.id)); err != nil && !os.IsNotExist(err) {
+		log.CtxWarningf(ctx, "Failed to remove jailer cgroup: %s", err)
+	}
+
 	return nil
 }
 
@@ -2786,4 +2801,43 @@ func getCPUID() *fcpb.CPUID {
 		Family:   int64(cpuid.CPU.Family),
 		Model:    int64(cpuid.CPU.Model),
 	}
+}
+
+func getRandomNUMANode() (int, error) {
+	b, err := os.ReadFile("/sys/devices/system/node/online")
+	if err != nil {
+		return 0, err
+	}
+	s := strings.TrimSpace(string(b))
+	if s == "" {
+		return 0, fmt.Errorf("unexpected empty file")
+	}
+
+	// Parse file contents
+	// Example: "0-1,3" is parsed as []int{0, 1, 3}
+	var nodes []int
+	nodeRanges := strings.Split(s, ",")
+	for _, r := range nodeRanges {
+		startStr, endStr, _ := strings.Cut(r, "-")
+		start, err := strconv.Atoi(startStr)
+		if err != nil {
+			return 0, fmt.Errorf("malformed file contents")
+		}
+		end := start
+		if endStr != "" {
+			n, err := strconv.Atoi(endStr)
+			if err != nil {
+				return 0, fmt.Errorf("malformed file contents")
+			}
+			if n < start {
+				return 0, fmt.Errorf("malformed file contents")
+			}
+			end = n
+		}
+		for node := start; node <= end; node++ {
+			nodes = append(nodes, node)
+		}
+	}
+
+	return nodes[rand.IntN(len(nodes))], nil
 }

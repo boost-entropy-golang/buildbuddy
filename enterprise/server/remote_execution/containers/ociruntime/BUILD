@@ -15,6 +15,7 @@ go_library(
     target_compatible_with = ["@platforms//os:linux"],
     visibility = ["//visibility:public"],
     deps = [
+        "//enterprise/server/remote_execution/block_io",
         "//enterprise/server/remote_execution/cgroup",
         "//enterprise/server/remote_execution/commandutil",
         "//enterprise/server/remote_execution/container",
@@ -77,6 +78,7 @@ go_test(
         "//enterprise/server/remote_execution/workspace",
         "//enterprise/server/util/oci",
         "//proto:remote_execution_go_proto",
+        "//proto:scheduler_go_proto",
         "//proto:worker_go_proto",
         "//server/interfaces",
         "//server/testutil/testenv",

@@ -28,6 +28,7 @@ enum ExecutionMetricType {
   PEAK_MEMORY_EXECUTION_METRIC = 6;
   INPUT_DOWNLOAD_SIZE_EXECUTION_METRIC = 7;
   OUTPUT_UPLOAD_SIZE_EXECUTION_METRIC = 8;
+  EXECUTION_WALL_TIME_EXECUTION_METRIC = 9;
 }
 
 message Metric {
@@ -66,6 +67,7 @@ enum FilterCategory {
   STRING_FILTER_CATEGORY = 1;
   INT_FILTER_CATEGORY = 2;
   STATUS_FILTER_CATEGORY = 3;
+  STRING_ARRAY_FILTER_CATEGORY = 4;
 }
 
 enum FilterArgumentCount {
@@ -129,7 +131,7 @@ enum FilterType {
     category:
       STRING_FILTER_CATEGORY;
     database_column_name:
-      "user";
+      "\"user\"";
     supported_objects:
       [INVOCATION_OBJECTS, EXECUTION_OBJECTS];
   }];
@@ -237,7 +239,14 @@ enum FilterType {
     supported_objects:
       [INVOCATION_OBJECTS, EXECUTION_OBJECTS];
   }];
-  // TODO(jdhollen): tags (string array)
+  TAG_FILTER_TYPE = 17 [(filter_type_options) = {
+    category:
+      STRING_ARRAY_FILTER_CATEGORY;
+    database_column_name:
+      "tags";
+    supported_objects:
+      [INVOCATION_OBJECTS, EXECUTION_OBJECTS];
+  }];
 }
 
 enum FilterOperand {
@@ -274,6 +283,22 @@ enum FilterOperand {
       [STRING_FILTER_CATEGORY];
     database_query_string:
       "INSTR(pattern, ?value) > 0 OR INSTR(user, ?value) > 0 OR INSTR(repo_url, ?value) > 0";
+    argument_count:
+      ONE_FILTER_ARGUMENT_COUNT;
+  }];
+  ARRAY_CONTAINS_OPERAND = 5 [(filter_operand_options) = {
+    supported_categories:
+      [STRING_ARRAY_FILTER_CATEGORY];
+    database_query_string:
+      "hasAny(?field, array(?value))";
+    argument_count:
+      MANY_FILTER_ARGUMENT_COUNT;
+  }];
+  STRING_CONTAINS_OPERAND = 6 [(filter_operand_options) = {
+    supported_categories:
+      [STRING_FILTER_CATEGORY];
+    database_query_string:
+      "INSTR(?field, ?value) > 0";
     argument_count:
       ONE_FILTER_ARGUMENT_COUNT;
   }];

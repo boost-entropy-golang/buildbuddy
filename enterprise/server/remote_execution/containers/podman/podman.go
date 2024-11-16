@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/Masterminds/semver/v3"
+	"github.com/buildbuddy-io/buildbuddy/enterprise/server/remote_execution/block_io"
 	"github.com/buildbuddy-io/buildbuddy/enterprise/server/remote_execution/cgroup"
 	"github.com/buildbuddy-io/buildbuddy/enterprise/server/remote_execution/commandutil"
 	"github.com/buildbuddy-io/buildbuddy/enterprise/server/remote_execution/container"
@@ -215,6 +216,7 @@ func (p *Provider) New(ctx context.Context, args *container.Init) (container.Com
 		sociStore:         p.sociStore,
 		imageExistsCache:  p.imageExistsCache,
 		buildRoot:         p.buildRoot,
+		blockDevice:       args.BlockDevice,
 		options: &PodmanOptions{
 			ForceRoot:          args.Props.DockerForceRoot,
 			Init:               args.Props.DockerInit,
@@ -250,9 +252,10 @@ type podmanCommandContainer struct {
 	imageExistsCache *imageExistsCache
 	cgroupPaths      *cgroup.Paths
 
-	image     string
-	buildRoot string
-	workDir   string
+	image       string
+	buildRoot   string
+	workDir     string
+	blockDevice *block_io.Device
 
 	imageIsStreamable bool
 	sociStore         soci_store.Store
@@ -428,6 +431,7 @@ func (c *podmanCommandContainer) Run(ctx context.Context, command *repb.Command,
 // metrics are updated while the function is executing, and that the UsageStats
 // field is populated after execution.
 func (c *podmanCommandContainer) doWithStatsTracking(ctx context.Context, runPodmanFn func(ctx context.Context) *interfaces.CommandResult) *interfaces.CommandResult {
+	c.stats.Reset()
 	stop, statsCh := container.TrackStats(ctx, c)
 	res := runPodmanFn(ctx)
 	stop()
@@ -483,10 +487,6 @@ func (c *podmanCommandContainer) Create(ctx context.Context, workDir string) err
 }
 
 func (c *podmanCommandContainer) Exec(ctx context.Context, cmd *repb.Command, stdio *interfaces.Stdio) *interfaces.CommandResult {
-	// Reset usage stats since we're running a new task. Note: This throws away
-	// any resource usage between the initial "Create" call and now, but that's
-	// probably fine for our needs right now.
-	c.stats.Reset()
 	podmanRunArgs := make([]string, 0, 2*len(cmd.GetEnvironmentVariables())+len(cmd.Arguments)+1)
 	for _, envVar := range cmd.GetEnvironmentVariables() {
 		podmanRunArgs = append(podmanRunArgs, "--env", fmt.Sprintf("%s=%s", envVar.GetName(), envVar.GetValue()))
@@ -718,7 +718,7 @@ func (c *podmanCommandContainer) Stats(ctx context.Context) (*repb.UsageStats, e
 		return nil, err
 	}
 
-	lifetimeStats, err := c.cgroupPaths.Stats(ctx, cid)
+	lifetimeStats, err := c.cgroupPaths.Stats(ctx, cid, c.blockDevice)
 	if err != nil {
 		return nil, err
 	}

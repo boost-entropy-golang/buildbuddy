@@ -12,6 +12,7 @@ import (
 	"github.com/buildbuddy-io/buildbuddy/enterprise/server/remote_execution/container"
 	"github.com/buildbuddy-io/buildbuddy/enterprise/server/remote_execution/containers/bare"
 	"github.com/buildbuddy-io/buildbuddy/enterprise/server/remote_execution/containers/docker"
+	"github.com/buildbuddy-io/buildbuddy/enterprise/server/remote_execution/containers/firecracker"
 	"github.com/buildbuddy-io/buildbuddy/enterprise/server/remote_execution/containers/ociruntime"
 	"github.com/buildbuddy-io/buildbuddy/enterprise/server/remote_execution/containers/podman"
 	"github.com/buildbuddy-io/buildbuddy/enterprise/server/remote_execution/platform"
@@ -27,7 +28,7 @@ import (
 	vfspb "github.com/buildbuddy-io/buildbuddy/proto/vfs"
 )
 
-func (p *pool) registerContainerProviders(providers map[platform.ContainerType]container.Provider, executor *platform.ExecutorProperties) error {
+func (p *pool) registerContainerProviders(ctx context.Context, providers map[platform.ContainerType]container.Provider, executor *platform.ExecutorProperties) error {
 	if executor.SupportsIsolation(platform.DockerContainerType) {
 		dockerProvider, err := docker.NewProvider(p.env, p.hostBuildRoot())
 		if err != nil {
@@ -37,6 +38,10 @@ func (p *pool) registerContainerProviders(providers map[platform.ContainerType]c
 	}
 
 	if executor.SupportsIsolation(platform.PodmanContainerType) {
+		if err := podman.ConfigureIsolation(ctx); err != nil {
+			return status.WrapError(err, "configure podman networking")
+		}
+
 		podmanProvider, err := podman.NewProvider(p.env, *rootDirectory)
 		if err != nil {
 			return status.FailedPreconditionErrorf("Failed to initialize podman container provider: %s", err)
@@ -44,8 +49,12 @@ func (p *pool) registerContainerProviders(providers map[platform.ContainerType]c
 		providers[platform.PodmanContainerType] = podmanProvider
 	}
 
-	if err := p.registerFirecrackerProvider(providers, executor); err != nil {
-		return err
+	if executor.SupportsIsolation(platform.FirecrackerContainerType) {
+		firecrackerProvider, err := firecracker.NewProvider(p.env, *rootDirectory, p.cacheRoot)
+		if err != nil {
+			return status.FailedPreconditionErrorf("Failed to initialize firecracker container provider: %s", err)
+		}
+		providers[platform.FirecrackerContainerType] = firecrackerProvider
 	}
 
 	if executor.SupportsIsolation(platform.BareContainerType) {

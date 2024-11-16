@@ -2204,10 +2204,6 @@ message UsageStats {
   // Total number of CPU-nanoseconds consumed by the task.
   int64 cpu_nanos = 2;
 
-  // CPU usage timeline. Each sample represents the approximate CPU usage
-  // accumulated over each period.
-  Timeseries cpu_timeline = 8;
-
   // Most recently recorded total memory usage of the task. This field is only
   // used for real-time metrics and shouldn't be used as a "summary" metric for
   // the task (peak_memory_bytes is a more useful summary metric).
@@ -2249,22 +2245,65 @@ message UsageStats {
   // IO PSI metrics.
   PSI io_pressure = 7;
 
-  message Timeseries {
-    // Time when recording started.
-    google.protobuf.Timestamp start = 1;
+  // Timeseries data.
+  UsageTimeline timeline = 8;
 
-    // Time when the last sample was taken.
-    google.protobuf.Timestamp end = 2;
+  // IO stats for the block device where all action IO happened (action inputs
+  // and outputs, overlayfs temporary files, etc.)
+  CgroupIOStats cgroup_io_stats = 9;
+}
 
-    // Duration between each sample.
-    google.protobuf.Duration period = 3;
-    
-    // TODO: compress the samples to save space
+// Structured representation of the cgroup2 "io.stat" file.
+message CgroupIOStats {
+  // Major device number.
+  int64 maj = 1;
 
-    // Observed samples. The interpretation of these samples may depend on the
-    // metric being reported.
-    repeated int64 samples = 4;
-  }
+  // Minor device number.
+  int64 min = 2;
+
+  // Bytes read.
+  int64 rbytes = 3;
+
+  // Bytes written.
+  int64 wbytes = 4;
+
+  // Read IO operations.
+  int64 rios = 6;
+
+  // Write IO operations.
+  int64 wios = 7;
+
+  // Discarded bytes.
+  int64 dbytes = 8;
+  
+  // Discard operations.
+  int64 dios = 9;
+}
+
+message UsageTimeline {
+  google.protobuf.Timestamp start_time = 1;
+
+  // Delta-encoded timestamps (milliseconds since Unix epoch).
+  repeated int64 timestamps = 2;
+
+  // Delta-encoded CPU-millis samples. The decoded samples represent the
+  // cumulative CPU-millis used since the start time.
+  repeated int64 cpu_samples = 3;
+
+  // Delta-encoded memory usage.
+  repeated int64 memory_bytes_samples = 4;
+
+  // Delta-encoded total bytes read, totaled across all block devices.
+  repeated int64 rbytes_total_samples = 5;
+
+  // Delta-encoded total bytes written, totaled across all block devices.
+  repeated int64 wbytes_total_samples = 6;
+
+  // Delta-encoded total read operations, totaled across all block devices.
+  repeated int64 rios_total_samples = 7;
+
+  // Delta-encoded total write operations, totaled across all block devices.
+  repeated int64 wios_total_samples = 8;
 }
 
 // Pressure Stall Information, commonly known as PSI.
@@ -2368,6 +2407,10 @@ message StoredExecution {
   // UsageStats
   int64 peak_memory_bytes = 15;
   int64 cpu_nanos = 16;
+  int64 disk_bytes_read = 34;
+  int64 disk_bytes_written = 35;
+  int64 disk_read_operations = 36;
+  int64 disk_write_operations = 37;
 
   // Task Sizing
   int64 estimated_memory_bytes = 17;
@@ -2391,4 +2434,7 @@ message StoredExecution {
 
   string output_path = 31;
   string status_message = 32;
+
+  // TODO(sluongng): add mnemonic and configuration.
+  string target_label = 33;
 }

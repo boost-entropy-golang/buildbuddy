@@ -159,6 +159,9 @@ type Execution struct {
 
 	Stage int64
 
+	// RequestMetadata
+	TargetLabel string
+
 	// IOStats
 	FileDownloadCount        int64
 	FileDownloadSizeBytes    int64
@@ -168,8 +171,12 @@ type Execution struct {
 	FileUploadDurationUsec   int64
 
 	// UsageStats
-	PeakMemoryBytes int64
-	CPUNanos        int64
+	PeakMemoryBytes     int64
+	CPUNanos            int64
+	DiskBytesRead       int64
+	DiskBytesWritten    int64
+	DiskReadOperations  int64
+	DiskWriteOperations int64
 
 	// Task sizing
 	EstimatedMemoryBytes int64
@@ -244,6 +251,11 @@ func (e *Execution) AdditionalFields() []string {
 		"InvocationLinkType",
 		"Tags",
 		"OutputPath",
+		"TargetLabel",
+		"DiskBytesRead",
+		"DiskBytesWritten",
+		"DiskReadOperations",
+		"DiskWriteOperations",
 	}
 }
 

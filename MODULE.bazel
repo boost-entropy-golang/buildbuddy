@@ -67,7 +67,7 @@ single_version_override(
 )
 
 go_sdk = use_extension("@io_bazel_rules_go//go:extensions.bzl", "go_sdk")
-go_sdk.download(version = "1.23.1")
+go_sdk.download(version = "1.23.3")
 go_sdk.nogo(nogo = "@//:vet")
 use_repo(
     go_sdk,
@@ -138,7 +138,10 @@ go_deps.module_override(
 )
 go_deps.module_override(
     patch_strip = 1,
-    patches = ["@@//buildpatches:com_github_firecracker_microvm_firecracker_go_sdk_jailer.patch"],
+    patches = [
+        "@@//buildpatches:com_github_firecracker_microvm_firecracker_go_sdk_jailer.patch",
+        "@@//buildpatches:com_github_firecracker_microvm_firecracker_go_sdk_cgroup.patch",
+    ],
     path = "github.com/firecracker-microvm/firecracker-go-sdk",
 )
 go_deps.module_override(
@@ -288,7 +291,6 @@ use_repo(
     "com_github_bazelbuild_rules_webtesting",
     "com_github_bduffany_godemon",
     "com_github_bits_and_blooms_bloom_v3",
-    "com_github_bmkessler_streamvbyte",
     "com_github_bojand_ghz",
     "com_github_bradfitz_gomemcache",
     "com_github_buildbuddy_io_tensorflow_proto",
@@ -472,7 +474,7 @@ http_file = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_
 http_file(
     name = "aws_rds_certs",
     downloaded_file_path = "rds-combined-ca-bundle.pem",
-    sha256 = "ed2b625ceeca0ebacf413972c33acbeb65a6c6b94d0c6434f1bb006cd4904ede",
+    sha256 = "390fdc813e2e58ec5a0def8ce6422b83d75032899167052ab981d8e1b3b14ff2",
     url = "https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem",
 )
 
@@ -487,6 +489,7 @@ use_repo(
     "com_github_containers_crun_crun-linux-amd64",
     "com_github_containers_crun_crun-linux-arm64",
     "com_github_firecracker_microvm_firecracker",
+    "com_github_firecracker_microvm_firecracker_arm64",
     "com_github_googlecloudplatform_docker-credential-gcr-linux-amd64",
     "com_github_googlecloudplatform_docker-credential-gcr-linux-arm64",
     "com_github_krallin_tini_tini-linux-amd64",
@@ -513,6 +516,7 @@ use_repo(
     "net_busybox_busybox-linux-amd64",
     "net_busybox_busybox-linux-arm64",
     "org_kernel_git_linux_kernel-vmlinux",
+    "org_kernel_git_linux_kernel-vmlinux-arm64",
     "org_llvm_llvm_clang-format_linux-x86_64",
 )
 
@@ -545,8 +549,4 @@ use_repo(
     "buildbuddy_go_oci_image_base_linux_amd64",
     "busybox",
     "busybox_linux_amd64",
-)
-
-register_toolchains(
-    "//toolchains:ubuntu_cc_toolchain",
 )

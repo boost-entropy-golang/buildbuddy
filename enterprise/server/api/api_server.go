@@ -107,20 +107,21 @@ func (s *APIServer) GetInvocation(ctx context.Context, req *apipb.GetInvocationR
 			Id: &apipb.Invocation_Id{
 				InvocationId: ti.InvocationID,
 			},
-			Success:       ti.Success,
-			User:          ti.User,
-			DurationUsec:  ti.DurationUsec,
-			Host:          ti.Host,
-			Command:       ti.Command,
-			Pattern:       ti.Pattern,
-			ActionCount:   ti.ActionCount,
-			CreatedAtUsec: ti.CreatedAtUsec,
-			UpdatedAtUsec: ti.UpdatedAtUsec,
-			RepoUrl:       ti.RepoURL,
-			BranchName:    ti.BranchName,
-			CommitSha:     ti.CommitSHA,
-			Role:          ti.Role,
-			BazelExitCode: ti.BazelExitCode,
+			Success:          ti.Success,
+			User:             ti.User,
+			DurationUsec:     ti.DurationUsec,
+			Host:             ti.Host,
+			Command:          ti.Command,
+			Pattern:          ti.Pattern,
+			ActionCount:      ti.ActionCount,
+			CreatedAtUsec:    ti.CreatedAtUsec,
+			UpdatedAtUsec:    ti.UpdatedAtUsec,
+			RepoUrl:          ti.RepoURL,
+			BranchName:       ti.BranchName,
+			CommitSha:        ti.CommitSHA,
+			Role:             ti.Role,
+			BazelExitCode:    ti.BazelExitCode,
+			InvocationStatus: apipb.InvocationStatus(ti.InvocationStatus),
 		}
 
 		invocations = append(invocations, apiInvocation)
@@ -603,6 +604,7 @@ func (s *APIServer) Run(ctx context.Context, req *apipb.RunRequest) (*apipb.RunR
 		Env:            req.GetEnv(),
 		Timeout:        req.GetTimeout(),
 		ExecProperties: execProps,
+		RemoteHeaders:  req.GetRemoteHeaders(),
 		RunRemotely:    true,
 	})
 	if err != nil {

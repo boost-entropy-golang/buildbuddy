@@ -56,6 +56,10 @@ func (dbh *DBHandle) GORM(ctx context.Context, name string) *gorm.DB {
 	return dbh.db.WithContext(ctx).Set(gormQueryNameKey, name)
 }
 
+func (dbh *DBHandle) DialectName() string {
+	return dbh.db.Name()
+}
+
 func (dbh *DBHandle) NowFunc() time.Time {
 	return dbh.db.NowFunc()
 }
@@ -209,6 +213,10 @@ func buildExecution(in *repb.StoredExecution, inv *sipb.StoredInvocation) *schem
 		FileUploadDurationUsec:             in.GetFileUploadDurationUsec(),
 		PeakMemoryBytes:                    in.GetPeakMemoryBytes(),
 		CPUNanos:                           in.GetCpuNanos(),
+		DiskBytesRead:                      in.GetDiskBytesRead(),
+		DiskBytesWritten:                   in.GetDiskBytesWritten(),
+		DiskReadOperations:                 in.GetDiskReadOperations(),
+		DiskWriteOperations:                in.GetDiskWriteOperations(),
 		EstimatedMemoryBytes:               in.GetEstimatedMemoryBytes(),
 		EstimatedMilliCPU:                  in.GetEstimatedMilliCpu(),
 		QueuedTimestampUsec:                in.GetQueuedTimestampUsec(),
@@ -234,6 +242,7 @@ func buildExecution(in *repb.StoredExecution, inv *sipb.StoredInvocation) *schem
 		Success:                            inv.GetSuccess(),
 		InvocationStatus:                   inv.GetInvocationStatus(),
 		Tags:                               invocation_format.ConvertDBTagsToOLAP(inv.GetTags()),
+		TargetLabel:                        in.GetTargetLabel(),
 	}
 }
 

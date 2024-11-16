@@ -343,6 +343,10 @@ type DB interface {
 	GORM(ctx context.Context, name string) *gorm.DB
 
 	NowFunc() time.Time
+
+	// TODO(jdhollen): convert this to an enum instead of depending on the
+	// GORM value.
+	DialectName() string
 }
 
 type TxRunner func(tx *gorm.DB) error
@@ -573,6 +577,7 @@ type InvocationStatService interface {
 type InvocationSearchService interface {
 	IndexInvocation(ctx context.Context, invocation *inpb.Invocation) error
 	QueryInvocations(ctx context.Context, req *inpb.SearchInvocationRequest) (*inpb.SearchInvocationResponse, error)
+	GetInvocationFilterSuggestions(ctx context.Context, req *inpb.GetInvocationFilterSuggestionsRequest) (*inpb.GetInvocationFilterSuggestionsResponse, error)
 }
 
 type UsageService interface {
@@ -886,6 +891,8 @@ type ExecutionNode interface {
 	// GetExecutorHostId returns the executor host ID for this execution node,
 	// which persists across restarts of a given executor instance.
 	GetExecutorHostId() string
+
+	GetAssignableMilliCpu() int64
 }
 
 type ExecutionSearchService interface {

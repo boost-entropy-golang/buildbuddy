@@ -11,7 +11,6 @@ import (
 
 	"github.com/buildbuddy-io/buildbuddy/enterprise/server/raft/client"
 	"github.com/buildbuddy-io/buildbuddy/enterprise/server/raft/constants"
-	"github.com/buildbuddy-io/buildbuddy/enterprise/server/raft/keys"
 	"github.com/buildbuddy-io/buildbuddy/enterprise/server/raft/nodeliveness"
 	"github.com/buildbuddy-io/buildbuddy/enterprise/server/raft/rbuilder"
 	"github.com/buildbuddy-io/buildbuddy/enterprise/server/raft/replica"
@@ -33,7 +32,7 @@ const (
 
 func ContainsMetaRange(rd *rfpb.RangeDescriptor) bool {
 	r := rangemap.Range{Start: rd.Start, End: rd.End}
-	return r.Contains(keys.MinByte) && r.Contains([]byte{constants.UnsplittableMaxByte - 1})
+	return r.Contains(constants.MetaRangePrefix) && r.Contains([]byte{constants.UnsplittableMaxByte - 1})
 }
 
 type Lease struct {
@@ -88,19 +87,24 @@ func (l *Lease) Release(ctx context.Context) error {
 	return err
 }
 
-func (l *Lease) dropLease(ctx context.Context) error {
+func (l *Lease) Stop() {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-
-	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
-	defer cancel()
-
 	// close the background lease-renewal thread.
 	if !l.stopped {
 		l.stopped = true
 		close(l.quitLease)
 	}
+}
 
+func (l *Lease) dropLease(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+
+	l.Stop()
+
+	l.mu.Lock()
+	defer l.mu.Unlock()
 	// clear existing lease if it's valid.
 	valid := l.verifyLease(ctx, l.leaseRecord) == nil
 	if !valid {
@@ -270,13 +274,17 @@ func (l *Lease) ensureValidLease(ctx context.Context, forceRenewal bool) (*rfpb.
 		return l.leaseRecord, nil
 	}
 
-	renewed := false
-	for !renewed {
+	for {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default: // continue with for loop
+		}
 		if err := l.renewLease(ctx); err != nil {
 			return nil, err
 		}
 		if err := l.verifyLease(ctx, l.leaseRecord); err == nil {
-			renewed = true
+			break
 		}
 	}
 

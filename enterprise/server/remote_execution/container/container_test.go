@@ -12,7 +12,10 @@ import (
 	"github.com/buildbuddy-io/buildbuddy/server/testutil/testauth"
 	"github.com/buildbuddy-io/buildbuddy/server/testutil/testenv"
 	"github.com/buildbuddy-io/buildbuddy/server/util/status"
+	"github.com/buildbuddy-io/buildbuddy/server/util/testing/flags"
+	"github.com/buildbuddy-io/buildbuddy/server/util/timeseries"
 	"github.com/google/go-cmp/cmp"
+	"github.com/jonboulle/clockwork"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sync/errgroup"
@@ -277,6 +280,7 @@ func TestUsageStats(t *testing.T) {
 	s.Update(&repb.UsageStats{
 		CpuNanos:       1e9,
 		MemoryBytes:    50 * 1024 * 1024,
+		CgroupIoStats:  &repb.CgroupIOStats{Maj: 8, Min: 0, Rbytes: 4096, Rios: 1},
 		CpuPressure:    makePSI(100, 10),
 		MemoryPressure: makePSI(2_000, 200),
 		IoPressure:     makePSI(30_000, 3_000),
@@ -286,17 +290,19 @@ func TestUsageStats(t *testing.T) {
 	s.Update(&repb.UsageStats{
 		CpuNanos:       1e9,
 		MemoryBytes:    55 * 1024 * 1024,
+		CgroupIoStats:  &repb.CgroupIOStats{Maj: 8, Min: 0, Rbytes: 4096, Rios: 1},
 		CpuPressure:    makePSI(100, 10),
 		MemoryPressure: makePSI(2_000, 200),
 		IoPressure:     makePSI(30_000, 3_000),
 	})
 
 	// Observe the same usage again but with lower memory than the first
-	// observation. Also, accumulate some CPU as well as some pressure stall
+	// observation. Also, accumulate some CPU, read ops, and pressure stall
 	// time.
 	s.Update(&repb.UsageStats{
 		CpuNanos:       2e9,
 		MemoryBytes:    45 * 1024 * 1024,
+		CgroupIoStats:  &repb.CgroupIOStats{Maj: 8, Min: 0, Rbytes: 8192, Rios: 2},
 		CpuPressure:    makePSI(150, 10),
 		MemoryPressure: makePSI(2_000, 200),
 		IoPressure:     makePSI(30_000, 3_000),
@@ -305,6 +311,7 @@ func TestUsageStats(t *testing.T) {
 		CpuNanos:        2e9,
 		MemoryBytes:     45 * 1024 * 1024,
 		PeakMemoryBytes: 55 * 1024 * 1024,
+		CgroupIoStats:   &repb.CgroupIOStats{Maj: 8, Min: 0, Rbytes: 8192, Rios: 2},
 		CpuPressure:     makePSI(150, 10),
 		MemoryPressure:  makePSI(2_000, 200),
 		IoPressure:      makePSI(30_000, 3_000),
@@ -315,6 +322,7 @@ func TestUsageStats(t *testing.T) {
 	// should appear as though they were.
 	s.Reset()
 	require.Empty(t, cmp.Diff(&repb.UsageStats{
+		CgroupIoStats:  &repb.CgroupIOStats{Maj: 8, Min: 0},
 		CpuPressure:    makePSI(0, 0),
 		MemoryPressure: makePSI(0, 0),
 		IoPressure:     makePSI(0, 0),
@@ -326,6 +334,7 @@ func TestUsageStats(t *testing.T) {
 	s.Update(&repb.UsageStats{
 		CpuNanos:       2e9,
 		MemoryBytes:    45 * 1024 * 1024,
+		CgroupIoStats:  &repb.CgroupIOStats{Maj: 8, Min: 0, Rbytes: 8192, Rios: 2},
 		CpuPressure:    makePSI(150, 10),
 		MemoryPressure: makePSI(2_000, 200),
 		IoPressure:     makePSI(30_000, 3_000),
@@ -333,16 +342,18 @@ func TestUsageStats(t *testing.T) {
 	require.Empty(t, cmp.Diff(&repb.UsageStats{
 		MemoryBytes:     45 * 1024 * 1024,
 		PeakMemoryBytes: 45 * 1024 * 1024,
+		CgroupIoStats:   &repb.CgroupIOStats{Maj: 8, Min: 0},
 		CpuPressure:     makePSI(0, 0),
 		MemoryPressure:  makePSI(0, 0),
 		IoPressure:      makePSI(0, 0),
 	}, s.TaskStats(), protocmp.Transform()))
 
-	// Accumulate some CPU usage as well as some pressure stall time. Task stats
+	// Accumulate some CPU usage, pressure stall time, and write IO. Task stats
 	// should only reflect the accumulated amount.
 	s.Update(&repb.UsageStats{
 		CpuNanos:       2e9 + 7e9,
 		MemoryBytes:    45 * 1024 * 1024,
+		CgroupIoStats:  &repb.CgroupIOStats{Maj: 8, Min: 0, Rbytes: 8192, Rios: 2, Wbytes: 4096, Wios: 1},
 		CpuPressure:    makePSI(150+117, 10+17),
 		MemoryPressure: makePSI(2_000+1_118, 200+118),
 		IoPressure:     makePSI(30_000+11_119, 3_000+1_119),
@@ -350,11 +361,57 @@ func TestUsageStats(t *testing.T) {
 	require.Empty(t, cmp.Diff(&repb.UsageStats{
 		CpuNanos:        7e9,
 		MemoryBytes:     45 * 1024 * 1024,
+		CgroupIoStats:   &repb.CgroupIOStats{Maj: 8, Min: 0, Wbytes: 4096, Wios: 1},
 		PeakMemoryBytes: 45 * 1024 * 1024,
 		CpuPressure:     makePSI(117, 17),
 		MemoryPressure:  makePSI(1_118, 118),
 		IoPressure:      makePSI(11_119, 1_119),
 	}, s.TaskStats(), protocmp.Transform()))
+}
+
+func TestUsageStats_Timeseries(t *testing.T) {
+	flags.Set(t, "executor.record_cpu_timelines", true)
+
+	start := time.Unix(100, 0)
+	clock := clockwork.NewFakeClockAt(start)
+	lifetimeStats := &repb.UsageStats{}
+	stats := &container.UsageStats{Clock: clock}
+
+	stats.Reset()
+	clock.Advance(100 * time.Millisecond)
+	lifetimeStats.CpuNanos += 3e9
+	stats.Update(lifetimeStats)
+	timeline := stats.TaskStats().GetTimeline()
+
+	timestamps := timeseries.DeltaDecode(timeline.GetTimestamps())
+	cpuSamples := timeseries.DeltaDecode(timeline.GetCpuSamples())
+	assert.Equal(t, start.UnixNano(), timeline.GetStartTime().AsTime().UnixNano())
+	assert.Equal(t, []int64{
+		start.UnixMilli(),
+		start.UnixMilli() + 100,
+	}, timestamps, "timestamps")
+	assert.Equal(t, []int64{0, 3000}, cpuSamples, "cpu samples")
+
+	clock.Advance(250 * time.Millisecond)
+	start = clock.Now()
+	stats.Reset()
+	clock.Advance(500 * time.Millisecond)
+	lifetimeStats.CpuNanos += 7e9
+	stats.Update(lifetimeStats)
+	clock.Advance(500 * time.Millisecond)
+	lifetimeStats.CpuNanos += 2.5e9
+	stats.Update(lifetimeStats)
+	timeline = stats.TaskStats().GetTimeline()
+
+	timestamps = timeseries.DeltaDecode(timeline.GetTimestamps())
+	cpuSamples = timeseries.DeltaDecode(timeline.GetCpuSamples())
+	assert.Equal(t, start.UnixNano(), timeline.GetStartTime().AsTime().UnixNano())
+	assert.Equal(t, []int64{
+		start.UnixMilli(),
+		start.UnixMilli() + 500,
+		start.UnixMilli() + 1000,
+	}, timestamps, "timestamps")
+	assert.Equal(t, []int64{0, 7000, 9500}, cpuSamples, "cpu samples")
 }
 
 func makePSI(someTotal, fullTotal int64) *repb.PSI {

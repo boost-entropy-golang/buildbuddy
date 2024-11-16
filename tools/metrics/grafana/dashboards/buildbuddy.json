@@ -2151,7 +2151,7 @@
                 "type": "prometheus",
                 "uid": "vm"
               },
-              "expr": "sum(rate(grpc_server_started_total{region=\"${region}\",grpc_service=\"distributed_cache.DistributedCache\"}[${window}])) by (grpc_method)\n",
+              "expr": "sum(rate(grpc_server_started_total{region=\"${region}\", job=\"buildbuddy-app\",grpc_service=\"distributed_cache.DistributedCache\"}[${window}])) by (grpc_method)\n",
               "interval": "",
               "legendFormat": "{{grpc_method}}",
               "queryType": "randomWalk",
@@ -2247,7 +2247,7 @@
                 "type": "prometheus",
                 "uid": "vm"
               },
-              "expr": "histogram_quantile(0.99, sum(rate(grpc_server_handling_seconds_bucket{region=\"${region}\", grpc_service=\"distributed_cache.DistributedCache\", grpc_method=\"GetMulti\"}[${window}])) by (le)\n)",
+              "expr": "histogram_quantile(0.99, sum(rate(grpc_server_handling_seconds_bucket{region=\"${region}\", job=\"buildbuddy-app\", grpc_service=\"distributed_cache.DistributedCache\", grpc_method=\"GetMulti\"}[${window}])) by (le)\n)",
               "interval": "",
               "legendFormat": "P99",
               "queryType": "randomWalk",
@@ -2258,7 +2258,7 @@
                 "type": "prometheus",
                 "uid": "vm"
               },
-              "expr": "histogram_quantile(0.95, sum(rate(grpc_server_handling_seconds_bucket{region=\"${region}\", grpc_service=\"distributed_cache.DistributedCache\", grpc_method=\"GetMulti\"}[${window}])) by (le)\n)",
+              "expr": "histogram_quantile(0.95, sum(rate(grpc_server_handling_seconds_bucket{region=\"${region}\", job=\"buildbuddy-app\", grpc_service=\"distributed_cache.DistributedCache\", grpc_method=\"GetMulti\"}[${window}])) by (le)\n)",
               "interval": "",
               "legendFormat": "P95",
               "refId": "B"
@@ -2268,7 +2268,7 @@
                 "type": "prometheus",
                 "uid": "vm"
               },
-              "expr": "histogram_quantile(0.50, sum(rate(grpc_server_handling_seconds_bucket{region=\"${region}\", grpc_service=\"distributed_cache.DistributedCache\", grpc_method=\"GetMulti\"}[${window}])) by (le)\n)",
+              "expr": "histogram_quantile(0.50, sum(rate(grpc_server_handling_seconds_bucket{region=\"${region}\", job=\"buildbuddy-app\", grpc_service=\"distributed_cache.DistributedCache\", grpc_method=\"GetMulti\"}[${window}])) by (le)\n)",
               "interval": "",
               "legendFormat": "P50",
               "refId": "C"
@@ -2278,7 +2278,7 @@
                 "type": "prometheus",
                 "uid": "vm"
               },
-              "expr": "sum(rate(grpc_server_handled_total{region=\"${region}\", grpc_service=\"distributed_cache.DistributedCache\", grpc_method=\"GetMulti\"}[${window}])) by (grpc_service)",
+              "expr": "sum(rate(grpc_server_handled_total{region=\"${region}\", job=\"buildbuddy-app\", grpc_service=\"distributed_cache.DistributedCache\", grpc_method=\"GetMulti\"}[${window}])) by (grpc_service)",
               "interval": "",
               "legendFormat": "QPS",
               "refId": "D"
@@ -2372,7 +2372,7 @@
                 "type": "prometheus",
                 "uid": "vm"
               },
-              "expr": "histogram_quantile(0.99, sum(rate(grpc_server_handling_seconds_bucket{region=\"${region}\", grpc_service=\"distributed_cache.DistributedCache\", grpc_method=\"FindMissing\"}[${window}])) by (le)\n)",
+              "expr": "histogram_quantile(0.99, sum(rate(grpc_server_handling_seconds_bucket{region=\"${region}\", job=\"buildbuddy-app\", grpc_service=\"distributed_cache.DistributedCache\", grpc_method=\"FindMissing\"}[${window}])) by (le)\n)",
               "interval": "",
               "legendFormat": "P99",
               "queryType": "randomWalk",
@@ -2383,7 +2383,7 @@
                 "type": "prometheus",
                 "uid": "vm"
               },
-              "expr": "histogram_quantile(0.95, sum(rate(grpc_server_handling_seconds_bucket{region=\"${region}\", grpc_service=\"distributed_cache.DistributedCache\", grpc_method=\"FindMissing\"}[${window}])) by (le)\n)",
+              "expr": "histogram_quantile(0.95, sum(rate(grpc_server_handling_seconds_bucket{region=\"${region}\", job=\"buildbuddy-app\", grpc_service=\"distributed_cache.DistributedCache\", grpc_method=\"FindMissing\"}[${window}])) by (le)\n)",
               "interval": "",
               "legendFormat": "P95",
               "refId": "B"
@@ -2393,7 +2393,7 @@
                 "type": "prometheus",
                 "uid": "vm"
               },
-              "expr": "histogram_quantile(0.50, sum(rate(grpc_server_handling_seconds_bucket{region=\"${region}\", grpc_service=\"distributed_cache.DistributedCache\", grpc_method=\"FindMissing\"}[${window}])) by (le)\n)",
+              "expr": "histogram_quantile(0.50, sum(rate(grpc_server_handling_seconds_bucket{region=\"${region}\", job=\"buildbuddy-app\", grpc_service=\"distributed_cache.DistributedCache\", grpc_method=\"FindMissing\"}[${window}])) by (le)\n)",
               "interval": "",
               "legendFormat": "P50",
               "refId": "C"
@@ -2403,7 +2403,7 @@
                 "type": "prometheus",
                 "uid": "vm"
               },
-              "expr": "sum(rate(grpc_server_handled_total{region=\"${region}\", grpc_service=\"distributed_cache.DistributedCache\", grpc_method=\"FindMissing\"}[${window}])) by (grpc_service)",
+              "expr": "sum(rate(grpc_server_handled_total{region=\"${region}\", job=\"buildbuddy-app\", grpc_service=\"distributed_cache.DistributedCache\", grpc_method=\"FindMissing\"}[${window}])) by (grpc_service)",
               "interval": "",
               "legendFormat": "QPS",
               "refId": "D"
@@ -2498,7 +2498,7 @@
                 "type": "prometheus",
                 "uid": "vm"
               },
-              "expr": "histogram_quantile(0.99, sum(rate(grpc_server_handling_seconds_bucket{region=\"${region}\", grpc_service=\"distributed_cache.DistributedCache\", grpc_method=\"Write\"}[${window}])) by (le)\n)",
+              "expr": "histogram_quantile(0.99, sum(rate(grpc_server_handling_seconds_bucket{region=\"${region}\", job=\"buildbuddy-app\", grpc_service=\"distributed_cache.DistributedCache\", grpc_method=\"Write\"}[${window}])) by (le)\n)",
               "interval": "",
               "legendFormat": "P99",
               "queryType": "randomWalk",
@@ -2509,7 +2509,7 @@
                 "type": "prometheus",
                 "uid": "vm"
               },
-              "expr": "histogram_quantile(0.95, sum(rate(grpc_server_handling_seconds_bucket{region=\"${region}\", grpc_service=\"distributed_cache.DistributedCache\", grpc_method=\"Write\"}[${window}])) by (le)\n)",
+              "expr": "histogram_quantile(0.95, sum(rate(grpc_server_handling_seconds_bucket{region=\"${region}\", job=\"buildbuddy-app\", grpc_service=\"distributed_cache.DistributedCache\", grpc_method=\"Write\"}[${window}])) by (le)\n)",
               "interval": "",
               "legendFormat": "P95",
               "refId": "B"
@@ -2519,7 +2519,7 @@
                 "type": "prometheus",
                 "uid": "vm"
               },
-              "expr": "histogram_quantile(0.50, sum(rate(grpc_server_handling_seconds_bucket{region=\"${region}\", grpc_service=\"distributed_cache.DistributedCache\", grpc_method=\"Write\"}[${window}])) by (le)\n)",
+              "expr": "histogram_quantile(0.50, sum(rate(grpc_server_handling_seconds_bucket{region=\"${region}\", job=\"buildbuddy-app\", grpc_service=\"distributed_cache.DistributedCache\", grpc_method=\"Write\"}[${window}])) by (le)\n)",
               "interval": "",
               "legendFormat": "P50",
               "refId": "C"
@@ -2529,7 +2529,7 @@
                 "type": "prometheus",
                 "uid": "vm"
               },
-              "expr": "sum(rate(grpc_server_handled_total{region=\"${region}\", grpc_service=\"distributed_cache.DistributedCache\", grpc_method=\"Write\"}[${window}])) by (grpc_service)",
+              "expr": "sum(rate(grpc_server_handled_total{region=\"${region}\", job=\"buildbuddy-app\", grpc_service=\"distributed_cache.DistributedCache\", grpc_method=\"Write\"}[${window}])) by (grpc_service)",
               "interval": "",
               "legendFormat": "QPS",
               "refId": "D"
@@ -2624,7 +2624,7 @@
                 "type": "prometheus",
                 "uid": "vm"
               },
-              "expr": "histogram_quantile(0.99, sum(rate(grpc_server_handling_seconds_bucket{region=\"${region}\", grpc_service=\"distributed_cache.DistributedCache\", grpc_method=\"Read\"}[${window}])) by (le)\n)",
+              "expr": "histogram_quantile(0.99, sum(rate(grpc_server_handling_seconds_bucket{region=\"${region}\", job=\"buildbuddy-app\", grpc_service=\"distributed_cache.DistributedCache\", grpc_method=\"Read\"}[${window}])) by (le)\n)",
               "interval": "",
               "legendFormat": "P99",
               "queryType": "randomWalk",
@@ -2635,7 +2635,7 @@
                 "type": "prometheus",
                 "uid": "vm"
               },
-              "expr": "histogram_quantile(0.95, sum(rate(grpc_server_handling_seconds_bucket{region=\"${region}\", grpc_service=\"distributed_cache.DistributedCache\", grpc_method=\"Read\"}[${window}])) by (le)\n)",
+              "expr": "histogram_quantile(0.95, sum(rate(grpc_server_handling_seconds_bucket{region=\"${region}\", job=\"buildbuddy-app\", grpc_service=\"distributed_cache.DistributedCache\", grpc_method=\"Read\"}[${window}])) by (le)\n)",
               "interval": "",
               "legendFormat": "P95",
               "refId": "B"
@@ -2645,7 +2645,7 @@
                 "type": "prometheus",
                 "uid": "vm"
               },
-              "expr": "histogram_quantile(0.50, sum(rate(grpc_server_handling_seconds_bucket{region=\"${region}\", grpc_service=\"distributed_cache.DistributedCache\", grpc_method=\"Read\"}[${window}])) by (le)\n)",
+              "expr": "histogram_quantile(0.50, sum(rate(grpc_server_handling_seconds_bucket{region=\"${region}\", job=\"buildbuddy-app\", grpc_service=\"distributed_cache.DistributedCache\", grpc_method=\"Read\"}[${window}])) by (le)\n)",
               "interval": "",
               "legendFormat": "P50",
               "refId": "C"
@@ -2655,7 +2655,7 @@
                 "type": "prometheus",
                 "uid": "vm"
               },
-              "expr": "sum(rate(grpc_server_handled_total{region=\"${region}\", grpc_service=\"distributed_cache.DistributedCache\", grpc_method=\"Read\"}[${window}])) by (grpc_service)",
+              "expr": "sum(rate(grpc_server_handled_total{region=\"${region}\", job=\"buildbuddy-app\", grpc_service=\"distributed_cache.DistributedCache\", grpc_method=\"Read\"}[${window}])) by (grpc_service)",
               "interval": "",
               "legendFormat": "QPS",
               "refId": "D"
@@ -2771,7 +2771,7 @@
                 "type": "prometheus",
                 "uid": "vm"
               },
-              "expr": "sum(rate(buildbuddy_remote_cache_download_size_bytes_sum{region=\"${region}\"}[${window}]))",
+              "expr": "sum(rate(buildbuddy_remote_cache_download_size_bytes_sum{region=\"${region}\", job=\"buildbuddy-app\"}[${window}]))",
               "interval": "",
               "legendFormat": "",
               "queryType": "randomWalk",
@@ -2862,7 +2862,7 @@
                 "type": "prometheus",
                 "uid": "vm"
               },
-              "expr": "sum(rate(buildbuddy_remote_cache_upload_size_bytes_sum{region=\"${region}\"}[${window}]))",
+              "expr": "sum(rate(buildbuddy_remote_cache_upload_size_bytes_sum{region=\"${region}\", job=\"buildbuddy-app\"}[${window}]))",
               "interval": "",
               "legendFormat": "",
               "queryType": "randomWalk",
@@ -2972,7 +2972,7 @@
                 "type": "prometheus",
                 "uid": "vm"
               },
-              "expr": "sum by (cache_event_type) (rate(buildbuddy_remote_cache_events{region=\"${region}\", cache_type=\"action_cache\"}[${window}]))",
+              "expr": "sum by (cache_event_type) (rate(buildbuddy_remote_cache_events{region=\"${region}\", job=\"buildbuddy-app\", cache_type=\"action_cache\"}[${window}]))",
               "interval": "",
               "legendFormat": "{{cache_event_type}}",
               "queryType": "randomWalk",
@@ -3067,7 +3067,7 @@
                 "type": "prometheus",
                 "uid": "vm"
               },
-              "expr": "sum by (cache_event_type) (rate(buildbuddy_remote_cache_events{region=\"${region}\", cache_type=\"cas\"}[${window}]))",
+              "expr": "sum by (cache_event_type) (rate(buildbuddy_remote_cache_events{region=\"${region}\", job=\"buildbuddy-app\", cache_type=\"cas\"}[${window}]))",
               "interval": "",
               "legendFormat": "{{cache_event_type}}",
               "queryType": "randomWalk",
@@ -3192,7 +3192,7 @@
                 "uid": "vm"
               },
               "editorMode": "code",
-              "expr": "sum by (status) (rate(buildbuddy_remote_cache_tree_cache_lookup_count{region=\"${region}\"}[${window}]))",
+              "expr": "sum by (status) (rate(buildbuddy_remote_cache_tree_cache_lookup_count{region=\"${region}\", job=\"buildbuddy-app\"}[${window}]))",
               "instant": false,
               "legendFormat": "__auto",
               "range": true,
@@ -3291,7 +3291,7 @@
                 "uid": "vm"
               },
               "editorMode": "code",
-              "expr": "sum by (level, status) (rate(buildbuddy_remote_cache_tree_cache_lookup_count{region=\"${region}\"}[${window}]))",
+              "expr": "sum by (level, status) (rate(buildbuddy_remote_cache_tree_cache_lookup_count{region=\"${region}\", job=\"buildbuddy-app\"}[${window}]))",
               "instant": false,
               "legendFormat": "L{{level}}/{{status}}",
               "range": true,
@@ -3355,7 +3355,7 @@
                 "uid": "vm"
               },
               "editorMode": "code",
-              "expr": "avg(buildbuddy_remote_cache_disk_cache_last_eviction_age_usec{region=\"${region}\", cache_name=\"${cache_name}\"}/1e6) by (partition_id)",
+              "expr": "avg(buildbuddy_remote_cache_disk_cache_last_eviction_age_usec{region=\"${region}\", job=\"buildbuddy-app\", cache_name=\"${cache_name}\"}/1e6) by (partition_id)",
               "instant": false,
               "interval": "",
               "legendFormat": "",
@@ -3493,7 +3493,7 @@
               },
               "editorMode": "code",
               "exemplar": true,
-              "expr": "sum(increase(buildbuddy_remote_cache_disk_cache_added_file_size_bytes_bucket{region=\"${region}\", cache_name=\"${cache_name}\"}[$__interval])) by (le)",
+              "expr": "sum(increase(buildbuddy_remote_cache_disk_cache_added_file_size_bytes_bucket{region=\"${region}\", job=\"buildbuddy-app\", cache_name=\"${cache_name}\"}[$__interval])) by (le)",
               "format": "heatmap",
               "interval": "",
               "legendFormat": "{{le}}",
@@ -3838,7 +3838,7 @@
                 "uid": "vm"
               },
               "editorMode": "code",
-              "expr": "sum(rate(buildbuddy_remote_cache_tree_cache_lookup_count{region=\"${region}\", status=\"hit\"}[${window}]))/sum(rate(buildbuddy_remote_cache_tree_cache_lookup_count[${window}]))",
+              "expr": "sum(rate(buildbuddy_remote_cache_tree_cache_lookup_count{region=\"${region}\", job=\"buildbuddy-app\", status=\"hit\"}[${window}]))/sum(rate(buildbuddy_remote_cache_tree_cache_lookup_count{region=\"${region}\", job=\"buildbuddy-app\"}[${window}]))",
               "instant": false,
               "legendFormat": "__auto",
               "range": true,
@@ -3850,7 +3850,7 @@
                 "uid": "vm"
               },
               "editorMode": "code",
-              "expr": "sum(rate(buildbuddy_remote_cache_events{cache_event_type=\"hit\", cache_type=\"action_cache\"}[${window}]))/sum(rate(buildbuddy_remote_cache_events{cache_event_type=~\"hit|miss\", cache_type=\"action_cache\"}[${window}]))",
+              "expr": "sum(rate(buildbuddy_remote_cache_events{region=\"${region}\", job=\"buildbuddy-app\", cache_event_type=\"hit\", cache_type=\"action_cache\"}[${window}]))/sum(rate(buildbuddy_remote_cache_events{region=\"${region}\", job=\"buildbuddy-app\", cache_event_type=~\"hit|miss\", cache_type=\"action_cache\"}[${window}]))",
               "hide": false,
               "instant": false,
               "legendFormat": "__auto",
@@ -3863,7 +3863,7 @@
                 "uid": "vm"
               },
               "editorMode": "code",
-              "expr": "sum(rate(buildbuddy_remote_cache_events{cache_event_type=\"hit\", cache_type=\"cas\"}[${window}]))/sum(rate(buildbuddy_remote_cache_events{cache_event_type=~\"hit|miss\", cache_type=\"cas\"}[${window}]))",
+              "expr": "sum(rate(buildbuddy_remote_cache_events{region=\"${region}\", job=\"buildbuddy-app\", cache_event_type=\"hit\", cache_type=\"cas\"}[${window}]))/sum(rate(buildbuddy_remote_cache_events{region=\"${region}\", job=\"buildbuddy-app\", cache_event_type=~\"hit|miss\", cache_type=\"cas\"}[${window}]))",
               "hide": false,
               "instant": false,
               "legendFormat": "__auto",
@@ -3961,7 +3961,7 @@
                 "uid": "vm"
               },
               "editorMode": "code",
-              "expr": "histogram_quantile(${quantile}, sum(rate(buildbuddy_remote_cache_pebble_cache_eviction_resample_latency_usec_bucket{region=\"${region}\", cache_name=\"${cache_name}\"}[${window}])) by (le, partition_id))",
+              "expr": "histogram_quantile(${quantile}, sum(rate(buildbuddy_remote_cache_pebble_cache_eviction_resample_latency_usec_bucket{region=\"${region}\", job=\"buildbuddy-app\", cache_name=\"${cache_name}\"}[${window}])) by (le, partition_id))",
               "legendFormat": "__auto",
               "range": true,
               "refId": "A"
@@ -4057,7 +4057,7 @@
                 "uid": "vm"
               },
               "editorMode": "code",
-              "expr": "histogram_quantile(${quantile}, sum(rate(buildbuddy_remote_cache_pebble_cache_eviction_evict_latency_usec_bucket{region=\"${region}\", cache_name=\"${cache_name}\"}[${window}])) by (le, partition_id))",
+              "expr": "histogram_quantile(${quantile}, sum(rate(buildbuddy_remote_cache_pebble_cache_eviction_evict_latency_usec_bucket{region=\"${region}\", job=\"buildbuddy-app\", cache_name=\"${cache_name}\"}[${window}])) by (le, partition_id))",
               "legendFormat": "__auto",
               "range": true,
               "refId": "A"
@@ -4264,7 +4264,7 @@
               },
               "editorMode": "code",
               "exemplar": true,
-              "expr": "sum(increase(buildbuddy_remote_cache_pebble_cache_num_chunks_per_file_bucket{region=\"${region}\", cache_name=\"${cache_name}\"}[$__interval])) by (le)",
+              "expr": "sum(increase(buildbuddy_remote_cache_pebble_cache_num_chunks_per_file_bucket{region=\"${region}\", job=\"buildbuddy-app\", cache_name=\"${cache_name}\"}[$__interval])) by (le)",
               "format": "heatmap",
               "interval": "",
               "legendFormat": "{{le}}",
@@ -4395,7 +4395,7 @@
                 "uid": "vm"
               },
               "editorMode": "code",
-              "expr": "1/histogram_quantile(0.1, sum(rate(buildbuddy_pebble_compression_ratio_bucket{region=\"${region}\", cache_name=\"${cache_name}\"}[10m])) by (le))",
+              "expr": "1/histogram_quantile(0.1, sum(rate(buildbuddy_pebble_compression_ratio_bucket{region=\"${region}\", job=\"buildbuddy-app\", cache_name=\"${cache_name}\"}[10m])) by (le))",
               "instant": false,
               "legendFormat": "__auto",
               "range": true,
@@ -4407,7 +4407,7 @@
                 "uid": "vm"
               },
               "editorMode": "code",
-              "expr": "1/histogram_quantile(0.5, sum(rate(buildbuddy_pebble_compression_ratio_bucket{region=\"${region}\", cache_name=\"${cache_name}\"}[10m])) by (le))",
+              "expr": "1/histogram_quantile(0.5, sum(rate(buildbuddy_pebble_compression_ratio_bucket{region=\"${region}\", job=\"buildbuddy-app\", cache_name=\"${cache_name}\"}[10m])) by (le))",
               "hide": false,
               "instant": false,
               "legendFormat": "__auto",
@@ -4420,7 +4420,7 @@
                 "uid": "vm"
               },
               "editorMode": "code",
-              "expr": "1/histogram_quantile(0.99, sum(rate(buildbuddy_pebble_compression_ratio_bucket{region=\"${region}\", cache_name=\"${cache_name}\"}[10m])) by (le))",
+              "expr": "1/histogram_quantile(0.99, sum(rate(buildbuddy_pebble_compression_ratio_bucket{region=\"${region}\", job=\"buildbuddy-app\", cache_name=\"${cache_name}\"}[10m])) by (le))",
               "hide": false,
               "instant": false,
               "legendFormat": "__auto",
@@ -4517,7 +4517,7 @@
                 "uid": "vm"
               },
               "editorMode": "code",
-              "expr": "sum(rate(buildbuddy_remote_cache_pebble_cache_pebble_compact_count{region=\"${region}\", cache_name=\"${cache_name}\"}[1m])) by (compaction_type)\n",
+              "expr": "sum(rate(buildbuddy_remote_cache_pebble_cache_pebble_compact_count{region=\"${region}\", job=\"buildbuddy-app\", cache_name=\"${cache_name}\"}[1m])) by (compaction_type)\n",
               "legendFormat": "__auto",
               "range": true,
               "refId": "A"
@@ -4646,7 +4646,7 @@
                 "uid": "vm"
               },
               "editorMode": "code",
-              "expr": "sum(buildbuddy_remote_cache_pebble_cache_pebble_compact_in_progress_bytes{region=\"${region}\",app=\"buildbuddy-app\", cache_name=\"${cache_name}\"})",
+              "expr": "sum(buildbuddy_remote_cache_pebble_cache_pebble_compact_in_progress_bytes{region=\"${region}\", job=\"buildbuddy-app\", cache_name=\"${cache_name}\"})",
               "hide": false,
               "legendFormat": "in progress (bytes)",
               "range": true,
@@ -4658,7 +4658,7 @@
                 "uid": "vm"
               },
               "editorMode": "code",
-              "expr": "sum(buildbuddy_remote_cache_pebble_cache_pebble_compact_in_progress{region=\"${region}\",app=\"buildbuddy-app\", cache_name=\"${cache_name}\"})",
+              "expr": "sum(buildbuddy_remote_cache_pebble_cache_pebble_compact_in_progress{region=\"${region}\", job=\"buildbuddy-app\", cache_name=\"${cache_name}\"})",
               "hide": false,
               "legendFormat": "in progress (count)",
               "range": true,
@@ -4670,7 +4670,7 @@
                 "uid": "vm"
               },
               "editorMode": "code",
-              "expr": "sum(buildbuddy_remote_cache_pebble_cache_pebble_compact_marked_files{region=\"${region}\",app=\"buildbuddy-app\", cache_name=\"${cache_name}\"})",
+              "expr": "sum(buildbuddy_remote_cache_pebble_cache_pebble_compact_marked_files{region=\"${region}\", job=\"buildbuddy-app\", cache_name=\"${cache_name}\"})",
               "hide": false,
               "legendFormat": "marked files",
               "range": true,
@@ -4800,7 +4800,7 @@
                 "uid": "vm"
               },
               "editorMode": "code",
-              "expr": "sum(buildbuddy_remote_cache_pebble_cache_pebble_compact_estimated_debt_bytes{region=\"${region}\",app=\"buildbuddy-app\", cache_name=\"${cache_name}\"}) by (pod_name)",
+              "expr": "sum(buildbuddy_remote_cache_pebble_cache_pebble_compact_estimated_debt_bytes{region=\"${region}\", job=\"buildbuddy-app\", cache_name=\"${cache_name}\"}) by (pod_name)",
               "legendFormat": "{{pod_name}}",
               "range": true,
               "refId": "A"
@@ -4896,7 +4896,7 @@
                 "uid": "vm"
               },
               "editorMode": "code",
-              "expr": "sum(rate(buildbuddy_remote_cache_pebble_cache_pebble_op_count{region=\"${region}\", pebble_id=\"${cache_name}\"}[1m])) by (pebble_op)",
+              "expr": "sum(rate(buildbuddy_remote_cache_pebble_cache_pebble_op_count{region=\"${region}\", job=\"buildbuddy-app\", pebble_id=\"${cache_name}\"}[1m])) by (pebble_op)",
               "legendFormat": "__auto",
               "range": true,
               "refId": "A"
@@ -4992,7 +4992,7 @@
                 "uid": "vm"
               },
               "editorMode": "code",
-              "expr": "histogram_quantile(0.50, sum(rate(buildbuddy_remote_cache_pebble_cache_pebble_op_latency_usec_bucket{region=\"${region}\", pebble_id=\"${cache_name}\"}[1m])) by (le,pebble_op))",
+              "expr": "histogram_quantile(0.50, sum(rate(buildbuddy_remote_cache_pebble_cache_pebble_op_latency_usec_bucket{region=\"${region}\", job=\"buildbuddy-app\", pebble_id=\"${cache_name}\"}[1m])) by (le,pebble_op))",
               "legendFormat": "__auto",
               "range": true,
               "refId": "A"
@@ -5087,7 +5087,7 @@
                 "uid": "vm"
               },
               "editorMode": "code",
-              "expr": "histogram_quantile(0.95, sum(rate(buildbuddy_remote_cache_pebble_cache_pebble_op_latency_usec_bucket{region=\"${region}\", pebble_id=\"${cache_name}\"}[1m])) by (le,pebble_op))",
+              "expr": "histogram_quantile(0.95, sum(rate(buildbuddy_remote_cache_pebble_cache_pebble_op_latency_usec_bucket{region=\"${region}\", job=\"buildbuddy-app\", pebble_id=\"${cache_name}\"}[1m])) by (le,pebble_op))",
               "legendFormat": "__auto",
               "range": true,
               "refId": "A"
@@ -5182,7 +5182,7 @@
                 "uid": "vm"
               },
               "editorMode": "code",
-              "expr": "histogram_quantile(0.99, sum(rate(buildbuddy_remote_cache_pebble_cache_pebble_op_latency_usec_bucket{region=\"${region}\", pebble_id=\"${cache_name}\"}[1m])) by (le,pebble_op))",
+              "expr": "histogram_quantile(0.99, sum(rate(buildbuddy_remote_cache_pebble_cache_pebble_op_latency_usec_bucket{region=\"${region}\", job=\"buildbuddy-app\", pebble_id=\"${cache_name}\"}[1m])) by (le,pebble_op))",
               "legendFormat": "__auto",
               "range": true,
               "refId": "A"
@@ -5287,7 +5287,7 @@
                 "uid": "vm"
               },
               "editorMode": "code",
-              "expr": "sum(buildbuddy_remote_cache_pebble_cache_pebble_level_num_files{region=\"${region}\", cache_name=\"${cache_name}\"}) by (level)",
+              "expr": "sum(buildbuddy_remote_cache_pebble_cache_pebble_level_num_files{region=\"${region}\", job=\"buildbuddy-app\", cache_name=\"${cache_name}\"}) by (level)",
               "legendFormat": "{{level}}",
               "range": true,
               "refId": "A"
@@ -5379,7 +5379,7 @@
                 "uid": "vm"
               },
               "editorMode": "code",
-              "expr": "sum(buildbuddy_remote_cache_pebble_cache_pebble_level_size_bytes{region=\"${region}\", cache_name=\"${cache_name}\"}) by (level)",
+              "expr": "sum(buildbuddy_remote_cache_pebble_cache_pebble_level_size_bytes{region=\"${region}\", job=\"buildbuddy-app\", cache_name=\"${cache_name}\"}) by (level)",
               "legendFormat": "{{level}}",
               "range": true,
               "refId": "A"
@@ -5471,7 +5471,7 @@
                 "uid": "vm"
               },
               "editorMode": "code",
-              "expr": "sum(buildbuddy_remote_cache_pebble_cache_pebble_level_score{region=\"${region}\", cache_name=\"${cache_name}\"}) by (level)",
+              "expr": "sum(buildbuddy_remote_cache_pebble_cache_pebble_level_score{region=\"${region}\", job=\"buildbuddy-app\", cache_name=\"${cache_name}\"}) by (level)",
               "legendFormat": "{{level}}",
               "range": true,
               "refId": "A"
@@ -5563,7 +5563,7 @@
                 "uid": "vm"
               },
               "editorMode": "code",
-              "expr": "sum(rate(buildbuddy_remote_cache_pebble_cache_pebble_level_bytes_in_count{region=\"${region}\", cache_name=\"${cache_name}\"}[1m])) by (level)",
+              "expr": "sum(rate(buildbuddy_remote_cache_pebble_cache_pebble_level_bytes_in_count{region=\"${region}\", job=\"buildbuddy-app\", cache_name=\"${cache_name}\"}[1m])) by (level)",
               "legendFormat": "{{level}}",
               "range": true,
               "refId": "A"
@@ -5655,7 +5655,7 @@
                 "uid": "vm"
               },
               "editorMode": "code",
-              "expr": "sum(rate(buildbuddy_remote_cache_pebble_cache_pebble_level_bytes_ingested_count{region=\"${region}\", cache_name=\"${cache_name}\"}[1m])) by (level)",
+              "expr": "sum(rate(buildbuddy_remote_cache_pebble_cache_pebble_level_bytes_ingested_count{region=\"${region}\", job=\"buildbuddy-app\", cache_name=\"${cache_name}\"}[1m])) by (level)",
               "legendFormat": "{{level}}",
               "range": true,
               "refId": "A"
@@ -5747,7 +5747,7 @@
                 "uid": "vm"
               },
               "editorMode": "code",
-              "expr": "sum(rate(buildbuddy_remote_cache_pebble_cache_pebble_level_bytes_moved_count{region=\"${region}\", cache_name=\"${cache_name}\"}[1m])) by (level)",
+              "expr": "sum(rate(buildbuddy_remote_cache_pebble_cache_pebble_level_bytes_moved_count{region=\"${region}\", job=\"buildbuddy-app\", cache_name=\"${cache_name}\"}[1m])) by (level)",
               "legendFormat": "{{level}}",
               "range": true,
               "refId": "A"
@@ -5839,7 +5839,7 @@
                 "uid": "vm"
               },
               "editorMode": "code",
-              "expr": "sum(rate(buildbuddy_remote_cache_pebble_cache_pebble_level_bytes_read_count{region=\"${region}\", cache_name=\"${cache_name}\"}[1m])) by (level)",
+              "expr": "sum(rate(buildbuddy_remote_cache_pebble_cache_pebble_level_bytes_read_count{region=\"${region}\", job=\"buildbuddy-app\", cache_name=\"${cache_name}\"}[1m])) by (level)",
               "legendFormat": "{{level}}",
               "range": true,
               "refId": "A"
@@ -5931,7 +5931,7 @@
                 "uid": "vm"
               },
               "editorMode": "code",
-              "expr": "sum(rate(buildbuddy_remote_cache_pebble_cache_pebble_level_bytes_compacted_count{region=\"${region}\", cache_name=\"${cache_name}\"}[1m])) by (level)",
+              "expr": "sum(rate(buildbuddy_remote_cache_pebble_cache_pebble_level_bytes_compacted_count{region=\"${region}\", job=\"buildbuddy-app\", cache_name=\"${cache_name}\"}[1m])) by (level)",
               "legendFormat": "{{level}}",
               "range": true,
               "refId": "A"
@@ -6023,7 +6023,7 @@
                 "uid": "vm"
               },
               "editorMode": "code",
-              "expr": "sum(rate(buildbuddy_remote_cache_pebble_cache_pebble_level_bytes_flushed_count{region=\"${region}\", cache_name=\"${cache_name}\"}[1m])) by (level)",
+              "expr": "sum(rate(buildbuddy_remote_cache_pebble_cache_pebble_level_bytes_flushed_count{region=\"${region}\", job=\"buildbuddy-app\", cache_name=\"${cache_name}\"}[1m])) by (level)",
               "legendFormat": "{{level}}",
               "range": true,
               "refId": "A"
@@ -6115,7 +6115,7 @@
                 "uid": "vm"
               },
               "editorMode": "code",
-              "expr": "sum(rate(buildbuddy_remote_cache_pebble_cache_pebble_level_tables_compacted_count{region=\"${region}\", cache_name=\"${cache_name}\"}[1m])) by (level)",
+              "expr": "sum(rate(buildbuddy_remote_cache_pebble_cache_pebble_level_tables_compacted_count{region=\"${region}\", job=\"buildbuddy-app\", cache_name=\"${cache_name}\"}[1m])) by (level)",
               "legendFormat": "{{level}}",
               "range": true,
               "refId": "A"
@@ -6207,7 +6207,7 @@
                 "uid": "vm"
               },
               "editorMode": "code",
-              "expr": "sum(rate(buildbuddy_remote_cache_pebble_cache_pebble_level_tables_flushed_count{region=\"${region}\", cache_name=\"${cache_name}\"}[1m])) by (level)",
+              "expr": "sum(rate(buildbuddy_remote_cache_pebble_cache_pebble_level_tables_flushed_count{region=\"${region}\", job=\"buildbuddy-app\", cache_name=\"${cache_name}\"}[1m])) by (level)",
               "legendFormat": "{{level}}",
               "range": true,
               "refId": "A"
@@ -6299,7 +6299,7 @@
                 "uid": "vm"
               },
               "editorMode": "code",
-              "expr": "sum(rate(buildbuddy_remote_cache_pebble_cache_pebble_level_tables_ingested_count{region=\"${region}\", cache_name=\"${cache_name}\"}[1m])) by (level)",
+              "expr": "sum(rate(buildbuddy_remote_cache_pebble_cache_pebble_level_tables_ingested_count{region=\"${region}\", job=\"buildbuddy-app\", cache_name=\"${cache_name}\"}[1m])) by (level)",
               "legendFormat": "{{level}}",
               "range": true,
               "refId": "A"
@@ -6391,7 +6391,7 @@
                 "uid": "vm"
               },
               "editorMode": "code",
-              "expr": "sum(rate(buildbuddy_remote_cache_pebble_cache_pebble_level_tables_moved_count{region=\"${region}\", cache_name=\"${cache_name}\"}[1m])) by (level)",
+              "expr": "sum(rate(buildbuddy_remote_cache_pebble_cache_pebble_level_tables_moved_count{region=\"${region}\", job=\"buildbuddy-app\", cache_name=\"${cache_name}\"}[1m])) by (level)",
               "legendFormat": "{{level}}",
               "range": true,
               "refId": "A"
@@ -6416,7 +6416,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 10
+        "y": 9
       },
       "id": 264,
       "panels": [
@@ -7049,7 +7049,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 13
+        "y": 10
       },
       "id": 38,
       "panels": [
@@ -7596,7 +7596,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 14
+        "y": 11
       },
       "id": 458,
       "panels": [
@@ -8241,7 +8241,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 15
+        "y": 12
       },
       "id": 48,
       "panels": [
@@ -8629,7 +8629,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 16
+        "y": 13
       },
       "id": 384,
       "panels": [
@@ -9903,7 +9903,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 17
+        "y": 14
       },
       "id": 107,
       "panels": [
@@ -10474,475 +10474,6 @@
     },
     {
       "collapsed": true,
-      "gridPos": {
-        "h": 1,
-        "w": 24,
-        "x": 0,
-        "y": 18
-      },
-      "id": 7916,
-      "panels": [
-        {
-          "aliasColors": {
-            "Failure": "dark-red",
-            "failure": "red",
-            "success": "green"
-          },
-          "bars": false,
-          "collapsed": true,
-          "dashLength": 10,
-          "dashes": false,
-          "datasource": {
-            "type": "prometheus",
-            "uid": "vm"
-          },
-          "fill": 1,
-          "fillGradient": 0,
-          "gridPos": {
-            "h": 8,
-            "w": 12,
-            "x": 0,
-            "y": 19
-          },
-          "hiddenSeries": false,
-          "id": 8022,
-          "legend": {
-            "avg": false,
-            "current": false,
-            "max": false,
-            "min": false,
-            "rightSide": true,
-            "show": true,
-            "total": false,
-            "values": false
-          },
-          "lines": true,
-          "linewidth": 1,
-          "nullPointMode": "null",
-          "options": {
-            "alertThreshold": true
-          },
-          "percentage": false,
-          "pluginVersion": "10.1.0",
-          "pointradius": 2,
-          "points": false,
-          "renderer": "flot",
-          "seriesOverrides": [],
-          "spaceLength": 10,
-          "stack": false,
-          "steppedLine": false,
-          "targets": [
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "vm"
-              },
-              "editorMode": "code",
-              "expr": "sum by (status) (rate(buildbuddy_proxy_byte_stream_reads{region=\"${region}\"}[${window}]))",
-              "interval": "",
-              "legendFormat": "{{invocation_status}}",
-              "queryType": "randomWalk",
-              "range": true,
-              "refId": "A"
-            }
-          ],
-          "thresholds": [],
-          "timeRegions": [],
-          "title": "Bytestream Proxy Performance",
-          "tooltip": {
-            "shared": true,
-            "sort": 0,
-            "value_type": "individual"
-          },
-          "type": "graph",
-          "xaxis": {
-            "mode": "time",
-            "show": true,
-            "values": []
-          },
-          "yaxes": [
-            {
-              "$$hashKey": "object:608",
-              "format": "ops",
-              "logBase": 1,
-              "min": "0",
-              "show": true
-            },
-            {
-              "$$hashKey": "object:609",
-              "format": "short",
-              "logBase": 1,
-              "show": true
-            }
-          ],
-          "yaxis": {
-            "align": false
-          }
-        },
-        {
-          "aliasColors": {
-            "Failure": "dark-red",
-            "failure": "red",
-            "success": "green"
-          },
-          "bars": false,
-          "collapsed": true,
-          "dashLength": 10,
-          "dashes": false,
-          "datasource": {
-            "type": "prometheus",
-            "uid": "vm"
-          },
-          "fill": 1,
-          "fillGradient": 0,
-          "gridPos": {
-            "h": 8,
-            "w": 12,
-            "x": 12,
-            "y": 19
-          },
-          "hiddenSeries": false,
-          "id": 8128,
-          "legend": {
-            "avg": false,
-            "current": false,
-            "max": false,
-            "min": false,
-            "rightSide": true,
-            "show": true,
-            "total": false,
-            "values": false
-          },
-          "lines": true,
-          "linewidth": 1,
-          "nullPointMode": "null",
-          "options": {
-            "alertThreshold": true
-          },
-          "percentage": false,
-          "pluginVersion": "10.1.0",
-          "pointradius": 2,
-          "points": false,
-          "renderer": "flot",
-          "seriesOverrides": [
-            {
-              "$$hashKey": "object:590",
-              "alias": "/digest.*/",
-              "yaxis": 2
-            }
-          ],
-          "spaceLength": 10,
-          "stack": false,
-          "steppedLine": false,
-          "targets": [
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "vm"
-              },
-              "editorMode": "code",
-              "expr": "sum by (status) (rate(buildbuddy_proxy_content_addressable_storage_reads{region=\"${region}\"}[${window}]))",
-              "format": "time_series",
-              "interval": "",
-              "legendFormat": "request {{status}}",
-              "queryType": "randomWalk",
-              "range": true,
-              "refId": "A"
-            },
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "vm"
-              },
-              "editorMode": "code",
-              "expr": "sum by (status) (rate(buildbuddy_proxy_content_addressable_storage_digest_reads{region=\"${region}\"}[${window}]))",
-              "hide": false,
-              "instant": false,
-              "legendFormat": "digest {{status}}",
-              "range": true,
-              "refId": "B"
-            }
-          ],
-          "thresholds": [],
-          "timeRegions": [],
-          "title": "CAS Proxy Performance",
-          "tooltip": {
-            "shared": true,
-            "sort": 0,
-            "value_type": "individual"
-          },
-          "type": "graph",
-          "xaxis": {
-            "mode": "time",
-            "show": true,
-            "values": []
-          },
-          "yaxes": [
-            {
-              "$$hashKey": "object:608",
-              "format": "string",
-              "label": "",
-              "logBase": 1,
-              "min": "0",
-              "show": true
-            },
-            {
-              "$$hashKey": "object:609",
-              "format": "ops",
-              "label": "",
-              "logBase": 1,
-              "min": "0",
-              "show": true
-            }
-          ],
-          "yaxis": {
-            "align": true
-          }
-        },
-        {
-          "aliasColors": {
-            "Failure": "dark-red",
-            "failure": "red",
-            "success": "green"
-          },
-          "bars": false,
-          "collapsed": true,
-          "dashLength": 10,
-          "dashes": false,
-          "datasource": {
-            "type": "prometheus",
-            "uid": "vm"
-          },
-          "fieldConfig": {
-            "defaults": {},
-            "overrides": [
-              {
-                "matcher": {
-                  "id": "byFrameRefID",
-                  "options": "B"
-                },
-                "properties": [
-                  {
-                    "id": "unit",
-                    "value": "reqps"
-                  }
-                ]
-              }
-            ]
-          },
-          "fill": 1,
-          "fillGradient": 0,
-          "gridPos": {
-            "h": 8,
-            "w": 12,
-            "x": 0,
-            "y": 27
-          },
-          "hiddenSeries": false,
-          "id": 8406,
-          "legend": {
-            "avg": false,
-            "current": false,
-            "max": false,
-            "min": false,
-            "rightSide": true,
-            "show": true,
-            "total": false,
-            "values": false
-          },
-          "lines": true,
-          "linewidth": 1,
-          "nullPointMode": "null",
-          "options": {
-            "alertThreshold": true
-          },
-          "percentage": false,
-          "pluginVersion": "10.1.0",
-          "pointradius": 2,
-          "points": false,
-          "renderer": "flot",
-          "seriesOverrides": [
-            {
-              "$$hashKey": "object:435",
-              "alias": "/request.*/",
-              "yaxis": 2
-            }
-          ],
-          "spaceLength": 10,
-          "stack": false,
-          "steppedLine": false,
-          "targets": [
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "vm"
-              },
-              "editorMode": "code",
-              "expr": "sum by (status) (rate(buildbuddy_proxy_remote_atime_updates{region=\"${region}\"}[${window}]))",
-              "interval": "",
-              "legendFormat": "{{status}}",
-              "queryType": "randomWalk",
-              "range": true,
-              "refId": "A"
-            }
-          ],
-          "thresholds": [],
-          "timeRegions": [],
-          "title": "Remote Atime Updates (per-digest)",
-          "tooltip": {
-            "shared": true,
-            "sort": 0,
-            "value_type": "individual"
-          },
-          "type": "graph",
-          "xaxis": {
-            "mode": "time",
-            "show": true,
-            "values": []
-          },
-          "yaxes": [
-            {
-              "$$hashKey": "object:608",
-              "format": "reqps",
-              "label": "",
-              "logBase": 1,
-              "min": "0",
-              "show": true
-            },
-            {
-              "$$hashKey": "object:609",
-              "format": "reqps",
-              "label": "",
-              "logBase": 1,
-              "show": true
-            }
-          ],
-          "yaxis": {
-            "align": false
-          }
-        },
-        {
-          "aliasColors": {
-            "Failure": "dark-red",
-            "failure": "red",
-            "success": "green"
-          },
-          "bars": false,
-          "collapsed": true,
-          "dashLength": 10,
-          "dashes": false,
-          "datasource": {
-            "type": "prometheus",
-            "uid": "vm"
-          },
-          "fieldConfig": {
-            "defaults": {},
-            "overrides": [
-              {
-                "matcher": {
-                  "id": "byFrameRefID",
-                  "options": "B"
-                },
-                "properties": [
-                  {
-                    "id": "unit",
-                    "value": "reqps"
-                  }
-                ]
-              }
-            ]
-          },
-          "fill": 1,
-          "fillGradient": 0,
-          "gridPos": {
-            "h": 8,
-            "w": 12,
-            "x": 12,
-            "y": 27
-          },
-          "hiddenSeries": false,
-          "id": 8745,
-          "legend": {
-            "avg": false,
-            "current": false,
-            "max": false,
-            "min": false,
-            "rightSide": true,
-            "show": true,
-            "total": false,
-            "values": false
-          },
-          "lines": true,
-          "linewidth": 1,
-          "nullPointMode": "null",
-          "options": {
-            "alertThreshold": true
-          },
-          "percentage": false,
-          "pluginVersion": "10.1.0",
-          "pointradius": 2,
-          "points": false,
-          "renderer": "flot",
-          "seriesOverrides": [],
-          "spaceLength": 10,
-          "stack": false,
-          "steppedLine": false,
-          "targets": [
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "vm"
-              },
-              "editorMode": "code",
-              "expr": "sum by (status) (rate(buildbuddy_proxy_remote_atime_update_requests{region=\"${region}\"}[${window}]))",
-              "hide": false,
-              "instant": false,
-              "legendFormat": "{{status}}",
-              "range": true,
-              "refId": "B"
-            }
-          ],
-          "thresholds": [],
-          "timeRegions": [],
-          "title": "Remote Atime Update Requests",
-          "tooltip": {
-            "shared": true,
-            "sort": 0,
-            "value_type": "individual"
-          },
-          "type": "graph",
-          "xaxis": {
-            "mode": "time",
-            "show": true,
-            "values": []
-          },
-          "yaxes": [
-            {
-              "$$hashKey": "object:608",
-              "format": "reqps",
-              "label": "",
-              "logBase": 1,
-              "min": "0",
-              "show": true
-            },
-            {
-              "$$hashKey": "object:609",
-              "format": "reqps",
-              "label": "",
-              "logBase": 1,
-              "show": true
-            }
-          ],
-          "yaxis": {
-            "align": false
-          }
-        }
-      ],
-      "title": "Cache proxy",
-      "type": "row"
-    },
-    {
-      "collapsed": true,
       "datasource": {
         "type": "prometheus",
         "uid": "vm"
@@ -10951,7 +10482,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 35
+        "y": 15
       },
       "id": 28,
       "panels": [
@@ -10974,7 +10505,7 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 27
+            "y": 16
           },
           "hiddenSeries": false,
           "id": 190,
@@ -11222,7 +10753,7 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 27
+            "y": 16
           },
           "id": 159,
           "options": {
@@ -11321,7 +10852,7 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 35
+            "y": 24
           },
           "hiddenSeries": false,
           "id": 210,
@@ -11460,7 +10991,7 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 35
+            "y": 24
           },
           "id": 1209,
           "options": {
@@ -11555,7 +11086,7 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 43
+            "y": 32
           },
           "id": 31,
           "options": {
@@ -11605,7 +11136,7 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 43
+            "y": 32
           },
           "hiddenSeries": false,
           "id": 178,
@@ -11755,7 +11286,7 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 51
+            "y": 40
           },
           "id": 8505,
           "options": {
@@ -11872,7 +11403,7 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 51
+            "y": 40
           },
           "id": 8606,
           "options": {
@@ -12011,7 +11542,7 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 59
+            "y": 48
           },
           "id": 1216,
           "options": {
@@ -12141,7 +11672,7 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 59
+            "y": 48
           },
           "id": 1231,
           "options": {
@@ -12225,7 +11756,7 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 67
+            "y": 56
           },
           "hiddenSeries": false,
           "id": 33,
@@ -12317,7 +11848,7 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 67
+            "y": 56
           },
           "hiddenSeries": false,
           "id": 35,
@@ -12407,7 +11938,7 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 75
+            "y": 64
           },
           "hiddenSeries": false,
           "id": 129,
@@ -12500,7 +12031,7 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 75
+            "y": 64
           },
           "hiddenSeries": false,
           "id": 102,
@@ -12641,7 +12172,7 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 83
+            "y": 72
           },
           "id": 1195,
           "options": {
@@ -12688,7 +12219,7 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 83
+            "y": 72
           },
           "hiddenSeries": false,
           "id": 180,
@@ -12830,7 +12361,7 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 91
+            "y": 80
           },
           "id": 1202,
           "options": {
@@ -12989,7 +12520,7 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 91
+            "y": 80
           },
           "id": 1196,
           "options": {
@@ -13047,7 +12578,7 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 99
+            "y": 88
           },
           "id": 7139,
           "options": {
@@ -13081,7 +12612,7 @@
             "yAxis": {
               "axisPlacement": "left",
               "reverse": false,
-              "unit": "µs"
+              "unit": "percentunit"
             }
           },
           "pluginVersion": "10.1.0",
@@ -13092,7 +12623,7 @@
                 "uid": "vm"
               },
               "editorMode": "code",
-              "expr": "sum by (le) (rate(buildbuddy_remote_execution_task_pressure_stall_duration_usec_bucket{resource=\"cpu\", stall_type=\"full\"}[${window}]))",
+              "expr": "sum by (le) (rate(buildbuddy_remote_execution_task_pressure_stall_duration_fraction_bucket{resource=\"cpu\", stall_type=\"full\"}[${window}]))",
               "format": "heatmap",
               "instant": false,
               "legendFormat": "__auto",
@@ -13128,7 +12659,7 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 99
+            "y": 88
           },
           "id": 7145,
           "options": {
@@ -13162,7 +12693,7 @@
             "yAxis": {
               "axisPlacement": "left",
               "reverse": false,
-              "unit": "µs"
+              "unit": "percentunit"
             }
           },
           "pluginVersion": "10.1.0",
@@ -13173,7 +12704,7 @@
                 "uid": "vm"
               },
               "editorMode": "code",
-              "expr": "sum by (le) (rate(buildbuddy_remote_execution_task_pressure_stall_duration_usec_bucket{resource=\"cpu\", stall_type=\"some\"}[${window}]))",
+              "expr": "sum by (le) (rate(buildbuddy_remote_execution_task_pressure_stall_duration_fraction_bucket{resource=\"cpu\", stall_type=\"some\"}[${window}]))",
               "format": "heatmap",
               "instant": false,
               "legendFormat": "__auto",
@@ -13209,7 +12740,7 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 107
+            "y": 96
           },
           "id": 7151,
           "options": {
@@ -13243,7 +12774,7 @@
             "yAxis": {
               "axisPlacement": "left",
               "reverse": false,
-              "unit": "µs"
+              "unit": "percentunit"
             }
           },
           "pluginVersion": "10.1.0",
@@ -13254,7 +12785,7 @@
                 "uid": "vm"
               },
               "editorMode": "code",
-              "expr": "sum by (le) (rate(buildbuddy_remote_execution_task_pressure_stall_duration_usec_bucket{resource=\"memory\", stall_type=\"full\"}[${window}]))",
+              "expr": "sum by (le) (rate(buildbuddy_remote_execution_task_pressure_stall_duration_fraction_bucket{resource=\"memory\", stall_type=\"full\"}[${window}]))",
               "format": "heatmap",
               "instant": false,
               "legendFormat": "__auto",
@@ -13290,7 +12821,7 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 107
+            "y": 96
           },
           "id": 7157,
           "options": {
@@ -13324,7 +12855,7 @@
             "yAxis": {
               "axisPlacement": "left",
               "reverse": false,
-              "unit": "µs"
+              "unit": "percentunit"
             }
           },
           "pluginVersion": "10.1.0",
@@ -13335,7 +12866,7 @@
                 "uid": "vm"
               },
               "editorMode": "code",
-              "expr": "sum by (le) (rate(buildbuddy_remote_execution_task_pressure_stall_duration_usec_bucket{resource=\"memory\", stall_type=\"some\"}[${window}]))",
+              "expr": "sum by (le) (rate(buildbuddy_remote_execution_task_pressure_stall_duration_fraction_bucket{resource=\"memory\", stall_type=\"some\"}[${window}]))",
               "format": "heatmap",
               "instant": false,
               "legendFormat": "__auto",
@@ -13371,7 +12902,7 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 115
+            "y": 104
           },
           "id": 7163,
           "options": {
@@ -13405,7 +12936,7 @@
             "yAxis": {
               "axisPlacement": "left",
               "reverse": false,
-              "unit": "µs"
+              "unit": "percentunit"
             }
           },
           "pluginVersion": "10.1.0",
@@ -13416,7 +12947,7 @@
                 "uid": "vm"
               },
               "editorMode": "code",
-              "expr": "sum by (le) (rate(buildbuddy_remote_execution_task_pressure_stall_duration_usec_bucket{resource=\"io\", stall_type=\"full\"}[${window}]))",
+              "expr": "sum by (le) (rate(buildbuddy_remote_execution_task_pressure_stall_duration_fraction_bucket{resource=\"io\", stall_type=\"full\"}[${window}]))",
               "format": "heatmap",
               "instant": false,
               "legendFormat": "__auto",
@@ -13452,7 +12983,7 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 115
+            "y": 104
           },
           "id": 7169,
           "options": {
@@ -13486,7 +13017,7 @@
             "yAxis": {
               "axisPlacement": "left",
               "reverse": false,
-              "unit": "µs"
+              "unit": "percentunit"
             }
           },
           "pluginVersion": "10.1.0",
@@ -13497,7 +13028,7 @@
                 "uid": "vm"
               },
               "editorMode": "code",
-              "expr": "sum by (le) (rate(buildbuddy_remote_execution_task_pressure_stall_duration_usec_bucket{resource=\"io\", stall_type=\"some\"}[${window}]))",
+              "expr": "sum by (le) (rate(buildbuddy_remote_execution_task_pressure_stall_duration_fraction_bucket{resource=\"io\", stall_type=\"some\"}[${window}]))",
               "format": "heatmap",
               "instant": false,
               "legendFormat": "__auto",
@@ -13532,7 +13063,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 38
+        "y": 16
       },
       "id": 83,
       "panels": [
@@ -13945,7 +13476,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 43
+        "y": 18
       },
       "id": 71,
       "panels": [
@@ -14386,7 +13917,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 48
+        "y": 20
       },
       "id": 1088,
       "panels": [
@@ -14728,7 +14259,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 54
+        "y": 21
       },
       "id": 8,
       "panels": [
@@ -14960,7 +14491,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 55
+        "y": 22
       },
       "id": 1346,
       "panels": [
@@ -15474,7 +15005,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 56
+        "y": 23
       },
       "id": 5641,
       "panels": [
@@ -15955,7 +15486,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 57
+        "y": 24
       },
       "id": 7275,
       "panels": [
@@ -16637,7 +16168,7 @@
           "refId": "StandardVariableQuery"
         },
         "refresh": 1,
-        "regex": "buildbuddy-app|cache-proxy|executor.*",
+        "regex": "buildbuddy-app|executor.*",
         "skipUrlSync": false,
         "sort": 0,
         "tagValuesQuery": "",
@@ -16768,14 +16299,14 @@
           "type": "prometheus",
           "uid": "vm"
         },
-        "definition": "label_values(buildbuddy_remote_cache_disk_cache_partition_capacity_bytes{region=\"$region\", namespace!=\"raft-dev\"},cache_name)",
+        "definition": "label_values(buildbuddy_remote_cache_disk_cache_partition_capacity_bytes{region=\"$region\", job=\"buildbuddy-app\", namespace!=\"raft-dev\"},cache_name)",
         "hide": 0,
         "includeAll": true,
         "multi": false,
         "name": "cache_name",
         "options": [],
         "query": {
-          "query": "label_values(buildbuddy_remote_cache_disk_cache_partition_capacity_bytes{region=\"$region\", namespace!=\"raft-dev\"},cache_name)",
+          "query": "label_values(buildbuddy_remote_cache_disk_cache_partition_capacity_bytes{region=\"$region\", job=\"buildbuddy-app\", namespace!=\"raft-dev\"},cache_name)",
           "refId": "PrometheusVariableQueryEditor-VariableQuery"
         },
         "refresh": 1,
