@@ -1,8 +1,10 @@
 package firecracker
 
 import (
+	"github.com/buildbuddy-io/buildbuddy/enterprise/server/remote_execution/block_io"
+
 	fcpb "github.com/buildbuddy-io/buildbuddy/proto/firecracker"
-	dockerclient "github.com/docker/docker/client"
+	scpb "github.com/buildbuddy-io/buildbuddy/proto/scheduler"
 )
 
 type ContainerOpts struct {
@@ -31,19 +33,24 @@ type ContainerOpts struct {
 	// The "USER[:GROUP]" spec to run commands as (optional).
 	User string
 
-	// DockerClient can optionally be specified to pull container images via
-	// Docker. This is useful for de-duping in-flight image pull operations and
-	// making use of the local Docker cache for images. If not specified, images
-	// will be pulled directly by skopeo and no image pull de-duping will be
-	// performed.
-	DockerClient *dockerclient.Client
-
 	// The action directory with inputs / outputs.
 	ActionWorkingDirectory string
 
 	// CPUWeightMillis is the CPU weight to assign to this VM, expressed as
 	// CPU-millis. This is set to the task size.
 	CPUWeightMillis int64
+
+	// CgroupParent is the parent cgroup path relative to the cgroup root.
+	CgroupParent string
+
+	// CgroupSettings are settings applied to cgroup in which jailer executes.
+	CgroupSettings *scpb.CgroupSettings
+
+	// BlockDevice sets the block device for restricting IO via cgroup. Note
+	// that the firecracker cgroup does not affect IO for virtual block devices
+	// (VBD) or memory snapshots (UFFD) since the server for these devices runs
+	// in the executor process.
+	BlockDevice *block_io.Device
 
 	// Optional flags -- these will default to sane values.
 	// They are here primarily for debugging and running
