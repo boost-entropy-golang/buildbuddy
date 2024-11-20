@@ -707,8 +707,9 @@ func (sm *Replica) clearInMemoryReplicaState() {
 	sm.partitionMetadataMu.Unlock()
 }
 
-// clearInMemoryReplicaState clears in-memory and on-disk replica state.
-func (sm *Replica) clearReplicaState(db ReplicaWriter) error {
+// clearReplica clears in-memory replica state, and data (both in local range and
+// in the range specified by range descriptor) on the disk.
+func (sm *Replica) clearReplica(db ReplicaWriter) error {
 	// Remove range from the store
 	sm.rangeMu.Lock()
 	rangeDescriptor := sm.rangeDescriptor
@@ -720,11 +721,15 @@ func (sm *Replica) clearReplicaState(db ReplicaWriter) error {
 
 	wb := db.NewIndexedBatch()
 
-	prefix := sm.replicaPrefix()
-	replicaLocalPrefix := append(prefix, []byte(constants.LocalPrefix)...)
-	start, end := keys.Range(replicaLocalPrefix)
+	start, end := keys.Range(sm.replicaPrefix())
 	if err := wb.DeleteRange(start, end, nil /*ignored write options*/); err != nil {
 		return err
+	}
+	if rangeDescriptor != nil && rangeDescriptor.GetStart() != nil && rangeDescriptor.GetEnd() != nil {
+
+		if err := wb.DeleteRange(rangeDescriptor.GetStart(), rangeDescriptor.GetEnd(), nil /*ignored write options*/); err != nil {
+			return err
+		}
 	}
 	if err := wb.Commit(pebble.Sync); err != nil {
 		return err
@@ -1385,7 +1390,7 @@ func (sm *Replica) getLastRespFromSession(db ReplicaReader, reqSession *rfpb.Ses
 		return storedSession.GetRspData(), nil
 	}
 	if storedSession.GetIndex() > reqSession.GetIndex() {
-		return nil, status.InternalErrorf("%s getLastRespFromSession session index mismatch: storedSession.Index=%d and reqSession.Index=%d", sm.name(), storedSession.GetIndex(), reqSession.GetIndex())
+		return nil, status.InternalErrorf("%s getLastRespFromSession session (id=%q) index mismatch: storedSession (Index=%d, EntryIndex=%d) and reqSession(Index=%d, EntryIndex=%d) and last applied index=%d", sm.name(), storedSession.GetId(), storedSession.GetIndex(), storedSession.GetEntryIndex(), reqSession.GetIndex(), reqSession.GetEntryIndex(), sm.lastAppliedIndex)
 	}
 	// This is a new request.
 	return nil, nil
@@ -1407,6 +1412,10 @@ func (sm *Replica) commitIndexBatch(wb pebble.Batch, entryIndex uint64) error {
 	// If the batch commit was successful, update the replica's in-
 	// memory state.
 	sm.updateInMemoryState(wb)
+
+	if sm.lastAppliedIndex >= entryIndex {
+		sm.log.Errorf("[%s] lastAppliedIndex not moving forward: current %d, new: %d", sm.lastAppliedIndex, entryIndex)
+	}
 	sm.lastAppliedIndex = entryIndex
 	return nil
 }
@@ -1439,9 +1448,12 @@ func (sm *Replica) singleUpdate(db pebble.IPebbleDB, entry dbsm.Entry) (dbsm.Ent
 	defer wb.Close()
 
 	reqSession := batchReq.GetSession()
+	if reqSession != nil {
+		reqSession.EntryIndex = proto.Uint64(entry.Index)
+	}
 	lastRspData, err := sm.getLastRespFromSession(db, reqSession)
 	if err != nil {
-		return entry, err
+		return entry, status.InternalErrorf("[%s] failed to singleUpdate entry %d: %s", sm.name(), entry.Index, err)
 	}
 	// We have executed this command in the past, return the stored response and
 	// skip execution.
@@ -1943,13 +1955,13 @@ func (sm *Replica) SaveSnapshot(preparedSnap interface{}, w io.Writer, quit <-ch
 // RecoverFromSnapshot is not required to synchronize its recovered in-core
 // state with that on disk.
 func (sm *Replica) RecoverFromSnapshot(r io.Reader, quit <-chan struct{}) error {
-	log.Debugf("RecoverFromSnapshot for %s", sm.name())
+	sm.log.Debugf("RecoverFromSnapshot for %s", sm.name())
 	db, err := sm.leaser.DB()
 	if err != nil {
 		return err
 	}
 
-	sm.clearReplicaState(db)
+	sm.clearReplica(db)
 	err = sm.ApplySnapshotFromReader(r, db)
 	db.Close() // close the DB before handling errors or checking keys.
 	if err != nil {
