@@ -843,20 +843,7 @@ func (c *FirecrackerContainer) pauseVM(ctx context.Context) error {
 		log.CtxErrorf(ctx, "Error pausing VM: %s", err)
 		return err
 	}
-	// Now that we've paused the VM, it's a good time to Sync the NBD backing
-	// files. This is particularly important when the files are backed with an
-	// mmap. The File backing the mmap may differ from the in-memory contents
-	// until we explicitly call msync.
-	if c.workspaceStore != nil {
-		if err := c.workspaceStore.Sync(); err != nil {
-			return status.WrapError(err, "failed to sync workspace device store")
-		}
-	}
-	if c.scratchStore != nil {
-		if err := c.scratchStore.Sync(); err != nil {
-			return status.WrapError(err, "failed to sync scratchfs device store")
-		}
-	}
+
 	return nil
 }
 
@@ -2435,6 +2422,17 @@ func (c *FirecrackerContainer) remove(ctx context.Context) error {
 		c.memoryStore.Close()
 		c.memoryStore = nil
 	}
+
+	exists, err := disk.FileExists(ctx, filepath.Join(c.actionWorkingDir, ".BUILDBUDDY_INVALIDATE_SNAPSHOT"))
+	if err != nil {
+		log.CtxWarningf(ctx, "Failed to check existence of .BUILDBUDDY_INVALIDATE_SNAPSHOT: %s", err)
+	} else if exists {
+		_, err = snaploader.NewSnapshotService(c.env).InvalidateSnapshot(ctx, c.SnapshotKeySet().GetBranchKey())
+		if err != nil {
+			log.CtxWarningf(ctx, "Failed to invalidate snapshot despite existence of .BUILDBUDDY_INVALIDATE_SNAPSHOT: %s", err)
+		}
+	}
+
 	if err := os.RemoveAll(filepath.Dir(c.getChroot())); err != nil {
 		log.CtxErrorf(ctx, "Error removing chroot %q: %s", c.getChroot(), err)
 		lastErr = err
