@@ -201,13 +201,13 @@ func (s *taskSizer) Predict(ctx context.Context, task *repb.ExecutionTask) *scpb
 	return ApplyLimits(task, s.model.Predict(ctx, task))
 }
 
-func (s *taskSizer) Update(ctx context.Context, cmd *repb.Command, md *repb.ExecutedActionMetadata) error {
+func (s *taskSizer) Update(ctx context.Context, action *repb.Action, cmd *repb.Command, md *repb.ExecutedActionMetadata) error {
 	if !*useMeasuredSizes {
 		return nil
 	}
 	statusLabel := "ok"
 	defer func() {
-		props, err := platform.ParseProperties(&repb.ExecutionTask{Command: cmd})
+		props, err := platform.ParseProperties(&repb.ExecutionTask{Action: action, Command: cmd})
 		if err != nil {
 			log.CtxInfof(ctx, "Failed to parse task properties: %s", err)
 		}
@@ -410,7 +410,7 @@ func Requested(task *repb.ExecutionTask) *scpb.TaskSize {
 	}
 	cpu := int64(props.EstimatedComputeUnits * ComputeUnitsToMilliCPU)
 	mem := int64(props.EstimatedComputeUnits * ComputeUnitsToRAMBytes)
-	if props.EstimatedMemoryBytes > 0 {
+	if props.EstimatedMilliCPU > 0 {
 		cpu = props.EstimatedMilliCPU
 	}
 	if props.EstimatedMemoryBytes > 0 {

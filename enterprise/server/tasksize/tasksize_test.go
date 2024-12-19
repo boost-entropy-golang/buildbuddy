@@ -125,11 +125,11 @@ func TestRequested_BCUPlatformProps_ConvertsBCUToTaskSize(t *testing.T) {
 }
 
 func TestRequested_BCUPlatformProps_Overriden(t *testing.T) {
+	// only override ram
 	ts := tasksize.Requested(&repb.ExecutionTask{
 		Command: &repb.Command{
 			Platform: &repb.Platform{
 				Properties: []*repb.Platform_Property{
-					{Name: "EstimatedCPU", Value: "1"},
 					{Name: "EstimatedMemory", Value: "60000000"},
 					{Name: "estimatedcomputeunits", Value: "2"},
 				},
@@ -138,6 +138,22 @@ func TestRequested_BCUPlatformProps_Overriden(t *testing.T) {
 	})
 
 	assert.Equal(t, int64(60000000), ts.EstimatedMemoryBytes)
+	assert.Equal(t, int64(2*1000), ts.EstimatedMilliCpu)
+	assert.Equal(t, int64(0), ts.EstimatedFreeDiskBytes)
+
+	// only override cpu
+	ts = tasksize.Requested(&repb.ExecutionTask{
+		Command: &repb.Command{
+			Platform: &repb.Platform{
+				Properties: []*repb.Platform_Property{
+					{Name: "EstimatedCPU", Value: "1"},
+					{Name: "estimatedcomputeunits", Value: "2"},
+				},
+			},
+		},
+	})
+
+	assert.Equal(t, int64(2*2.5*1e9), ts.EstimatedMemoryBytes)
 	assert.Equal(t, int64(1000), ts.EstimatedMilliCpu)
 	assert.Equal(t, int64(0), ts.EstimatedFreeDiskBytes)
 }
@@ -252,7 +268,7 @@ func TestSizer_Get_ShouldReturnRecordedUsageStats(t *testing.T) {
 		// Set the completed timestamp so that the exec duration is 2 seconds.
 		ExecutionCompletedTimestamp: timestamppb.New(execStart.Add(2 * time.Second)),
 	}
-	err = sizer.Update(ctx, task.GetCommand(), md)
+	err = sizer.Update(ctx, task.GetAction(), task.GetCommand(), md)
 
 	require.NoError(t, err)
 
@@ -294,7 +310,7 @@ func TestSizer_RespectsMilliCPULimit(t *testing.T) {
 		ExecutionStartTimestamp:     timestamppb.New(execStart),
 		ExecutionCompletedTimestamp: timestamppb.New(execStart.Add(1 * time.Second)),
 	}
-	err = sizer.Update(ctx, task.GetCommand(), md)
+	err = sizer.Update(ctx, task.GetAction(), task.GetCommand(), md)
 	require.NoError(t, err)
 
 	ts := sizer.Get(ctx, task)
@@ -335,7 +351,7 @@ func TestSizer_RespectsMinimumSize(t *testing.T) {
 		ExecutionCompletedTimestamp: timestamppb.New(execStart.Add(1 * time.Second)),
 	}
 
-	err = sizer.Update(ctx, task.GetCommand(), md)
+	err = sizer.Update(ctx, task.GetAction(), task.GetCommand(), md)
 	require.NoError(t, err)
 
 	ts := sizer.Get(ctx, task)
@@ -351,7 +367,7 @@ func TestSizer_RespectsMinimumSize(t *testing.T) {
 			},
 		},
 	}
-	err = sizer.Update(ctx, task.GetCommand(), md)
+	err = sizer.Update(ctx, task.GetAction(), task.GetCommand(), md)
 	require.NoError(t, err)
 
 	ts = sizer.Get(ctx, task)
