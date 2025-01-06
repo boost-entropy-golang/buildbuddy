@@ -6,9 +6,9 @@ load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive", "http_file"
 # When changing this version, a new release of podman-static may be needed.
 # See dockerfiles/executor_image/README.md for instructions.
 # The checksums below will also need to be updated.
-PODMAN_VERSION = "v5.2.2"
-PODMAN_STATIC_SHA256_AMD64 = "70c56252d2ec4f2d1281134d51ec5545f93deb1107fb4956f88f855659a148fe"
-PODMAN_STATIC_SHA256_ARM64 = "06b97d39a9b4a75273dfb5e6400c2422f29f50783ca353de1dd112b6c11e9816"
+PODMAN_VERSION = "v5.3.1"
+PODMAN_STATIC_SHA256_AMD64 = "ca9c0b709604e8c22a6e31c002062bfedb08d082764d37a24266a0c7f4b4e16c"
+PODMAN_STATIC_SHA256_ARM64 = "31ec2bc932b84f52e601ea0b29bf4afe5963e2dfc6246fdb125ec0143e4fa4d3"
 
 # bazelisk run //:gazelle -- update-repos -from_file=go.mod -to_macro=deps.bzl%install_go_mod_dependencies -prune
 def install_go_mod_dependencies(workspace_name = "buildbuddy"):
@@ -6649,8 +6649,8 @@ def install_static_dependencies(workspace_name = "buildbuddy"):
             'filegroup(name = "rootlesskit.bin", srcs = ["rootlesskit"])',
             'filegroup(name = "rootlesskit-docker-proxy.bin", srcs = ["rootlesskit-docker-proxy"])',
         ]),
-        urls = ["https://github.com/rootless-containers/rootlesskit/releases/download/v2.1.0/rootlesskit-x86_64.tar.gz"],
-        sha256 = "1e4609a3d0ca67c4fc99fe9121870cf5ca46a438f43b151e9b54456d166f4b10",
+        urls = ["https://github.com/rootless-containers/rootlesskit/releases/download/v2.3.1/rootlesskit-x86_64.tar.gz"],
+        sha256 = "caafdce18e0959f078b4b478d4f352ebf3d556e373265fc7831f1a6d70219ee0",
     )
     http_archive(
         name = "com_github_rootless_containers_rootlesskit-linux-arm64",
@@ -6660,21 +6660,21 @@ def install_static_dependencies(workspace_name = "buildbuddy"):
             'filegroup(name = "rootlesskit.bin", srcs = ["rootlesskit"])',
             'filegroup(name = "rootlesskit-docker-proxy.bin", srcs = ["rootlesskit-docker-proxy"])',
         ]),
-        urls = ["https://github.com/rootless-containers/rootlesskit/releases/download/v2.1.0/rootlesskit-aarch64.tar.gz"],
-        sha256 = "b3a9b14b66f54351a2b9f8c0917062bfeab2dc89e9e7cb15f4cf0684a4a7281f",
+        urls = ["https://github.com/rootless-containers/rootlesskit/releases/download/v2.3.1/rootlesskit-aarch64.tar.gz"],
+        sha256 = "57bc67f71b8043961417325be13528d4f1e8ec90876cd34c38064431f457070f",
     )
 
     http_file(
         name = "com_github_opencontainers_runc_runc-linux-amd64",
-        urls = ["https://github.com/opencontainers/runc/releases/download/v1.2.0-rc.2/runc.amd64"],
-        sha256 = "7bf38e9bc6c7a3feb5ec92e5e333015ccd0f360cdd1810a5a13f5ab81731cd62",
+        urls = ["https://github.com/opencontainers/runc/releases/download/v1.2.3/runc.amd64"],
+        sha256 = "e6e8c8049b1910fce58fa68c057aaa5f42cee2a73834df5e59e5da7612d2739d",
         downloaded_file_path = "runc",
         executable = True,
     )
     http_file(
         name = "com_github_opencontainers_runc_runc-linux-arm64",
-        urls = ["https://github.com/opencontainers/runc/releases/download/v1.2.0-rc.2/runc.arm64"],
-        sha256 = "3741f07946c54a23ee443de84506c6e397d0d350f1f16f81ae4dd2c7d39d2651",
+        urls = ["https://github.com/opencontainers/runc/releases/download/v1.2.3/runc.arm64"],
+        sha256 = "4ef19ab21ce1ae5a01e1d3fa5b005e45cdf59f5d3ab32541c9e262cb2b2d3451",
         downloaded_file_path = "runc",
         executable = True,
     )
