@@ -1553,6 +1553,7 @@ type CodesearchService interface {
 
 type AuthService interface {
 	Authenticate(ctx context.Context, req *authpb.AuthenticateRequest) (*authpb.AuthenticateResponse, error)
+	GetPublicKeys(ctx context.Context, req *authpb.GetPublicKeysRequest) (*authpb.GetPublicKeysResponse, error)
 }
 
 type RegistryService interface {
@@ -1563,4 +1564,18 @@ type AtimeUpdater interface {
 	Enqueue(ctx context.Context, instanceName string, digests []*repb.Digest, digestFunction repb.DigestFunction_Value)
 	EnqueueByResourceName(ctx context.Context, downloadString string)
 	EnqueueByFindMissingRequest(ctx context.Context, req *repb.FindMissingBlobsRequest)
+}
+
+type CPULeaser interface {
+	// Acquire returns an []int set of CPUs that should be used as a cgroups
+	// cpuset. The returned cancel function *must* be called after a task
+	// has been completed, in order to free these CPUs for other tasks.
+	//
+	// The CPULeaser will attempt to return CPUs for exclusive use, but this
+	// is not guaranteed. It is the job of the CPULeaser to return the least
+	// loaded CPUs, so that no CPU is overloaded.
+	//
+	// If more CPUs are requested than the total available on the machine,
+	// the returned set of CPUs will be the set available to the machine.
+	Acquire(milliCPU int64, taskID string) ([]int, func())
 }
