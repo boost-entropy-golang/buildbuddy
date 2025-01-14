@@ -126,7 +126,7 @@ var (
 		"/proc/swaps",
 		"/proc/uptime",
 		"/proc/slabinfo",
-		"/sys/devices/system/cpu/online",
+		"/sys/devices/system/cpu",
 	}
 )
 
