@@ -17,7 +17,9 @@ import (
 	"github.com/buildbuddy-io/buildbuddy/server/util/status"
 	"github.com/buildbuddy-io/buildbuddy/server/util/usageutil"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/protobuf/encoding/protojson"
 
+	fcpb "github.com/buildbuddy-io/buildbuddy/proto/firecracker"
 	repb "github.com/buildbuddy-io/buildbuddy/proto/remote_execution"
 	scpb "github.com/buildbuddy-io/buildbuddy/proto/scheduler"
 	units "github.com/docker/go-units"
@@ -96,6 +98,8 @@ const (
 	IncludeSecretsPropertyName           = "include-secrets"
 	DefaultTimeoutPropertyName           = "default-timeout"
 	TerminationGracePeriodPropertyName   = "termination-grace-period"
+	SnapshotKeyOverridePropertyName      = "snapshot-key-override"
+	RetryPropertyName                    = "retry"
 
 	OperatingSystemPropertyName = "OSFamily"
 	LinuxOperatingSystemName    = "linux"
@@ -242,6 +246,19 @@ type Properties struct {
 	// EnvOverrides contains environment variables in the form NAME=VALUE to be
 	// applied as overrides to the action.
 	EnvOverrides []string
+
+	// OverrideSnapshotKey specifies a snapshot key that the action should start
+	// from.
+	// Only applies to recyclable firecracker actions.
+	OverrideSnapshotKey *fcpb.SnapshotKey
+
+	// Retry determines whether the scheduler should automatically retry
+	// transient errors.
+	// Should be set to false for non-idempotent commands, and clients should
+	// handle more fine-grained retry behavior.
+	// This property is ignored for bazel executions, because the bazel client
+	// handles retries itself.
+	Retry bool
 }
 
 // ContainerType indicates the type of containerization required by an executor.
@@ -331,6 +348,15 @@ func ParseProperties(task *repb.ExecutionTask) (*Properties, error) {
 		}
 	}
 
+	var overrideSnapshotKey *fcpb.SnapshotKey
+	if v, ok := m[strings.ToLower(SnapshotKeyOverridePropertyName)]; ok && v != "" {
+		key, err := parseSnapshotKeyJSON(v)
+		if err != nil {
+			return nil, err
+		}
+		overrideSnapshotKey = key
+	}
+
 	return &Properties{
 		OS:                        strings.ToLower(stringProp(m, OperatingSystemPropertyName, defaultOperatingSystemName)),
 		Arch:                      strings.ToLower(stringProp(m, CPUArchitecturePropertyName, defaultCPUArchitecture)),
@@ -370,6 +396,8 @@ func ParseProperties(task *repb.ExecutionTask) (*Properties, error) {
 		DisablePredictedTaskSize:  boolProp(m, disablePredictedTaskSizePropertyName, false),
 		ExtraArgs:                 stringListProp(m, extraArgsPropertyName),
 		EnvOverrides:              envOverrides,
+		OverrideSnapshotKey:       overrideSnapshotKey,
+		Retry:                     boolProp(m, RetryPropertyName, true),
 	}, nil
 }
 
@@ -704,6 +732,14 @@ func containerImageName(input string) string {
 	return strings.ReplaceAll(withoutDockerPrefix, registryRegionPlaceholder, *containerRegistryRegion)
 }
 
+func parseSnapshotKeyJSON(in string) (*fcpb.SnapshotKey, error) {
+	pk := &fcpb.SnapshotKey{}
+	if err := protojson.Unmarshal([]byte(in), pk); err != nil {
+		return nil, status.WrapError(err, "unmarshal SnapshotKey")
+	}
+	return pk, nil
+}
+
 func findValue(platform *repb.Platform, name string) (value string, ok bool) {
 	name = strings.ToLower(name)
 	for _, prop := range platform.GetProperties() {
@@ -767,4 +803,9 @@ func IsCICommand(cmd *repb.Command, platform *repb.Platform) bool {
 		return true
 	}
 	return false
+}
+
+func Retryable(task *repb.ExecutionTask) bool {
+	v := FindEffectiveValue(task, RetryPropertyName)
+	return v == "true" || v == ""
 }
