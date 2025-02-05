@@ -1283,17 +1283,21 @@ func (c *FirecrackerContainer) createAndAttachWorkspace(ctx context.Context) err
 		return nil
 	}
 
+	workspaceExt4Path := filepath.Join(c.getChroot(), workspaceFSName)
+	if err := c.createWorkspaceImage(ctx, c.actionWorkingDir, workspaceExt4Path); err != nil {
+		return status.WrapError(err, "failed to create workspace image")
+	}
+
 	conn, err := c.vmExecConn(ctx)
 	if err != nil {
 		return err
 	}
 	execClient := vmxpb.NewExecClient(conn)
 
-	workspaceExt4Path := filepath.Join(c.getChroot(), workspaceFSName)
-	if err := c.createWorkspaceImage(ctx, c.actionWorkingDir, workspaceExt4Path); err != nil {
-		return status.WrapError(err, "failed to create workspace image")
-	}
-
+	// UpdateGuestDrive can only be called after the VM boots (https://github.com/firecracker-microvm/firecracker/blob/c862760999f15d27034098a53a4d5bee3fba829d/src/firecracker/swagger/firecracker.yaml#L256-L260)
+	// The only way to tell if the VM booted seems to be monitoring its stdout.
+	// Instead we'll just wait for the vm exec server to start above, which
+	// happens after boot.
 	chrootRelativeImagePath := workspaceFSName
 	if err := c.machine.UpdateGuestDrive(ctx, workspaceDriveID, chrootRelativeImagePath); err != nil {
 		return status.UnavailableErrorf("error updating workspace drive attached to snapshot: %s", err)
@@ -1971,7 +1975,9 @@ func (c *FirecrackerContainer) dialVMExecServer(ctx context.Context) (*grpc.Clie
 
 	start := time.Now()
 	defer func() {
-		metrics.FirecrackerExecDialDurationUsec.Observe(float64(time.Since(start).Microseconds()))
+		metrics.FirecrackerExecDialDurationUsec.With(prometheus.Labels{
+			metrics.CreatedFromSnapshot: strconv.FormatBool(true),
+		}).Observe(float64(time.Since(start).Microseconds()))
 	}()
 
 	ctx, cancel := context.WithTimeout(ctx, vSocketDialTimeout)
