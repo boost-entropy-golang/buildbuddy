@@ -857,6 +857,7 @@ type SchedulerService interface {
 	ExistsTask(ctx context.Context, taskID string) (bool, error)
 	EnqueueTaskReservation(ctx context.Context, req *scpb.EnqueueTaskReservationRequest) (*scpb.EnqueueTaskReservationResponse, error)
 	ReEnqueueTask(ctx context.Context, req *scpb.ReEnqueueTaskRequest) (*scpb.ReEnqueueTaskResponse, error)
+	TaskExists(ctx context.Context, req *scpb.TaskExistsRequest) (*scpb.TaskExistsResponse, error)
 	GetExecutionNodes(ctx context.Context, req *scpb.GetExecutionNodesRequest) (*scpb.GetExecutionNodesResponse, error)
 	GetPoolInfo(ctx context.Context, os, requestedPool, workflowID string, poolType PoolType) (*PoolInfo, error)
 	GetSharedExecutorPoolGroupID() string
@@ -1236,9 +1237,6 @@ type LRU[V any] interface {
 
 	// Remove()s the oldest value in the LRU. (See Remove() above).
 	RemoveOldest() (V, bool)
-
-	// Returns metrics about the status of the LRU.
-	Metrics() string
 }
 
 // DistributedLock provides a way to serialize access to a resource, where the
