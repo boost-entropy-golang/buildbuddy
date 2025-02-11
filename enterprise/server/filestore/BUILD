@@ -5,11 +5,11 @@ package(default_visibility = ["//enterprise:__subpackages__"])
 go_library(
     name = "filestore",
     srcs = ["filestore.go"],
-    importpath = "github.com/buildbuddy-io/buildbuddy/enterprise/server/raft/filestore",
+    importpath = "github.com/buildbuddy-io/buildbuddy/enterprise/server/filestore",
     deps = [
-        "//proto:raft_go_proto",
         "//proto:remote_execution_go_proto",
         "//proto:resource_go_proto",
+        "//proto:storage_go_proto",
         "//server/backends/blobstore/gcs",
         "//server/interfaces",
         "//server/remote_cache/digest",
@@ -25,9 +25,9 @@ go_test(
     srcs = ["filestore_test.go"],
     deps = [
         ":filestore",
-        "//proto:raft_go_proto",
         "//proto:remote_execution_go_proto",
         "//proto:resource_go_proto",
+        "//proto:storage_go_proto",
         "//server/testutil/testdigest",
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",
