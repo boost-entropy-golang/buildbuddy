@@ -24,7 +24,6 @@ import (
 
 	"github.com/buildbuddy-io/buildbuddy/enterprise/server/bes_artifacts"
 	"github.com/buildbuddy-io/buildbuddy/enterprise/server/build_event_publisher"
-	"github.com/buildbuddy-io/buildbuddy/enterprise/server/clientidentity"
 	"github.com/buildbuddy-io/buildbuddy/enterprise/server/workflow/config"
 	"github.com/buildbuddy-io/buildbuddy/server/real_environment"
 	"github.com/buildbuddy-io/buildbuddy/server/remote_cache/cachetools"
@@ -665,7 +664,7 @@ func run() error {
 		ctx = metadata.AppendToOutgoingContext(ctx, authutil.APIKeyHeader, ws.buildbuddyAPIKey)
 	}
 	if ci := os.Getenv(clientIdentityEnvVar); ci != "" {
-		ctx = metadata.AppendToOutgoingContext(ctx, clientidentity.IdentityHeaderName, ci)
+		ctx = metadata.AppendToOutgoingContext(ctx, authutil.ClientIdentityHeaderName, ci)
 	}
 	contextWithoutTimeout := ctx
 	if *timeout != 0 {
@@ -827,6 +826,8 @@ func run() error {
 // the invocation status from being reported.
 func (ws *workspace) prepareRunnerForNextInvocation(ctx context.Context, taskWorkspaceDir string) {
 	log := ws.log
+
+	log.Printf("%s%s%s Starting cleanup", ansiGray, formatNowUTC(), ansiReset)
 
 	// After the invocation is complete, ensure that the bazel lock is not
 	// still held. If it is, avoid recycling.
@@ -1141,7 +1142,7 @@ func (ar *actionRunner) Run(ctx context.Context, ws *workspace) error {
 		})
 
 		if exitCode != noExitCode {
-			ar.reporter.Printf("%s(command exited with code %d)%s\n", ansiGray, exitCode, ansiReset)
+			ar.reporter.Printf("%s%s (command exited with code %d)%s\n", ansiGray, formatNowUTC(), exitCode, ansiReset)
 		}
 
 		// If this is a workflow, kill-signal the current process on certain
@@ -2561,7 +2562,6 @@ func runBazelWrapper() error {
 // Attempts to free up disk space.
 func (ws *workspace) reclaimDiskSpace(ctx context.Context) error {
 	// We should be in the git repo root at this point - run git gc.
-	ws.log.Printf("Running git maintenance...")
 	if err := ws.runGitMaintenance(ctx); err != nil {
 		ws.log.Printf("WARNING: git maintenance failed: %s", err)
 	}
@@ -2590,6 +2590,8 @@ func (ws *workspace) reclaimDiskSpace(ctx context.Context) error {
 // Creates a marker file that prevents the runner from being recycled if bazel
 // still has the workspace lock.
 func (ws *workspace) checkBazelWorkspaceLock(ctx context.Context) error {
+	ws.log.Printf("%s%s%s Checking Bazel workspace lock", ansiGray, formatNowUTC(), ansiReset)
+
 	var buf bytes.Buffer
 	bazelWorkspacePath, err := ws.bazelWorkspacePath()
 	if err != nil {
