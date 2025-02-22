@@ -18,6 +18,7 @@ import (
 	"github.com/buildbuddy-io/buildbuddy/server/util/status"
 	"github.com/buildbuddy-io/buildbuddy/server/util/tracing"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 
 	rfpb "github.com/buildbuddy-io/buildbuddy/proto/raft"
 	rfspb "github.com/buildbuddy-io/buildbuddy/proto/raft_service"
@@ -163,9 +164,22 @@ func (s *Sender) fetchRangeDescriptorFromMetaRange(ctx context.Context, key []by
 	return nil, status.UnavailableErrorf("Error finding range descriptor for %q", key)
 }
 
-func (s *Sender) LookupRangeDescriptor(ctx context.Context, key []byte, skipCache bool) (*rfpb.RangeDescriptor, error) {
+func (s *Sender) LookupRangeDescriptor(ctx context.Context, key []byte, skipCache bool) (returnedRD *rfpb.RangeDescriptor, returnedErr error) {
 	ctx, spn := tracing.StartSpan(ctx) // nolint:SA4006
-	defer spn.End()
+	defer func() {
+		replica_ids := []int64{}
+		for _, repl := range returnedRD.GetReplicas() {
+			replica_ids = append(replica_ids, int64(repl.GetReplicaId()))
+		}
+		replicaIDAttr := attribute.Int64Slice("replicas", replica_ids)
+		genAttr := attribute.Int("gen", int(returnedRD.GetGeneration()))
+		spn.SetAttributes(replicaIDAttr, genAttr)
+		if returnedErr != nil {
+			spn.RecordError(returnedErr)
+			spn.SetStatus(codes.Error, returnedErr.Error())
+		}
+		spn.End()
+	}()
 	if len(key) == 0 {
 		return nil, status.FailedPreconditionError("A non-nil key is required")
 	}
@@ -173,6 +187,7 @@ func (s *Sender) LookupRangeDescriptor(ctx context.Context, key []byte, skipCach
 	if rangeDescriptor == nil || skipCache {
 		rd, err := s.fetchRangeDescriptorFromMetaRange(ctx, key)
 		if err != nil {
+			spn.RecordError(err)
 			return nil, err
 		}
 		s.rangeCache.UpdateRange(rd)
@@ -269,8 +284,12 @@ func (s *Sender) TryReplicas(ctx context.Context, rd *rfpb.RangeDescriptor, fn r
 
 	logs := []string{}
 	defer func() {
-		if returnedErr != nil && len(logs) > 0 {
-			log.CtxDebug(ctx, strings.Join(logs, "\n"))
+		if returnedErr != nil {
+			spn.RecordError(returnedErr)
+			spn.SetStatus(codes.Error, returnedErr.Error())
+			if len(logs) > 0 {
+				log.CtxDebugf(ctx, "failed to TryReplicas: %s. Detailed logs: %s", returnedErr, strings.Join(logs, "\n"))
+			}
 		}
 	}()
 	for i, replica := range rd.GetReplicas() {
@@ -298,7 +317,10 @@ func (s *Sender) TryReplicas(ctx context.Context, rd *rfpb.RangeDescriptor, fn r
 		spn.SetAttributes(rangeIDAttr, replicaIDAttr)
 
 		err = fn(fnCtx, client, header)
-
+		if err != nil {
+			spn.RecordError(err)
+			spn.SetStatus(codes.Error, err.Error())
+		}
 		spn.End()
 		if err == nil {
 			return i, nil
@@ -323,7 +345,7 @@ func (s *Sender) TryReplicas(ctx context.Context, rd *rfpb.RangeDescriptor, fn r
 		}
 		return 0, err
 	}
-	return 0, status.OutOfRangeErrorf("No replicas available in range %d: %s", rd.GetRangeId(), strings.Join(logs, ","))
+	return 0, status.OutOfRangeErrorf("No replicas available in range %d", rd.GetRangeId())
 }
 
 type Options struct {
@@ -354,9 +376,15 @@ func WithConsistencyMode(mode rfpb.Header_ConsistencyMode) Option {
 // cache and try the fn again with the new replica information. If the
 // fn succeeds with the new replicas, the range cache will be updated with
 // the new ownership information.
-func (s *Sender) run(ctx context.Context, key []byte, fn runFunc, mods ...Option) error {
+func (s *Sender) run(ctx context.Context, key []byte, fn runFunc, mods ...Option) (returnedErr error) {
 	ctx, spn := tracing.StartSpan(ctx) // nolint:SA4006
-	defer spn.End()
+	defer func() {
+		if returnedErr != nil {
+			spn.RecordError(returnedErr)
+			spn.SetStatus(codes.Error, returnedErr.Error())
+		}
+		spn.End()
+	}()
 	opts := defaultOptions()
 	for _, mod := range mods {
 		mod(opts)
