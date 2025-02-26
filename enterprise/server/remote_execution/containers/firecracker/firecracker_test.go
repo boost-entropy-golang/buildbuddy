@@ -1119,6 +1119,9 @@ func TestFirecrackerSnapshotVersioning(t *testing.T) {
 }
 
 func TestFirecrackerBalloon(t *testing.T) {
+	//TODO(MAGGIE): Remove after executors with patched firecracker are released
+	t.Skip()
+
 	flags.Set(t, "executor.firecracker_enable_balloon", true)
 	ctx := context.Background()
 
@@ -1197,6 +1200,9 @@ free -h
 }
 
 func TestFirecrackerBalloon_DecreasesMemorySnapshotSize(t *testing.T) {
+	//TODO(MAGGIE): Remove after executors with patched firecracker are released
+	t.Skip()
+
 	ctx := context.Background()
 
 	// execAndPause runs a memory intensive command in a VM and saves the snapshot.
@@ -1499,6 +1505,42 @@ func TestSnapshotAndResumeWithNetwork(t *testing.T) {
 
 	err = c.Pause(ctx)
 	require.NoError(t, err)
+}
+
+func TestFirecrackerRunWithNetworkPooling(t *testing.T) {
+	ctx := context.Background()
+	env := getTestEnv(ctx, t, envOpts{})
+	rootDir := testfs.MakeTempDir(t)
+	workDir := testfs.MakeDirAll(t, rootDir, "work")
+
+	networkPool := networking.NewVMNetworkPool(-1 /*use default size limit*/)
+	t.Cleanup(func() {
+		err := networkPool.Shutdown(ctx)
+		require.NoError(t, err)
+	})
+
+	for range 3 {
+		googleDNS := "8.8.8.8"
+		cmd := &repb.Command{Arguments: []string{"ping", "-c1", googleDNS}}
+		opts := firecracker.ContainerOpts{
+			ContainerImage:         busyboxImage,
+			ActionWorkingDirectory: workDir,
+			VMConfiguration: &fcpb.VMConfiguration{
+				NumCpus:           1,
+				MemSizeMb:         1000,
+				EnableNetworking:  true,
+				ScratchDiskSizeMb: 100,
+			},
+			ExecutorConfig: getExecutorConfig(t),
+			NetworkPool:    networkPool,
+		}
+		c, err := firecracker.NewContainer(ctx, env, &repb.ExecutionTask{}, opts)
+		require.NoError(t, err)
+		res := c.Run(ctx, cmd, opts.ActionWorkingDirectory, oci.Credentials{})
+		require.NoError(t, err)
+		assert.Equal(t, 0, res.ExitCode)
+		assert.Contains(t, string(res.Stdout), "64 bytes from "+googleDNS)
+	}
 }
 
 func TestFirecrackerRun_ReapOrphanedZombieProcess(t *testing.T) {
