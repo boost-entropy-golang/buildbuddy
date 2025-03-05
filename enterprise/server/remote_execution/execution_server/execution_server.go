@@ -17,6 +17,7 @@ import (
 	"github.com/buildbuddy-io/buildbuddy/enterprise/server/remote_execution/platform"
 	"github.com/buildbuddy-io/buildbuddy/enterprise/server/tasksize"
 	"github.com/buildbuddy-io/buildbuddy/enterprise/server/util/execution"
+	"github.com/buildbuddy-io/buildbuddy/proto/invocation_status"
 	"github.com/buildbuddy-io/buildbuddy/server/environment"
 	"github.com/buildbuddy-io/buildbuddy/server/interfaces"
 	"github.com/buildbuddy-io/buildbuddy/server/metrics"
@@ -1180,10 +1181,13 @@ func (s *ExecutionServer) cacheActionResult(ctx context.Context, actionResourceN
 func (s *ExecutionServer) markTaskComplete(ctx context.Context, actionResourceName *digest.ResourceName, executeResponse *repb.ExecuteResponse, action *repb.Action, cmd *repb.Command, properties *platform.Properties) error {
 	execErr := gstatus.ErrorProto(executeResponse.GetStatus())
 	router := s.env.GetTaskRouter()
-	// Only update the router if a task was actually executed
-	if execErr == nil && router != nil && !executeResponse.GetCachedResult() {
+	if router != nil && !executeResponse.GetCachedResult() {
 		executorHostID := executeResponse.GetResult().GetExecutionMetadata().GetWorker()
-		router.MarkComplete(ctx, action, cmd, actionResourceName.GetInstanceName(), executorHostID)
+		if execErr == nil && executeResponse.GetResult().GetExitCode() == 0 {
+			router.MarkSucceeded(ctx, action, cmd, actionResourceName.GetInstanceName(), executorHostID)
+		} else {
+			router.MarkFailed(ctx, action, cmd, actionResourceName.GetInstanceName(), executorHostID)
+		}
 	}
 
 	// Skip sizer and usage updates for teed work.
@@ -1349,7 +1353,45 @@ func (s *ExecutionServer) Cancel(ctx context.Context, invocationID string) error
 		}
 	}
 	log.CtxInfof(ctx, "Cancelled %d executions for invocation %s", numCancelled, invocationID)
+
+	if numCancelled > 0 {
+		inv, err := s.markInvocationAsDisconnected(ctx, invocationID)
+		if err != nil {
+			return status.WrapErrorf(err, "Could not mark invocation %q as disconnected", invocationID)
+		}
+
+		childrenInvocationIDs, err := s.env.GetInvocationDB().LookupChildInvocations(ctx, inv.RunID)
+		if err != nil {
+			return err
+		}
+		for _, childIID := range childrenInvocationIDs {
+			if _, err := s.markInvocationAsDisconnected(ctx, childIID); err != nil {
+				return status.WrapErrorf(err, "Could not mark child invocation %q as disconnected", childIID)
+			}
+		}
+	}
+
 	return nil
+}
+
+func (s *ExecutionServer) markInvocationAsDisconnected(ctx context.Context, invocationID string) (*tables.Invocation, error) {
+	inv, err := s.env.GetInvocationDB().LookupInvocation(ctx, invocationID)
+	if err != nil {
+		return nil, err
+	}
+
+	// If the invocation has completed in the meantime, don't overwrite its
+	// completed status.
+	if inv.InvocationStatus == int64(invocation_status.InvocationStatus_PARTIAL_INVOCATION_STATUS) {
+		if _, err := s.env.GetInvocationDB().UpdateInvocation(ctx, &tables.Invocation{
+			InvocationID:     invocationID,
+			Attempt:          inv.Attempt,
+			InvocationStatus: int64(invocation_status.InvocationStatus_DISCONNECTED_INVOCATION_STATUS),
+		}); err != nil {
+			return nil, err
+		}
+	}
+	return inv, nil
 }
 
 func (s *ExecutionServer) executionIDs(ctx context.Context, invocationID string) ([]string, error) {
