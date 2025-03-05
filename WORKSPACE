@@ -190,7 +190,7 @@ load("@io_bazel_rules_go//go:deps.bzl", "go_download_sdk", "go_register_nogo", "
 
 go_rules_dependencies()
 
-GO_SDK_VERSION = "1.23.6"
+GO_SDK_VERSION = "1.24.1"
 
 # Register multiple Go SDKs so that we can perform cross-compilation remotely.
 # i.e. We might want to trigger a Linux AMD64 Go build remotely from a MacOS ARM64 laptop.
@@ -558,12 +558,12 @@ buildbuddy(
     name = "buildbuddy_toolchain",
     container_image = UBUNTU20_04_IMAGE,
     # This is the MSVC available on Github Action win22 image
-    # https://github.com/actions/runner-images/blob/win22/20250127.1/images/windows/Windows2022-Readme.md
+    # https://github.com/actions/runner-images/blob/win22/20250303.1/images/windows/Windows2022-Readme.md
     msvc_edition = "Enterprise",
     msvc_release = "2022",
     # From 'Microsoft Visual C++ 2022 Minimum Runtime' for x64 architecture
-    # https://github.com/actions/runner-images/blob/win22/20250127.1/images/windows/Windows2022-Readme.md#microsoft-visual-c
-    msvc_version = "14.42.34433",
+    # https://github.com/actions/runner-images/blob/win22/20250303.1/images/windows/Windows2022-Readme.md#microsoft-visual-c
+    msvc_version = "14.43.34808",
 )
 
 http_archive(
