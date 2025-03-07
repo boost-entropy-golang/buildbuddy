@@ -115,7 +115,7 @@ const (
 	//
 	// NOTE: this is part of the snapshot cache key, so bumping this version
 	// will make existing cached snapshots unusable.
-	GuestAPIVersion = "15"
+	GuestAPIVersion = "16"
 
 	// How long to wait when dialing the vmexec server inside the VM.
 	vSocketDialTimeout = 60 * time.Second
@@ -2905,7 +2905,11 @@ func (c *FirecrackerContainer) VMConfig() *fcpb.VMConfiguration {
 }
 
 func (c *FirecrackerContainer) isBalloonEnabled() bool {
-	return *snaputil.EnableBalloon && c.recyclingEnabled
+	// The balloon is intended to reduce memory snapshot size. If recycling is not
+	// enabled and we don't plan to generate a snapshot, don't enable it.
+	// Also disable the balloon for firecracker actions with local-only-snapshot-sharing
+	// (i.e. not workflows), as there seems to be negative performance implications.
+	return *snaputil.EnableBalloon && c.recyclingEnabled && c.supportsRemoteSnapshots
 }
 
 // machineHasBalloon returns whether a balloon was initialized in a machine.
