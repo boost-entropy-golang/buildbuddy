@@ -26,8 +26,6 @@ on:
 jobs:
   build:
     runs-on: macos-13
-    env:
-
     steps:
       - name: Checkout
         uses: actions/checkout@v3
@@ -46,7 +44,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           DEVELOPER_DIR: /Library/Developer/CommandLineTools
           GO_REPOSITORY_USE_HOST_CACHE: 1
-          GOMODCACHE: /home/runner/go-mod-cache
+          GOMODCACHE: $HOME/go-mod-cache
         run: |
           bazelisk build \
             --config=release-mac \
