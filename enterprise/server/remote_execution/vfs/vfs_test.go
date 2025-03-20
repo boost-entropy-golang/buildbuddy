@@ -16,6 +16,7 @@ import (
 	"github.com/buildbuddy-io/buildbuddy/server/testutil/testfs"
 	"github.com/buildbuddy-io/buildbuddy/server/util/log"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/sys/unix"
 
 	repb "github.com/buildbuddy-io/buildbuddy/proto/remote_execution"
 )
@@ -340,19 +341,25 @@ func TestSymlinks(t *testing.T) {
 }
 
 type rawStats struct {
-	Ino   uint64
-	Nlink uint64
-	Atime time.Time
-	Mtime time.Time
+	Ino       uint64
+	Nlink     uint64
+	Atime     time.Time
+	Mtime     time.Time
+	Blocks    int64
+	BlockSize int64
+	Size      int64
 }
 
 func toRawStats(fi fs.FileInfo) *rawStats {
 	rs := fi.Sys().(*syscall.Stat_t)
 	return &rawStats{
-		Ino:   rs.Ino,
-		Nlink: rs.Nlink,
-		Mtime: time.Unix(rs.Mtim.Sec, rs.Mtim.Nsec),
-		Atime: time.Unix(rs.Atim.Sec, rs.Atim.Nsec),
+		Ino:       rs.Ino,
+		Nlink:     rs.Nlink,
+		Mtime:     time.Unix(rs.Mtim.Sec, rs.Mtim.Nsec),
+		Atime:     time.Unix(rs.Atim.Sec, rs.Atim.Nsec),
+		Blocks:    rs.Blocks,
+		BlockSize: rs.Blksize,
+		Size:      rs.Size,
 	}
 }
 
@@ -442,6 +449,46 @@ func TestHardlinks(t *testing.T) {
 	require.Equal(t, testContents, string(bs))
 }
 
+func TestSparseFile(t *testing.T) {
+	fsPath := setupVFS(t)
+	sparseFile := filepath.Join(fsPath, "sparse")
+
+	f, err := os.Create(sparseFile)
+	require.NoError(t, err)
+	err = f.Close()
+	require.NoError(t, err)
+
+	// Extend the file length, should be all holes at this point.
+	err = syscall.Truncate(sparseFile, 65535)
+	require.NoError(t, err)
+
+	f, err = os.OpenFile(sparseFile, os.O_RDWR, 0644)
+	require.NoError(t, err)
+	defer f.Close()
+
+	// No data yet, so we should get back an ENXIO error.
+	_, err = f.Seek(0, unix.SEEK_DATA)
+	require.ErrorIs(t, err, syscall.ENXIO)
+
+	// Verify file is not using any data on disk.
+	rs := rawStat(t, sparseFile)
+	require.EqualValues(t, 0, rs.Blocks)
+
+	// Write some data at an offset and verify that we can find it using seek.
+	dataOff := rs.BlockSize
+	_, err = f.WriteAt([]byte("z"), dataOff)
+	require.NoError(t, err)
+	off, err := f.Seek(0, unix.SEEK_DATA)
+	require.NoError(t, err)
+	require.EqualValues(t, dataOff, off)
+
+	// Verify that only one block is reported as being used.
+	// N.B. Stat always reports in 512 byte blocks so we need to convert to
+	// BlockSize blocks.
+	rs = rawStat(t, sparseFile)
+	require.EqualValues(t, 1, (rs.Blocks*512)/rs.BlockSize)
+}
+
 func TestTimestamps(t *testing.T) {
 	fsPath := setupVFS(t)
 
@@ -509,4 +556,36 @@ func TestTimestamps(t *testing.T) {
 	rs = rawStat(t, testFilePath)
 	require.Equal(t, oldMTime, rs.Mtime)
 	require.Greater(t, rs.Atime, rs.Mtime)
+}
+
+func TestSetAttr(t *testing.T) {
+	fsPath := setupVFS(t)
+
+	testFile := "hello.txt"
+	testFilePath := filepath.Join(fsPath, testFile)
+	err := os.WriteFile(testFilePath, []byte("a"), 0644)
+	require.NoError(t, err)
+
+	// Create a hard link to test link count.
+	err = os.Link(testFilePath, testFilePath+".clone")
+	require.NoError(t, err)
+
+	err = os.Chmod(testFilePath, 0755)
+	require.NoError(t, err)
+
+	err = syscall.Truncate(testFilePath, 1000)
+	require.NoError(t, err)
+
+	// Try linking again to verify nlink was correctly  returned in the
+	// SetAttr call. Stat below calls GetAttr which does not exercise the attrs
+	// returned by SetAttr.
+	// This is a regression test for a previous issue where we were not setting
+	// nlink in the attrs returned by SetAttr.
+	err = os.Link(testFilePath, testFilePath+".clone2")
+	require.NoError(t, err)
+
+	rs := rawStat(t, testFilePath)
+	require.EqualValues(t, 3, rs.Nlink)
+	require.EqualValues(t, rs.BlockSize/512, rs.Blocks)
+	require.EqualValues(t, 1000, rs.Size)
 }
