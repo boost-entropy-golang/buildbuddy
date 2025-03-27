@@ -713,19 +713,15 @@ func (ws *workflowService) enableExtraKytheIndexingAction(ctx context.Context, g
 }
 
 func (ws *workflowService) getRepositoryWorkflow(ctx context.Context, groupID string, repoURL *gitutil.RepoURL) (*repositoryWorkflow, error) {
-	gh := ws.env.GetGitHubAppService()
-	if gh == nil {
-		return nil, status.UnimplementedError("No GitHub app configured")
-	}
-	app, err := gh.GetGitHubApp(ctx)
-	if err != nil {
-		return nil, err
+	app := ws.env.GetGitHubApp()
+	if app == nil {
+		return nil, status.UnimplementedError("GitHub App is not configured")
 	}
 	if err := authutil.AuthorizeGroupAccess(ctx, ws.env, groupID); err != nil {
 		return nil, err
 	}
 	gitRepository := &tables.GitRepository{}
-	err = ws.env.GetDBHandle().NewQuery(ctx, "workflow_service_get_for_repo").Raw(`
+	err := ws.env.GetDBHandle().NewQuery(ctx, "workflow_service_get_for_repo").Raw(`
 		SELECT *
 		FROM "GitRepositories"
 		WHERE group_id = ?
@@ -832,15 +828,9 @@ func (ws *workflowService) buildActionHistoryQuery(ctx context.Context, repoUrl 
 func (ws *workflowService) GetWorkflowHistory(ctx context.Context) (*wfpb.GetWorkflowHistoryResponse, error) {
 	if ws.env.GetDBHandle() == nil || ws.env.GetOLAPDBHandle() == nil {
 		return nil, status.FailedPreconditionError("database not configured")
-	} else if ws.env.GetGitHubAppService() == nil {
-		return nil, status.FailedPreconditionError("GitHub app service not enabled")
-	}
-	gh := ws.env.GetGitHubAppService()
-	if gh == nil {
-		return nil, status.UnimplementedError("No GitHub app configured")
 	}
 
-	linkedRepos, err := gh.GetLinkedGitHubRepos(ctx)
+	linkedRepos, err := ws.env.GetGitHubApp().GetLinkedGitHubRepos(ctx)
 	if err != nil {
 		return nil, err
 	}
