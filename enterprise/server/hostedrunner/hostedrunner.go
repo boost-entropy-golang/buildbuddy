@@ -97,11 +97,7 @@ func (r *runnerService) createAction(ctx context.Context, req *rnpb.RunRequest, 
 			return nil, status.WrapError(err, "upload patch")
 		}
 		rn := digest.NewCASResourceName(patchDigest, req.GetInstanceName(), repb.DigestFunction_BLAKE3)
-		uri, err := rn.DownloadString()
-		if err != nil {
-			return nil, status.WrapError(err, "patch download string")
-		}
-		patchURIs = append(patchURIs, uri)
+		patchURIs = append(patchURIs, rn.DownloadString())
 	}
 
 	repoURL := req.GetGitRepo().GetRepoUrl()
@@ -329,11 +325,14 @@ func (r *runnerService) credentialEnvOverrides(ctx context.Context, req *rnpb.Ru
 }
 
 func (r *runnerService) getGitToken(ctx context.Context, repoURL string) (string, error) {
-	app := r.env.GetGitHubApp()
-	if app == nil {
-		return "", status.UnimplementedError("GitHub App is not configured")
+	gh := r.env.GetGitHubAppService()
+	if gh == nil {
+		return "", status.UnimplementedError("Not implemented")
 	}
-
+	app, err := gh.GetGitHubApp(ctx)
+	if err != nil {
+		return "", err
+	}
 	u, err := r.env.GetAuthenticator().AuthenticatedUser(ctx)
 	if err != nil {
 		return "", err

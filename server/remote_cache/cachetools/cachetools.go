@@ -69,12 +69,8 @@ func getBlob(ctx context.Context, bsClient bspb.ByteStreamClient, r *digest.CASR
 		return nil
 	}
 
-	downloadString, err := r.DownloadString()
-	if err != nil {
-		return err
-	}
 	req := &bspb.ReadRequest{
-		ResourceName: downloadString,
+		ResourceName: r.DownloadString(),
 	}
 	stream, err := bsClient.Read(ctx, req)
 	if err != nil {
@@ -254,10 +250,6 @@ func uploadFromReader(ctx context.Context, bsClient bspb.ByteStreamClient, r *di
 	if r.IsEmpty() {
 		return r.GetDigest(), 0, nil
 	}
-	resourceName, err := r.UploadString()
-	if err != nil {
-		return nil, 0, err
-	}
 	stream, err := bsClient.Write(ctx)
 	if err != nil {
 		return nil, 0, err
@@ -278,6 +270,7 @@ func uploadFromReader(ctx context.Context, bsClient bspb.ByteStreamClient, r *di
 	buf := make([]byte, uploadBufSizeBytes)
 	bytesUploaded := int64(0)
 	sender := rpcutil.NewSender[*bspb.WriteRequest](ctx, stream)
+	resourceName := r.NewUploadString()
 	for {
 		n, err := rc.Read(buf)
 		if err != nil && err != io.EOF {
@@ -458,7 +451,7 @@ func GetBlobAsProto(ctx context.Context, bsClient bspb.ByteStreamClient, r *dige
 	return proto.Unmarshal(buf.Bytes(), out)
 }
 
-func readProtoFromCache(ctx context.Context, cache interfaces.Cache, r *digest.CASResourceName, out proto.Message) error {
+func ReadProtoFromCache(ctx context.Context, cache interfaces.Cache, r *digest.CASResourceName, out proto.Message) error {
 	data, err := cache.Get(ctx, r.ToProto())
 	if err != nil {
 		if gstatus.Code(err) == gcodes.NotFound {
@@ -467,12 +460,6 @@ func readProtoFromCache(ctx context.Context, cache interfaces.Cache, r *digest.C
 		return err
 	}
 	return proto.Unmarshal(data, out)
-}
-
-func ReadProtoFromCAS(ctx context.Context, cache interfaces.Cache, d *digest.CASResourceName, out proto.Message) error {
-	// TODO: Check whether this is intentionally creating a partial copy of d.
-	casRN := digest.NewCASResourceName(d.GetDigest(), d.GetInstanceName(), d.GetDigestFunction())
-	return readProtoFromCache(ctx, cache, casRN, out)
 }
 
 func UploadBytesToCache(ctx context.Context, cache interfaces.Cache, cacheType rspb.CacheType, remoteInstanceName string, digestFunction repb.DigestFunction_Value, in io.ReadSeeker) (*repb.Digest, error) {
