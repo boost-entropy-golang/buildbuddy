@@ -412,9 +412,6 @@ func (s *Store) preloadRegistry(ctx context.Context) error {
 					continue
 				}
 				s.registry.AddNode(conn.GetNhid(), conn.GetRaftAddress(), conn.GetGrpcAddress())
-				for _, replica := range conn.GetReplicas() {
-					s.registry.Add(replica.GetRangeId(), replica.GetReplicaId(), conn.GetNhid())
-				}
 			}
 			return nil
 		})
@@ -1027,7 +1024,7 @@ func (s *Store) isLeader(rangeID uint64, replicaID uint64) bool {
 }
 
 func (s *Store) GetRegistry(ctx context.Context, req *rfpb.GetRegistryRequest) (*rfpb.GetRegistryResponse, error) {
-	connections := s.registry.List()
+	connections := s.registry.ListNodes()
 	return &rfpb.GetRegistryResponse{
 		Connections: connections,
 	}, nil
@@ -2240,6 +2237,8 @@ func (j *nonVoterZombieJanitor) checkRepl(ctx context.Context, repl *replica.Rep
 			})
 			if err != nil {
 				return status.WrapErrorf(err, "failed to remove non-voter replica c%dn%d", rangeID, replicaID)
+			} else {
+				log.Infof("successfully removed non-voter c%dn%d", rangeID, replicaID)
 			}
 		} else {
 			j.lastDetectedAt[key] = j.clock.Now()
@@ -2314,7 +2313,10 @@ func (w *deleteSessionWorker) deleteSessions(ctx context.Context, repl *replica.
 	}
 	w.lastExecutionTime.Store(rd.GetRangeId(), now)
 	_, err = rbuilder.NewBatchResponseFromProto(rsp).DeleteSessionsResponse(0)
-	return status.InternalErrorf("unable to delete sessions for rangeID=%d: DeleteSessions fails: %s", rd.GetRangeId(), err)
+	if err != nil {
+		return status.InternalErrorf("unable to delete sessions for rangeID=%d: deleteSessions fails: %s", rd.GetRangeId(), err)
+	}
+	return nil
 }
 
 func (s *Store) SplitRange(ctx context.Context, req *rfpb.SplitRangeRequest) (*rfpb.SplitRangeResponse, error) {
