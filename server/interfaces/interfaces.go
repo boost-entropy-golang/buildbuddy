@@ -1691,17 +1691,16 @@ type TransferTimer interface {
 type HitTracker interface {
 	SetExecutedActionMetadata(md *repb.ExecutedActionMetadata)
 	TrackMiss(d *repb.Digest) error
-	TrackEmptyHit() error
 	TrackDownload(d *repb.Digest) TransferTimer
 	TrackUpload(d *repb.Digest) TransferTimer
 }
 
 type HitTrackerFactory interface {
 	// Creates a new HitTracker for tracking Action Cache hits.
-	NewACHitTracker(ctx context.Context, invocationID string) HitTracker
+	NewACHitTracker(ctx context.Context, requestMetadata *repb.RequestMetadata) HitTracker
 
 	// Creates a new HitTracker for tracking ByteStream/CAS hits.
-	NewCASHitTracker(ctx context.Context, invocationID string) HitTracker
+	NewCASHitTracker(ctx context.Context, requestMetadata *repb.RequestMetadata) HitTracker
 }
 
 // ExperimentFlagProvider can be use for getting a flag value for a request to
